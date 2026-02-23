@@ -60,6 +60,11 @@ static int (*orig_uname)(struct utsname *buf);
 static int (*orig_access)(const char *pathname, int mode);
 static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
+// Phase 3 Originals
+typedef int (*orig_DrmGetProperty_t)(void*, const char*, char*, size_t*);
+static orig_DrmGetProperty_t orig_DrmGetProperty;
+static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+
 // Sensor Structures
 typedef struct {
     int32_t version; int32_t sensor; int32_t type; int32_t reserved0;
@@ -216,6 +221,45 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 }
 
 // -----------------------------------------------------------------------------
+// Phase 3 Hooks & Helpers
+// -----------------------------------------------------------------------------
+
+std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
+    std::string out;
+    for(int i = 0; i < 8; ++i) {
+        out += "processor\t: " + std::to_string(i) + "\n";
+        out += "BogoMIPS\t: 26.00\n";
+        out += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\n";
+        out += "CPU implementer\t: 0x41\n";
+        out += "CPU architecture: 8\n\n";
+    }
+    out += "Hardware\t: " + std::string(fp.hardware) + "\n";
+    out += "Revision\t: 0000\n";
+    out += "Serial\t\t: 0000000000000000\n";
+    return out;
+}
+
+int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
+    if (name && strcmp(name, "deviceUniqueId") == 0) {
+        auto rawId = vortex::engine::generateWidevineBytes(g_masterSeed);
+        if (*size >= 16) {
+            memcpy(value, rawId.data(), 16);
+            *size = 16;
+            return 0;
+        }
+    }
+    return orig_DrmGetProperty(self, name, value, size);
+}
+
+ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    if (pathname && (strcasestr(pathname, "magisk") || strcasestr(pathname, "vortex") || strcasestr(pathname, "zygisk"))) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_readlinkat(dirfd, pathname, buf, bufsiz);
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
 int my_system_property_get(const char *key, char *value) {
@@ -304,7 +348,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
         if (type == PROC_VERSION) {
             content = "Linux version 4.19.113-vortex (builder@vortex) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
         } else if (type == PROC_CPUINFO) {
-            content = "Processor\t: AArch64 (vortex)\nHardware\t: " + std::string(fp.hardware) + "\n";
+            content = generateMulticoreCpuInfo(fp);
         } else if (type == USB_SERIAL) {
             static std::string serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
             content = serial + "\n";
@@ -436,6 +480,12 @@ public:
         DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
         DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
         DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+
+        // Phase 3 Hooks: Final Seal
+        void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
+        if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
+
+        DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
