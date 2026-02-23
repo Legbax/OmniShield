@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <sys/time.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
@@ -16,6 +18,12 @@
 #include <algorithm>
 #include <chrono>
 #include <random>
+#include <time.h>
+#include <sys/utsname.h>
+#include <ifaddrs.h>
+#include <linux/if_packet.h>
+#include <sys/socket.h>
+#include <errno.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -35,6 +43,7 @@ static bool g_enableJitter = true;
 // FD Tracking
 enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT };
 static std::map<int, FileType> g_fdMap;
+static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::mutex g_fdMutex;
 
 // Original Pointers
@@ -42,6 +51,14 @@ static int (*orig_system_property_get)(const char *key, char *value);
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
 static int (*orig_close)(int fd);
+
+// Phase 2 Originals
+#define EGL_VENDOR 0x3053
+static const char* (*orig_eglQueryString)(void* display, int name);
+static int (*orig_clock_gettime)(clockid_t clockid, struct timespec *tp);
+static int (*orig_uname)(struct utsname *buf);
+static int (*orig_access)(const char *pathname, int mode);
+static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Sensor Structures
 typedef struct {
@@ -54,7 +71,10 @@ typedef struct ASensorEventQueue ASensorEventQueue;
 static ssize_t (*orig_ASensorEventQueue_getEvents)(ASensorEventQueue* queue, ASensorEvent* events, size_t count);
 
 // SSL Pointers
+typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
+static int (*orig_SSL_CTX_set_ciphersuites)(SSL_CTX *ctx, const char *str);
+static int (*orig_SSL_set1_tls13_ciphersuites)(SSL *ssl, const char *str);
 static int (*orig_SSL_set_cipher_list)(SSL *ssl, const char *str);
 
 // GL Pointers
@@ -67,6 +87,14 @@ static const GLubyte* (*orig_glGetString)(GLenum name);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jobject, jobject, jstring);
+
+// Helper
+inline std::string toLowerStr(const char* s) {
+    if (!s) return "";
+    std::string res = s;
+    std::transform(res.begin(), res.end(), res.begin(), [](unsigned char c){ return std::tolower(c); });
+    return res;
+}
 
 // Config
 void readConfig() {
@@ -91,10 +119,100 @@ void readConfig() {
 }
 
 bool shouldHide(const char* str) {
-    if (!str) return false;
-    std::string s = str;
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    if (!str || str[0] == '\0') return false;
+    std::string s = toLowerStr(str);
+
+    if (VORTEX_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
+        std::vector<std::string> legitimate = {
+            toLowerStr(fp.hardware), toLowerStr(fp.hardwareChipname), toLowerStr(fp.boardPlatform)
+        };
+        for (const auto& leg : legitimate) {
+            if (!leg.empty() && s.find(leg) != std::string::npos) return false;
+        }
+    }
     return s.find("mediatek") != std::string::npos || s.find("mt67") != std::string::npos || s.find("lancelot") != std::string::npos;
+}
+
+// -----------------------------------------------------------------------------
+// Phase 2 Hooks
+// -----------------------------------------------------------------------------
+
+// 1. EGL Spoofing
+const char* my_eglQueryString(void* display, int name) {
+    if (name == EGL_VENDOR && VORTEX_PROFILES.count(g_currentProfileName)) {
+        return VORTEX_PROFILES.at(g_currentProfileName).gpuVendor;
+    }
+    return orig_eglQueryString(display, name);
+}
+
+// 2. Uptime Spoofing
+int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
+    int ret = orig_clock_gettime(clockid, tp);
+    // Solo modificamos relojes de uptime de sistema
+    if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
+        // Offset determinista: Base de 3 días (259200s) + hasta 12 días extra según semilla
+        long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
+        tp->tv_sec += added_uptime_seconds;
+    }
+    return ret;
+}
+
+// 3. Kernel Identity
+int my_uname(struct utsname *buf) {
+    int ret = orig_uname(buf);
+    if (ret == 0 && buf != nullptr) {
+        strcpy(buf->machine, "aarch64");
+        strcpy(buf->nodename, "localhost");
+        strcpy(buf->release, "4.19.113-vortex"); // Coherente con VFS
+        strcpy(buf->version, "#1 SMP PREEMPT");
+    }
+    return ret;
+}
+
+// 4. Deep VFS (Root Hiding)
+int my_access(const char *pathname, int mode) {
+    if (pathname != nullptr) {
+        // strcasestr no asigna memoria, garantizando rendimiento en hot-paths
+        if (strcasestr(pathname, "magisk") ||
+            strcasestr(pathname, "lsposed") ||
+            strcasestr(pathname, "twres") ||
+            strcasestr(pathname, "zygisk") ||
+            strcasestr(pathname, "vortex")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_access(pathname, mode);
+}
+
+// 5. Network Interfaces (Layer 2)
+int my_getifaddrs(struct ifaddrs **ifap) {
+    int ret = orig_getifaddrs(ifap);
+    if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
+        struct ifaddrs *ifa = *ifap;
+        while (ifa) {
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
+                struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
+
+                // Validación de seguridad contra punteros nulos
+                if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
+                    std::string brand = VORTEX_PROFILES.count(g_currentProfileName) ?
+                                        VORTEX_PROFILES.at(g_currentProfileName).brand : "default";
+                    std::string mac_str = vortex::engine::generateRandomMac(brand, g_masterSeed + 50);
+
+                    // Sobrescribir bytes reales
+                    unsigned int mac[6];
+                    if (sscanf(mac_str.c_str(), "%x:%x:%x:%x:%x:%x",
+                        &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+                        for(int i = 0; i < 6; ++i) s->sll_addr[i] = (unsigned char)mac[i];
+                    }
+                }
+            }
+            ifa = ifa->ifa_next;
+        }
+    }
+    return ret;
 }
 
 // -----------------------------------------------------------------------------
@@ -113,6 +231,9 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.product.brand") replacement = fp.brand;
         else if (k == "ro.product.manufacturer") replacement = fp.manufacturer;
         else if (k == "ro.product.device") replacement = fp.device;
+        else if (k == "ro.product.name") replacement = fp.product;
+        else if (k == "ro.hardware") replacement = fp.hardware;
+        else if (k == "ro.board.platform") replacement = fp.boardPlatform;
         else if (k == "ro.build.fingerprint") replacement = fp.fingerprint;
         else if (k == "ro.build.id") replacement = fp.buildId;
         else if (k == "ro.serialno" || k == "ro.boot.serialno") {
@@ -157,20 +278,24 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         if (type != NONE) {
             std::lock_guard<std::mutex> lock(g_fdMutex);
             g_fdMap[fd] = type;
+            g_fdOffsetMap[fd] = 0;
         }
     }
     return fd;
 }
 
 int my_close(int fd) {
-    { std::lock_guard<std::mutex> lock(g_fdMutex); g_fdMap.erase(fd); }
-    if (orig_close) return orig_close(fd);
-    return close(fd);
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        g_fdMap.erase(fd);
+        g_fdOffsetMap.erase(fd);
+    }
+    return orig_close ? orig_close(fd) : close(fd);
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
     FileType type = NONE;
-    { std::lock_guard<std::mutex> lock(g_fdMutex); if (g_fdMap.count(fd)) type = g_fdMap[fd]; }
+    { std::lock_guard<std::mutex> lock(g_fdMutex); if(g_fdMap.count(fd)) type = g_fdMap[fd]; }
 
     if (type != NONE && VORTEX_PROFILES.count(g_currentProfileName)) {
         const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
@@ -192,10 +317,15 @@ ssize_t my_read(int fd, void *buf, size_t count) {
             content = vortex::engine::generateBatteryVoltage(g_masterSeed) + "\n";
         }
 
-        size_t len = content.size();
-        if (count < len) len = count;
-        memcpy(buf, content.c_str(), len);
-        return len;
+        std::lock_guard<std::mutex> lock(g_fdMutex); // Evita Race Conditions
+        size_t current_offset = g_fdOffsetMap[fd];
+        if (current_offset >= content.size()) return 0; // EOF real
+
+        size_t available = content.size() - current_offset;
+        size_t toRead = std::min(count, available);
+        memcpy(buf, content.c_str() + current_offset, toRead);
+        g_fdOffsetMap[fd] += toRead;
+        return toRead;
     }
     return orig_read(fd, buf, count);
 }
@@ -206,8 +336,10 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* events, size_t count) {
     ssize_t ret = orig_ASensorEventQueue_getEvents(queue, events, count);
     if (ret > 0 && g_enableJitter) {
-        static std::mt19937 gen(g_masterSeed);
-        static std::uniform_real_distribution<float> dist(-0.0001f, 0.0001f);
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        long dynSeed = g_masterSeed ^ (ts.tv_nsec >> 10);
+        std::mt19937 gen(dynSeed);
+        std::uniform_real_distribution<float> dist(-0.002f, 0.002f);
         for (ssize_t i = 0; i < ret; ++i) {
             if (events[i].type == 1 || events[i].type == 4 || events[i].type == 2) {
                 events[i].data[0] += dist(gen);
@@ -222,10 +354,9 @@ ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* e
 // -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
-int my_SSL_set_cipher_list(SSL *ssl, const char *str) {
-    std::string spoofed = vortex::engine::generateJA3CipherSuites(g_masterSeed);
-    return orig_SSL_set_cipher_list(ssl, spoofed.c_str());
-}
+int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, vortex::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, vortex::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, vortex::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
 
 // -----------------------------------------------------------------------------
 // Hooks: GPU
@@ -235,7 +366,7 @@ const GLubyte* my_glGetString(GLenum name) {
         const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
         if (name == GL_VENDOR) return (const GLubyte*)fp.gpuVendor;
         if (name == GL_RENDERER) return (const GLubyte*)fp.gpuRenderer;
-        if (name == GL_VERSION) return (const GLubyte*)fp.gpuVersion;
+        if (name == GL_VERSION) return (const GLubyte*)vortex::engine::getGlVersionForProfile(fp);
     }
     return orig_glGetString(name);
 }
@@ -256,7 +387,6 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
     return orig_SettingsSecure_getString(env, thiz, resolver, name);
 }
 
-
 // -----------------------------------------------------------------------------
 // Hooks: Widevine (JNI Bridge)
 // -----------------------------------------------------------------------------
@@ -270,9 +400,14 @@ jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jp
         return jarray;
     }
     env->ReleaseStringUTFChars(jprop, prop);
-    // Aquí deberíamos llamar al original, pero en JNI nativo se suele buscar el método de la superclase
     return nullptr;
 }
+
+jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) { return env->NewStringUTF(vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId).c_str()); }
+jstring JNICALL my_getSubscriberId(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generateValidImsi(g_currentProfileName, g_masterSeed + subId).c_str()); }
+jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generateValidIccid(g_currentProfileName, g_masterSeed + subId + 100).c_str()); }
+jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str()); }
+
 
 // -----------------------------------------------------------------------------
 // Module Main
@@ -287,26 +422,50 @@ public:
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
-        // Libc Hooks
+        // Libc Hooks (Phase 1)
         DobbyHook((void*)__system_property_get, (void*)my_system_property_get, (void**)&orig_system_property_get);
         DobbyHook((void*)open, (void*)my_open, (void**)&orig_open);
         DobbyHook((void*)read, (void*)my_read, (void**)&orig_read);
         DobbyHook((void*)close, (void*)my_close, (void**)&orig_close);
 
+        // Phase 2 Hooks: Deep Phantom
+        void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
+        if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
+
+        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
+        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
+        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
         if (sensor_func) DobbyHook(sensor_func, (void*)my_ASensorEventQueue_getEvents, (void**)&orig_ASensorEventQueue_getEvents);
 
-        // Network Hooks
-        void* ssl_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
-        if (ssl_func) DobbyHook(ssl_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
+        // Network Hooks (TLS 1.2 & 1.3)
+        void* ssl12_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
+        if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
+
+        void* ssl13_ctx_func = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
+        if (ssl13_ctx_func) DobbyHook(ssl13_ctx_func, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
+
+        void* ssl13_ssl_func = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
+        if (ssl13_ssl_func) DobbyHook(ssl13_ssl_func, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
 
         // GPU Hooks
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
 
-        // Sellar Settings.Secure (Android ID)
-        void* settings_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring");
+        // Settings.Secure (Android ID)
+        static const char* SETTINGS_SYMBOLS[] = {
+            "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
+            "_ZN7android16SettingsProvider9getStringEP7_JNIEnvP8_jobjectP8_jstring",
+            "_ZN7android8Settings6Secure9getStringEP7_JNIEnvP8_jobjectP8_jstring",
+            nullptr
+        };
+        void* settings_func = nullptr;
+        for (int si = 0; SETTINGS_SYMBOLS[si] && !settings_func; ++si) {
+            settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
+        }
         if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
 
         // JNI Bridge for MediaDrm

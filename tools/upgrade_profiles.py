@@ -1,49 +1,28 @@
 import re
 import sys
+import math
+
+def calculate_dpi(w, h, diag):
+    return str(int(math.sqrt(w**2 + h**2) / diag))
 
 def upgrade_profiles(input_file, output_file):
     with open(input_file, 'r') as f:
         content = f.read()
 
-    # Define new struct fields
-    extra_fields = [
-        "gpuVendor", "gpuRenderer", "gpuVersion",
-        "screenWidth", "screenHeight", "screenDensity"
-    ]
-
-    # Parse existing profiles
-    # Regex to find: { "Name", { ... } }
-    # We assume the format generated previously:
-    # { "Name", {
-    #     "val",
-    #     "val",
-    #     ...
-    # } },
-
-    # We need to capture the name and the block of values.
-    # The values are comma separated strings in quotes.
-
-    profiles = []
-
-    # Find all profile blocks
-    # Logic: Look for { "Name", {
-    # Then capture until } },
+    diagonals = {
+        "Redmi 9": 6.53, "POCO X3 Pro": 6.67, "POCO X3 NFC": 6.67, "Mi 10T": 6.67,
+        "Redmi Note 10 Pro": 6.67, "Mi 11": 6.81, "Redmi Note 10": 6.43,
+        "Galaxy A52": 6.5, "Galaxy A21s": 6.5, "Galaxy A31": 6.4, "Galaxy A12": 6.5,
+        "Moto Edge Plus": 6.7, "Moto Edge": 6.7, "OnePlus 8T": 6.55, "ASUS ZenFone 7": 6.67
+    }
 
     block_pattern = re.compile(r'\{\s*"([^"]+)",\s*\{(.*?)\}\s*\},', re.DOTALL)
     matches = block_pattern.findall(content)
+    profiles = []
 
     for name, body in matches:
-        # Extract values
-        # We need to preserve the order of existing values
-        # The body is a list of "value", strings.
-
-        # Simple split by comma, but handle newlines and spaces
-        # Better: findall "([^"]*)"
-
         vals = re.findall(r'"([^"]*)"', body)
 
-        # Map known fields to dict for logic
-        # Current struct has 30 fields
         keys = [
             "manufacturer", "brand", "model", "device", "product", "hardware",
             "board", "bootloader", "fingerprint", "buildId", "tags", "type",
@@ -54,99 +33,48 @@ def upgrade_profiles(input_file, output_file):
             "buildVersionCodename", "buildVersionPreviewSdk"
         ]
 
-        data = dict(zip(keys, vals))
+        base_vals = vals[:30] if len(vals) >= 30 else vals
+        data = dict(zip(keys, base_vals))
 
-        # Logic for new fields
+        if name == "Realme GT Master":
+            base_vals[7] = "S.20211201"
+
         platform = data.get("boardPlatform", "").lower()
         hardware = data.get("hardware", "").lower()
 
+        width = 1080
+        height = 2400
+        if name in ["Redmi 9", "Moto Edge Plus", "Moto Edge"]:
+            height = 2340
+
+        diag = diagonals.get(name, 6.5)
+        density = calculate_dpi(width, height, diag)
+
         gpu_vendor = "Qualcomm"
-        gpu_renderer = "Adreno (TM) 618" # Default
-        gpu_version = "OpenGL ES 3.2 V@0502.0 (GIT@0000000, I00000000, 1600000000) (Date:01/01/2021)"
+        gpu_renderer = "Adreno (TM) 618"
+        gpu_version = "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)"
 
-        width = "1080"
-        height = "2400"
-        density = "440"
+        if "lahaina" in platform: gpu_renderer = "Adreno (TM) 660"
+        elif "kona" in platform: gpu_renderer = "Adreno (TM) 650"
+        elif "lito" in platform: gpu_renderer = "Adreno (TM) 620"
+        elif "mt6833" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G57 MC2"
+        elif "mt6768" in hardware or "mt6769" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G52 MC2"
 
-        if "lahaina" in platform:
-            gpu_renderer = "Adreno (TM) 660"
-        elif "kona" in platform:
-            gpu_renderer = "Adreno (TM) 650"
-        elif "msmnile" in platform:
-            gpu_renderer = "Adreno (TM) 640"
-        elif "lito" in platform:
-            gpu_renderer = "Adreno (TM) 620"
-        elif "holi" in platform:
-            gpu_renderer = "Adreno (TM) 642L"
-        elif "atoll" in platform or "sm7150" in hardware:
-            gpu_renderer = "Adreno (TM) 618"
-        elif "bengal" in platform or "trinket" in platform:
-            gpu_renderer = "Adreno (TM) 610"
-        elif "sdm670" in platform:
-            gpu_renderer = "Adreno (TM) 615"
-        elif "mt6833" in platform or "mt6833" in hardware:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G57 MC2"
-        elif "mt6768" in platform or "mt6769" in platform or "mt6768" in hardware:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G52 MC2"
-        elif "mt6785" in platform:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G76 MC4"
-        elif "mt6765" in platform:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G52 MC1"
-        elif "exynos9610" in platform:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G72 MP3"
-        elif "exynos850" in platform:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G52"
-        elif "exynos9825" in platform:
-            gpu_vendor = "ARM"
-            gpu_renderer = "Mali-G76 MP12"
+        if gpu_vendor == "ARM":
+            gpu_version = "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2"
 
-        data["gpuVendor"] = gpu_vendor
-        data["gpuRenderer"] = gpu_renderer
-        data["gpuVersion"] = gpu_version
-        data["screenWidth"] = width
-        data["screenHeight"] = height
-        data["screenDensity"] = density
+        profiles.append((name, base_vals + [gpu_vendor, gpu_renderer, gpu_version, str(width), str(height), density]))
 
-        profiles.append((name, vals + [gpu_vendor, gpu_renderer, gpu_version, width, height, density]))
-
-    # Write output
     with open(output_file, 'w') as f:
-        f.write("#pragma once\n")
-        f.write("#include <string>\n")
-        f.write("#include <map>\n\n")
-
-        f.write("struct DeviceFingerprint {\n")
-
-        all_keys = [
-            "manufacturer", "brand", "model", "device", "product", "hardware",
-            "board", "bootloader", "fingerprint", "buildId", "tags", "type",
-            "radioVersion", "incremental", "securityPatch", "release",
-            "boardPlatform", "eglDriver", "openGlEs", "hardwareChipname",
-            "zygote", "vendorFingerprint", "display", "buildDescription",
-            "buildFlavor", "buildHost", "buildUser", "buildDateUtc",
-            "buildVersionCodename", "buildVersionPreviewSdk",
-            "gpuVendor", "gpuRenderer", "gpuVersion",
-            "screenWidth", "screenHeight", "screenDensity"
-        ]
-
-        for field in all_keys:
-            f.write(f"    const char* {field};\n")
-        f.write("};\n\n")
-
-        f.write("static const std::map<std::string, DeviceFingerprint> VORTEX_PROFILES = {\n")
+        f.write("#pragma once\n#include <string>\n#include <map>\n\nstruct DeviceFingerprint {\n")
+        all_keys = keys + ["gpuVendor", "gpuRenderer", "gpuVersion", "screenWidth", "screenHeight", "screenDensity"]
+        for field in all_keys: f.write(f"    const char* {field};\n")
+        f.write("};\n\nstatic const std::map<std::string, DeviceFingerprint> VORTEX_PROFILES = {\n")
 
         for name, vals in profiles:
             f.write(f'    {{ "{name}", {{\n')
-            for val in vals:
-                f.write(f'        "{val}",\n')
+            for val in vals: f.write(f'        "{val}",\n')
             f.write("    } },\n")
-
         f.write("};\n")
 
 if __name__ == "__main__":
