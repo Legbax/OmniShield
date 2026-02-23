@@ -135,7 +135,6 @@ inline std::string generateValidImsi(const std::string& profileName, long seed) 
     Random rng(seed);
     std::string region = getRegionForProfile(profileName);
     const auto& pool = IMSI_POOLS.count(region) ? IMSI_POOLS.at(region) : IMSI_POOLS.at("europe");
-
     std::string mccMnc = pool[rng.nextInt(pool.size())];
     int remaining = 15 - mccMnc.length();
     std::string rest = std::to_string(2 + rng.nextInt(8));
@@ -226,15 +225,12 @@ inline std::string generateRandomId(int len, long seed) {
 }
 
 inline std::vector<uint8_t> generateWidevineBytes(long seed) {
-    Random rng(seed);
-    std::vector<uint8_t> id(16);
+    Random rng(seed); std::vector<uint8_t> id(16);
     for(int i=0; i<16; ++i) id[i] = (uint8_t)rng.nextInt(256);
     return id;
 }
-
 inline std::string generateWidevineId(long seed) {
-    auto bytes = generateWidevineBytes(seed);
-    std::stringstream ss;
+    auto bytes = generateWidevineBytes(seed); std::stringstream ss;
     ss << std::hex << std::setfill('0') << std::nouppercase;
     for(int i=0; i<16; ++i) ss << std::setw(2) << (int)bytes[i];
     return ss.str();
