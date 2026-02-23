@@ -65,20 +65,8 @@ typedef unsigned int GLenum;
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
 
-// JNI Pointers
-static jstring (*orig_getDeviceId)(JNIEnv*, jobject, jint);
-static jstring (*orig_getSubscriberId)(JNIEnv*, jobject, jint);
-static jstring (*orig_getSimSerialNumber)(JNIEnv*, jobject, jint);
-static jstring (*orig_getLine1Number)(JNIEnv*, jobject, jint);
-
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jobject, jobject, jstring);
-
-// Widevine
-// Assuming symbol resolves to something returning a status or void,
-// but we intercept property queries. DrmGetProperty style.
-// We'll define a generic signature.
-static int (*orig_DrmGetProperty)(void* self, const char* name, char* value, size_t* size);
 
 // Config
 void readConfig() {
@@ -135,6 +123,9 @@ int my_system_property_get(const char *key, char *value) {
         } else if (k == "ro.product.display_resolution") {
             static std::string res = std::string(fp.screenWidth) + "x" + std::string(fp.screenHeight);
             replacement = res.c_str();
+        } else if (k == "gsm.device.id" || k == "ro.ril.miui.imei0") {
+            static std::string imei = vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed);
+            replacement = imei.c_str();
         }
 
         if (replacement) {
@@ -265,39 +256,22 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
     return orig_SettingsSecure_getString(env, thiz, resolver, name);
 }
 
-// -----------------------------------------------------------------------------
-// Hooks: Widevine
-// -----------------------------------------------------------------------------
-static int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
-    if (strcmp(name, "deviceUniqueId") == 0) {
-        std::string spoofed = vortex::engine::generateWidevineId(g_masterSeed);
-        if (*size >= spoofed.size()) {
-            memcpy(value, spoofed.c_str(), spoofed.size());
-            *size = spoofed.size();
-            return 0; // OK
-        }
-        return -1;
-    }
-    return orig_DrmGetProperty(self, name, value, size);
-}
 
 // -----------------------------------------------------------------------------
-// JNI Replacements
+// Hooks: Widevine (JNI Bridge)
 // -----------------------------------------------------------------------------
-jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
-    std::string imei = vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId);
-    return env->NewStringUTF(imei.c_str());
-}
-jstring JNICALL my_getSubscriberId(JNIEnv* env, jobject thiz, jint subId) {
-    std::string imsi = vortex::engine::generateValidImsi("310260", g_masterSeed + subId);
-    return env->NewStringUTF(imsi.c_str());
-}
-jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) {
-    std::string iccid = vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed + subId + 100);
-    return env->NewStringUTF(iccid.c_str());
-}
-jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
-    return env->NewStringUTF("+15550199999");
+jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jprop) {
+    const char* prop = env->GetStringUTFChars(jprop, nullptr);
+    if (strcmp(prop, "deviceUniqueId") == 0) {
+        auto rawId = vortex::engine::generateWidevineBytes(g_masterSeed);
+        jbyteArray jarray = env->NewByteArray(16);
+        env->SetByteArrayRegion(jarray, 0, 16, (jbyte*)rawId.data());
+        env->ReleaseStringUTFChars(jprop, prop);
+        return jarray;
+    }
+    env->ReleaseStringUTFChars(jprop, prop);
+    // Aquí deberíamos llamar al original, pero en JNI nativo se suele buscar el método de la superclase
+    return nullptr;
 }
 
 // -----------------------------------------------------------------------------
@@ -335,18 +309,11 @@ public:
         void* settings_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring");
         if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
 
-        // Sellar Widevine (DRM)
-        void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
-        if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
-
-        // JNI Native Hooks (Telephony)
-        JNINativeMethod telephonyMethods[] = {
-            {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
-            {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
-            {"getSimSerialNumber", "(I)Ljava/lang/String;", (void*)my_getSimSerialNumber},
-            {"getLine1Number", "(I)Ljava/lang/String;", (void*)my_getLine1Number}
+        // JNI Bridge for MediaDrm
+        JNINativeMethod drmMethods[] = {
+            {"getPropertyByteArray", "(Ljava/lang/String;)[B", (void*)my_getPropertyByteArray}
         };
-        api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 4);
+        api->hookJniNativeMethods(env, "android/media/MediaDrm", drmMethods, 1);
 
         LOGD("Vortex Gold Ghost loaded. Profile: %s", g_currentProfileName.c_str());
     }
