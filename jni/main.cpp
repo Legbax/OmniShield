@@ -131,12 +131,8 @@ bool shouldHide(const char* str) {
 
     if (VORTEX_PROFILES.count(g_currentProfileName)) {
         const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
-        std::vector<std::string> legitimate = {
-            toLowerStr(fp.hardware), toLowerStr(fp.hardwareChipname), toLowerStr(fp.boardPlatform)
-        };
-        for (const auto& leg : legitimate) {
-            if (!leg.empty() && s.find(leg) != std::string::npos) return false;
-        }
+        std::vector<std::string> legit = {toLowerStr(fp.hardware), toLowerStr(fp.hardwareChipname), toLowerStr(fp.boardPlatform)};
+        for (const auto& l : legit) if (!l.empty() && s.find(l) != std::string::npos) return false;
     }
     return s.find("mediatek") != std::string::npos || s.find("mt67") != std::string::npos || s.find("lancelot") != std::string::npos;
 }
@@ -308,9 +304,11 @@ int my_system_property_get(const char *key, char *value) {
             static std::string serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
             replacement = serial.c_str();
         }
-        else if (k == "ro.secure") replacement = "1";
+        else if (k == "ro.build.display.id") replacement = fp.display;
+        else if (k == "ro.build.tags") replacement = fp.tags;
+        else if (k == "ro.build.version.sdk") replacement = "30";
+        else if (k == "ro.secure" || k == "ro.build.selinux") replacement = "1";
         else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") replacement = "0";
-        else if (k == "ro.build.selinux") replacement = "1";
         else if (k == "ro.hardware.chipname") replacement = fp.hardwareChipname;
         else if (k == "ro.product.board") replacement = fp.board;
         else if (k == "ro.sf.lcd_density") {
@@ -376,20 +374,21 @@ ssize_t my_read(int fd, void *buf, size_t count) {
         const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
         std::string content;
 
+        std::string dyn_serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
+        std::string dyn_mac = vortex::engine::generateRandomMac(fp.brand, g_masterSeed + 50);
+
         if (type == PROC_VERSION) {
-            content = "Linux version 4.19.113-vortex (builder@vortex) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
+            std::string plat = toLowerStr(fp.boardPlatform);
+            std::string kv = "4.14.186-perf+";
+            if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
+            else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
+            content = "Linux version " + kv + " (builder@vortex) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
         } else if (type == PROC_CPUINFO) {
             content = generateMulticoreCpuInfo(fp);
-        } else if (type == USB_SERIAL) {
-            static std::string serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
-            content = serial + "\n";
-        } else if (type == WIFI_MAC) {
-            static std::string mac = vortex::engine::generateRandomMac(fp.brand, g_masterSeed + 50);
-            content = mac + "\n";
-        } else if (type == BATTERY_TEMP) {
-            content = vortex::engine::generateBatteryTemp(g_masterSeed) + "\n";
-        } else if (type == BATTERY_VOLT) {
-            content = vortex::engine::generateBatteryVoltage(g_masterSeed) + "\n";
+        } else if (type == USB_SERIAL) { content = dyn_serial + "\n";
+        } else if (type == WIFI_MAC) { content = dyn_mac + "\n";
+        } else if (type == BATTERY_TEMP) { content = vortex::engine::generateBatteryTemp(g_masterSeed) + "\n";
+        } else if (type == BATTERY_VOLT) { content = vortex::engine::generateBatteryVoltage(g_masterSeed) + "\n";
         } else if (type == PROC_MAPS) {
             char tmpBuf[4096];
             ssize_t realRead = orig_read(fd, tmpBuf, sizeof(tmpBuf) - 1);
@@ -404,15 +403,14 @@ ssize_t my_read(int fd, void *buf, size_t count) {
             }
         }
 
-        std::lock_guard<std::mutex> lock(g_fdMutex); // Evita Race Conditions
-        size_t current_offset = g_fdOffsetMap[fd];
-        if (current_offset >= content.size()) return 0; // EOF real
-
-        size_t available = content.size() - current_offset;
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        size_t& offset = g_fdOffsetMap[fd];
+        if (offset >= content.size()) return 0;
+        size_t available = content.size() - offset;
         size_t toRead = std::min(count, available);
-        memcpy(buf, content.c_str() + current_offset, toRead);
-        g_fdOffsetMap[fd] += toRead;
-        return toRead;
+        memcpy(buf, content.c_str() + offset, toRead);
+        offset += toRead;
+        return (ssize_t)toRead;
     }
     return orig_read(fd, buf, count);
 }
@@ -490,10 +488,18 @@ jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jp
     return nullptr;
 }
 
-jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) { return env->NewStringUTF(vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId).c_str()); }
-jstring JNICALL my_getSubscriberId(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generateValidImsi(g_currentProfileName, g_masterSeed + subId).c_str()); }
-jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generateValidIccid(g_currentProfileName, g_masterSeed + subId + 100).c_str()); }
-jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str()); }
+jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
+    return env->NewStringUTF(vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId).c_str());
+}
+jstring JNICALL my_getSubscriberId(JNIEnv* env, jobject thiz, jint subId) {
+    return env->NewStringUTF(vortex::engine::generateValidImsi(g_currentProfileName, g_masterSeed + subId).c_str());
+}
+jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) {
+    return env->NewStringUTF(vortex::engine::generateValidIccid(g_currentProfileName, g_masterSeed + subId + 100).c_str());
+}
+jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
+    return env->NewStringUTF(vortex::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str());
+}
 
 
 // -----------------------------------------------------------------------------
@@ -522,46 +528,33 @@ public:
         void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
 
+        // Syscalls (Evasión Root, Uptime, Kernel, Network)
+        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
+        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
+        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
         DobbyHook((void*)stat, (void*)my_stat, (void**)&orig_stat);
         DobbyHook((void*)lstat, (void*)my_lstat, (void**)&orig_lstat);
         DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
+        DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
-        // Phase 2 Hooks: Deep Phantom
+        // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
         if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
-
-        void* clock_func = DobbySymbolResolver(nullptr, "clock_gettime");
-        if (clock_func) DobbyHook(clock_func, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
-
-        void* uname_func = DobbySymbolResolver(nullptr, "uname");
-        if (uname_func) DobbyHook(uname_func, (void*)my_uname, (void**)&orig_uname);
-
-        void* access_func = DobbySymbolResolver(nullptr, "access");
-        if (access_func) DobbyHook(access_func, (void*)my_access, (void**)&orig_access);
-
-        void* getifaddrs_func = DobbySymbolResolver(nullptr, "getifaddrs");
-        if (getifaddrs_func) DobbyHook(getifaddrs_func, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
-
-        // Phase 3 Hooks: Final Seal
         void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
         if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
 
-        void* readlinkat_func = DobbySymbolResolver(nullptr, "readlinkat");
-        if (readlinkat_func) DobbyHook(readlinkat_func, (void*)my_readlinkat, (void**)&orig_readlinkat);
+        // TLS 1.3
+        void* tls13_ctx = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
+        if (tls13_ctx) DobbyHook(tls13_ctx, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
         if (sensor_func) DobbyHook(sensor_func, (void*)my_ASensorEventQueue_getEvents, (void**)&orig_ASensorEventQueue_getEvents);
 
-        // Network Hooks (TLS 1.2 & 1.3)
+        // Network Hooks (TLS 1.2)
         void* ssl12_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
         if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
-
-        void* ssl13_ctx_func = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
-        if (ssl13_ctx_func) DobbyHook(ssl13_ctx_func, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
-
-        void* ssl13_ssl_func = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
-        if (ssl13_ssl_func) DobbyHook(ssl13_ssl_func, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
 
         // GPU Hooks
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
@@ -586,6 +579,7 @@ public:
         };
         api->hookJniNativeMethods(env, "android/media/MediaDrm", drmMethods, 1);
 
+        // JNI Telephony
         JNINativeMethod telephonyMethods[] = {
             {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
