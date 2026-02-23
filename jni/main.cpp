@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <sys/time.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -43,7 +42,7 @@ static bool g_enableJitter = true;
 // FD Tracking
 enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT };
 static std::map<int, FileType> g_fdMap;
-static std::map<int, size_t> g_fdOffsetMap; 
+static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::mutex g_fdMutex;
 
 // Original Pointers
@@ -52,54 +51,18 @@ static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
 static int (*orig_close)(int fd);
 
-// Phase 2 & 3 Originals
+// Phase 2 Originals
 #define EGL_VENDOR 0x3053
 static const char* (*orig_eglQueryString)(void* display, int name);
 static int (*orig_clock_gettime)(clockid_t clockid, struct timespec *tp);
 static int (*orig_uname)(struct utsname *buf);
 static int (*orig_access)(const char *pathname, int mode);
 static int (*orig_getifaddrs)(struct ifaddrs **ifap);
-static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+
+// Phase 3 Originals
 typedef int (*orig_DrmGetProperty_t)(void*, const char*, char*, size_t*);
 static orig_DrmGetProperty_t orig_DrmGetProperty;
-
-// Helper: Generador Multicore para cpuinfo
-std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
-    std::string out;
-    for(int i = 0; i < 8; ++i) { 
-        out += "processor\t: " + std::to_string(i) + "\n";
-        out += "BogoMIPS\t: 26.00\n";
-        out += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\n";
-        out += "CPU implementer\t: 0x41\n";
-        out += "CPU architecture: 8\n\n";
-    }
-    out += "Hardware\t: " + std::string(fp.hardware) + "\n";
-    out += "Revision\t: 0000\n";
-    out += "Serial\t\t: 0000000000000000\n";
-    return out;
-}
-
-// Handler: readlinkat (Deep Evasion)
-ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
-    if (pathname && (strcasestr(pathname, "magisk") || strcasestr(pathname, "vortex") || strcasestr(pathname, "zygisk"))) {
-        errno = ENOENT;
-        return -1;
-    }
-    return orig_readlinkat(dirfd, pathname, buf, bufsiz);
-}
-
-// Handler: DrmGetProperty (Bypass libmediadrm.so)
-int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
-    if (name && strcmp(name, "deviceUniqueId") == 0) {
-        auto rawId = vortex::engine::generateWidevineBytes(g_masterSeed);
-        if (*size >= 16) {
-            memcpy(value, rawId.data(), 16);
-            *size = 16;
-            return 0; 
-        }
-    }
-    return orig_DrmGetProperty(self, name, value, size);
-}
+static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 
 // Sensor Structures
 typedef struct {
@@ -176,9 +139,10 @@ bool shouldHide(const char* str) {
 }
 
 // -----------------------------------------------------------------------------
-// Phase 2 & 3 Handlers
+// Phase 2 Hooks
 // -----------------------------------------------------------------------------
 
+// 1. EGL Spoofing
 const char* my_eglQueryString(void* display, int name) {
     if (name == EGL_VENDOR && VORTEX_PROFILES.count(g_currentProfileName)) {
         return VORTEX_PROFILES.at(g_currentProfileName).gpuVendor;
@@ -186,28 +150,34 @@ const char* my_eglQueryString(void* display, int name) {
     return orig_eglQueryString(display, name);
 }
 
+// 2. Uptime Spoofing
 int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
     int ret = orig_clock_gettime(clockid, tp);
+    // Solo modificamos relojes de uptime de sistema
     if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
+        // Offset determinista: Base de 3 días (259200s) + hasta 12 días extra según semilla
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         tp->tv_sec += added_uptime_seconds;
     }
     return ret;
 }
 
+// 3. Kernel Identity
 int my_uname(struct utsname *buf) {
     int ret = orig_uname(buf);
     if (ret == 0 && buf != nullptr) {
         strcpy(buf->machine, "aarch64");
         strcpy(buf->nodename, "localhost");
-        strcpy(buf->release, "4.19.113-vortex"); 
+        strcpy(buf->release, "4.19.113-vortex"); // Coherente con VFS
         strcpy(buf->version, "#1 SMP PREEMPT");
     }
     return ret;
 }
 
+// 4. Deep VFS (Root Hiding)
 int my_access(const char *pathname, int mode) {
     if (pathname != nullptr) {
+        // strcasestr no asigna memoria, garantizando rendimiento en hot-paths
         if (strcasestr(pathname, "magisk") ||
             strcasestr(pathname, "lsposed") ||
             strcasestr(pathname, "twres") ||
@@ -220,6 +190,7 @@ int my_access(const char *pathname, int mode) {
     return orig_access(pathname, mode);
 }
 
+// 5. Network Interfaces (Layer 2)
 int my_getifaddrs(struct ifaddrs **ifap) {
     int ret = orig_getifaddrs(ifap);
     if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
@@ -227,11 +198,14 @@ int my_getifaddrs(struct ifaddrs **ifap) {
         while (ifa) {
             if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
                 struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
+
+                // Validación de seguridad contra punteros nulos
                 if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
                     std::string brand = VORTEX_PROFILES.count(g_currentProfileName) ?
                                         VORTEX_PROFILES.at(g_currentProfileName).brand : "default";
                     std::string mac_str = vortex::engine::generateRandomMac(brand, g_masterSeed + 50);
 
+                    // Sobrescribir bytes reales
                     unsigned int mac[6];
                     if (sscanf(mac_str.c_str(), "%x:%x:%x:%x:%x:%x",
                         &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
@@ -243,6 +217,45 @@ int my_getifaddrs(struct ifaddrs **ifap) {
         }
     }
     return ret;
+}
+
+// -----------------------------------------------------------------------------
+// Phase 3 Hooks & Helpers
+// -----------------------------------------------------------------------------
+
+std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
+    std::string out;
+    for(int i = 0; i < 8; ++i) {
+        out += "processor\t: " + std::to_string(i) + "\n";
+        out += "BogoMIPS\t: 26.00\n";
+        out += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\n";
+        out += "CPU implementer\t: 0x41\n";
+        out += "CPU architecture: 8\n\n";
+    }
+    out += "Hardware\t: " + std::string(fp.hardware) + "\n";
+    out += "Revision\t: 0000\n";
+    out += "Serial\t\t: 0000000000000000\n";
+    return out;
+}
+
+int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
+    if (name && strcmp(name, "deviceUniqueId") == 0) {
+        auto rawId = vortex::engine::generateWidevineBytes(g_masterSeed);
+        if (*size >= 16) {
+            memcpy(value, rawId.data(), 16);
+            *size = 16;
+            return 0;
+        }
+    }
+    return orig_DrmGetProperty(self, name, value, size);
+}
+
+ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    if (pathname && (strcasestr(pathname, "magisk") || strcasestr(pathname, "vortex") || strcasestr(pathname, "zygisk"))) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
 // -----------------------------------------------------------------------------
@@ -347,9 +360,9 @@ ssize_t my_read(int fd, void *buf, size_t count) {
             content = vortex::engine::generateBatteryVoltage(g_masterSeed) + "\n";
         }
 
-        std::lock_guard<std::mutex> lock(g_fdMutex); 
+        std::lock_guard<std::mutex> lock(g_fdMutex); // Evita Race Conditions
         size_t current_offset = g_fdOffsetMap[fd];
-        if (current_offset >= content.size()) return 0; 
+        if (current_offset >= content.size()) return 0; // EOF real
 
         size_t available = content.size() - current_offset;
         size_t toRead = std::min(count, available);
@@ -361,7 +374,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 }
 
 // -----------------------------------------------------------------------------
-// Hooks: Sensor Jitter, SSL, GPU, Settings, MediaDrm
+// Hooks: Sensor Jitter
 // -----------------------------------------------------------------------------
 ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* events, size_t count) {
     ssize_t ret = orig_ASensorEventQueue_getEvents(queue, events, count);
@@ -381,10 +394,16 @@ ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* e
     return ret;
 }
 
+// -----------------------------------------------------------------------------
+// Hooks: Network (SSL)
+// -----------------------------------------------------------------------------
 int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, vortex::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
 int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, vortex::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
 int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, vortex::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
 
+// -----------------------------------------------------------------------------
+// Hooks: GPU
+// -----------------------------------------------------------------------------
 const GLubyte* my_glGetString(GLenum name) {
     if (VORTEX_PROFILES.count(g_currentProfileName)) {
         const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
@@ -395,6 +414,9 @@ const GLubyte* my_glGetString(GLenum name) {
     return orig_glGetString(name);
 }
 
+// -----------------------------------------------------------------------------
+// Hooks: Settings.Secure (JNI Bridge)
+// -----------------------------------------------------------------------------
 static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject resolver, jstring name) {
     const char* key = env->GetStringUTFChars(name, nullptr);
     jstring result = nullptr;
@@ -408,6 +430,9 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
     return orig_SettingsSecure_getString(env, thiz, resolver, name);
 }
 
+// -----------------------------------------------------------------------------
+// Hooks: Widevine (JNI Bridge)
+// -----------------------------------------------------------------------------
 jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jprop) {
     const char* prop = env->GetStringUTFChars(jprop, nullptr);
     if (strcmp(prop, "deviceUniqueId") == 0) {
@@ -426,6 +451,7 @@ jstring JNICALL my_getSubscriberId(JNIEnv* env, jobject thiz, jint subId) { retu
 jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generateValidIccid(g_currentProfileName, g_masterSeed + subId + 100).c_str()); }
 jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) { return env->NewStringUTF(vortex::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str()); }
 
+
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
@@ -440,22 +466,40 @@ public:
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
         // Libc Hooks (Phase 1)
-        DobbyHook((void*)__system_property_get, (void*)my_system_property_get, (void**)&orig_system_property_get);
-        DobbyHook((void*)open, (void*)my_open, (void**)&orig_open);
-        DobbyHook((void*)read, (void*)my_read, (void**)&orig_read);
-        DobbyHook((void*)close, (void*)my_close, (void**)&orig_close);
-        DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
+        void* open_func = DobbySymbolResolver(nullptr, "open");
+        if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
 
-        // Phase 2 & 3 Hooks
+        void* read_func = DobbySymbolResolver(nullptr, "read");
+        if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
+
+        void* close_func = DobbySymbolResolver(nullptr, "close");
+        if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
+
+        void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
+        if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
+
+        // Phase 2 Hooks: Deep Phantom
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
         if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
-        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
-        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
-        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
-        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
 
+        void* clock_func = DobbySymbolResolver(nullptr, "clock_gettime");
+        if (clock_func) DobbyHook(clock_func, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+
+        void* uname_func = DobbySymbolResolver(nullptr, "uname");
+        if (uname_func) DobbyHook(uname_func, (void*)my_uname, (void**)&orig_uname);
+
+        void* access_func = DobbySymbolResolver(nullptr, "access");
+        if (access_func) DobbyHook(access_func, (void*)my_access, (void**)&orig_access);
+
+        void* getifaddrs_func = DobbySymbolResolver(nullptr, "getifaddrs");
+        if (getifaddrs_func) DobbyHook(getifaddrs_func, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+
+        // Phase 3 Hooks: Final Seal
         void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
         if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
+
+        void* readlinkat_func = DobbySymbolResolver(nullptr, "readlinkat");
+        if (readlinkat_func) DobbyHook(readlinkat_func, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
@@ -464,8 +508,10 @@ public:
         // Network Hooks (TLS 1.2 & 1.3)
         void* ssl12_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
         if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
+
         void* ssl13_ctx_func = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
         if (ssl13_ctx_func) DobbyHook(ssl13_ctx_func, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
+
         void* ssl13_ssl_func = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
         if (ssl13_ssl_func) DobbyHook(ssl13_ssl_func, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
 
