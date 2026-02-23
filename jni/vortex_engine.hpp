@@ -173,7 +173,7 @@ inline std::string generateRandomMac(const std::string& brandIn, long seed) {
     } else { oui = OUIS[rng.nextInt(OUIS.size())]; }
 
     std::stringstream ss;
-    ss << std::hex << std::uppercase << std::setfill('0');
+    ss << std::hex << std::setfill('0');
     for (size_t i = 0; i < oui.size(); ++i) ss << std::setw(2) << (int)oui[i] << ":";
     for (int i = 0; i < 3; ++i) ss << std::setw(2) << rng.nextInt(256) << (i == 2 ? "" : ":");
     return ss.str();
