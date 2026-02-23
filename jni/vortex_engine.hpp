@@ -177,6 +177,13 @@ inline std::string generateRandomId(int len, long seed) {
     return res;
 }
 
+inline std::vector<uint8_t> generateWidevineBytes(long seed) {
+    Random rng(seed);
+    std::vector<uint8_t> id(16);
+    for(int i=0; i<16; ++i) id[i] = (uint8_t)rng.nextInt(256);
+    return id;
+}
+
 inline std::string generateWidevineId(long seed) {
     Random rng(seed);
     std::stringstream ss;
