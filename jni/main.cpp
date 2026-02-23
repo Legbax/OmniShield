@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <sys/time.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -467,25 +466,40 @@ public:
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
         // Libc Hooks (Phase 1)
-        DobbyHook((void*)__system_property_get, (void*)my_system_property_get, (void**)&orig_system_property_get);
-        DobbyHook((void*)open, (void*)my_open, (void**)&orig_open);
-        DobbyHook((void*)read, (void*)my_read, (void**)&orig_read);
-        DobbyHook((void*)close, (void*)my_close, (void**)&orig_close);
+        void* open_func = DobbySymbolResolver(nullptr, "open");
+        if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
+
+        void* read_func = DobbySymbolResolver(nullptr, "read");
+        if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
+
+        void* close_func = DobbySymbolResolver(nullptr, "close");
+        if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
+
+        void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
+        if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
 
         // Phase 2 Hooks: Deep Phantom
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
         if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
 
-        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
-        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
-        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
-        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+        void* clock_func = DobbySymbolResolver(nullptr, "clock_gettime");
+        if (clock_func) DobbyHook(clock_func, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+
+        void* uname_func = DobbySymbolResolver(nullptr, "uname");
+        if (uname_func) DobbyHook(uname_func, (void*)my_uname, (void**)&orig_uname);
+
+        void* access_func = DobbySymbolResolver(nullptr, "access");
+        if (access_func) DobbyHook(access_func, (void*)my_access, (void**)&orig_access);
+
+        void* getifaddrs_func = DobbySymbolResolver(nullptr, "getifaddrs");
+        if (getifaddrs_func) DobbyHook(getifaddrs_func, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
 
         // Phase 3 Hooks: Final Seal
         void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
         if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
 
-        DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
+        void* readlinkat_func = DobbySymbolResolver(nullptr, "readlinkat");
+        if (readlinkat_func) DobbyHook(readlinkat_func, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
