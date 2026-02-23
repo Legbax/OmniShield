@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <sys/time.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -17,6 +18,12 @@
 #include <algorithm>
 #include <chrono>
 #include <random>
+#include <time.h>
+#include <sys/utsname.h>
+#include <ifaddrs.h>
+#include <linux/if_packet.h>
+#include <sys/socket.h>
+#include <errno.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -44,6 +51,14 @@ static int (*orig_system_property_get)(const char *key, char *value);
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
 static int (*orig_close)(int fd);
+
+// Phase 2 Originals
+#define EGL_VENDOR 0x3053
+static const char* (*orig_eglQueryString)(void* display, int name);
+static int (*orig_clock_gettime)(clockid_t clockid, struct timespec *tp);
+static int (*orig_uname)(struct utsname *buf);
+static int (*orig_access)(const char *pathname, int mode);
+static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Sensor Structures
 typedef struct {
@@ -117,6 +132,87 @@ bool shouldHide(const char* str) {
         }
     }
     return s.find("mediatek") != std::string::npos || s.find("mt67") != std::string::npos || s.find("lancelot") != std::string::npos;
+}
+
+// -----------------------------------------------------------------------------
+// Phase 2 Hooks
+// -----------------------------------------------------------------------------
+
+// 1. EGL Spoofing
+const char* my_eglQueryString(void* display, int name) {
+    if (name == EGL_VENDOR && VORTEX_PROFILES.count(g_currentProfileName)) {
+        return VORTEX_PROFILES.at(g_currentProfileName).gpuVendor;
+    }
+    return orig_eglQueryString(display, name);
+}
+
+// 2. Uptime Spoofing
+int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
+    int ret = orig_clock_gettime(clockid, tp);
+    // Solo modificamos relojes de uptime de sistema
+    if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
+        // Offset determinista: Base de 3 días (259200s) + hasta 12 días extra según semilla
+        long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
+        tp->tv_sec += added_uptime_seconds;
+    }
+    return ret;
+}
+
+// 3. Kernel Identity
+int my_uname(struct utsname *buf) {
+    int ret = orig_uname(buf);
+    if (ret == 0 && buf != nullptr) {
+        strcpy(buf->machine, "aarch64");
+        strcpy(buf->nodename, "localhost");
+        strcpy(buf->release, "4.19.113-vortex"); // Coherente con VFS
+        strcpy(buf->version, "#1 SMP PREEMPT");
+    }
+    return ret;
+}
+
+// 4. Deep VFS (Root Hiding)
+int my_access(const char *pathname, int mode) {
+    if (pathname != nullptr) {
+        // strcasestr no asigna memoria, garantizando rendimiento en hot-paths
+        if (strcasestr(pathname, "magisk") ||
+            strcasestr(pathname, "lsposed") ||
+            strcasestr(pathname, "twres") ||
+            strcasestr(pathname, "zygisk") ||
+            strcasestr(pathname, "vortex")) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_access(pathname, mode);
+}
+
+// 5. Network Interfaces (Layer 2)
+int my_getifaddrs(struct ifaddrs **ifap) {
+    int ret = orig_getifaddrs(ifap);
+    if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
+        struct ifaddrs *ifa = *ifap;
+        while (ifa) {
+            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
+                struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
+
+                // Validación de seguridad contra punteros nulos
+                if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
+                    std::string brand = VORTEX_PROFILES.count(g_currentProfileName) ?
+                                        VORTEX_PROFILES.at(g_currentProfileName).brand : "default";
+                    std::string mac_str = vortex::engine::generateRandomMac(brand, g_masterSeed + 50);
+
+                    // Sobrescribir bytes reales
+                    unsigned int mac[6];
+                    if (sscanf(mac_str.c_str(), "%x:%x:%x:%x:%x:%x",
+                        &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+                        for(int i = 0; i < 6; ++i) s->sll_addr[i] = (unsigned char)mac[i];
+                    }
+                }
+            }
+            ifa = ifa->ifa_next;
+        }
+    }
+    return ret;
 }
 
 // -----------------------------------------------------------------------------
@@ -326,11 +422,20 @@ public:
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
-        // Libc Hooks
+        // Libc Hooks (Phase 1)
         DobbyHook((void*)__system_property_get, (void*)my_system_property_get, (void**)&orig_system_property_get);
         DobbyHook((void*)open, (void*)my_open, (void**)&orig_open);
         DobbyHook((void*)read, (void*)my_read, (void**)&orig_read);
         DobbyHook((void*)close, (void*)my_close, (void**)&orig_close);
+
+        // Phase 2 Hooks: Deep Phantom
+        void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
+        if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
+
+        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
+        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
+        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
