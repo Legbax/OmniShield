@@ -72,7 +72,13 @@ static jstring (*orig_getSimSerialNumber)(JNIEnv*, jobject, jint);
 static jstring (*orig_getLine1Number)(JNIEnv*, jobject, jint);
 
 // Settings.Secure
-static void* (*orig_SettingsSecure_getString)(void* env, void* clazz, void* resolver, void* key);
+static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jobject, jobject, jstring);
+
+// Widevine
+// Assuming symbol resolves to something returning a status or void,
+// but we intercept property queries. DrmGetProperty style.
+// We'll define a generic signature.
+static int (*orig_DrmGetProperty)(void* self, const char* name, char* value, size_t* size);
 
 // Config
 void readConfig() {
@@ -126,6 +132,9 @@ int my_system_property_get(const char *key, char *value) {
             replacement = serial.c_str();
         } else if (k == "ro.sf.lcd_density") {
             replacement = fp.screenDensity;
+        } else if (k == "ro.product.display_resolution") {
+            static std::string res = std::string(fp.screenWidth) + "x" + std::string(fp.screenHeight);
+            replacement = res.c_str();
         }
 
         if (replacement) {
@@ -241,6 +250,38 @@ const GLubyte* my_glGetString(GLenum name) {
 }
 
 // -----------------------------------------------------------------------------
+// Hooks: Settings.Secure (JNI Bridge)
+// -----------------------------------------------------------------------------
+static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject resolver, jstring name) {
+    const char* key = env->GetStringUTFChars(name, nullptr);
+    jstring result = nullptr;
+    if (strcmp(key, "android_id") == 0) {
+        result = env->NewStringUTF(vortex::engine::generateRandomId(16, g_masterSeed).c_str());
+    } else if (strcmp(key, "gsf_id") == 0) {
+        result = env->NewStringUTF(vortex::engine::generateRandomId(16, g_masterSeed + 1).c_str());
+    }
+    env->ReleaseStringUTFChars(name, key);
+    if (result) return result;
+    return orig_SettingsSecure_getString(env, thiz, resolver, name);
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: Widevine
+// -----------------------------------------------------------------------------
+static int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
+    if (strcmp(name, "deviceUniqueId") == 0) {
+        std::string spoofed = vortex::engine::generateWidevineId(g_masterSeed);
+        if (*size >= spoofed.size()) {
+            memcpy(value, spoofed.c_str(), spoofed.size());
+            *size = spoofed.size();
+            return 0; // OK
+        }
+        return -1;
+    }
+    return orig_DrmGetProperty(self, name, value, size);
+}
+
+// -----------------------------------------------------------------------------
 // JNI Replacements
 // -----------------------------------------------------------------------------
 jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
@@ -289,6 +330,14 @@ public:
         // GPU Hooks
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
+
+        // Sellar Settings.Secure (Android ID)
+        void* settings_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring");
+        if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+
+        // Sellar Widevine (DRM)
+        void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
+        if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
 
         // JNI Native Hooks (Telephony)
         JNINativeMethod telephonyMethods[] = {

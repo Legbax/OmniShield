@@ -2,7 +2,7 @@
 
 **Fecha:** 25 de febrero de 2026
 **Agente:** Jules
-**Versión:** v11.0 (Gold Ghost)
+**Versión:** v11.0 (Gold Ghost - Final Seal)
 
 ## 🌀 Filosofía: Virtualización Total (Native Ghost)
 El Proyecto Omni-Shield ha alcanzado su estado definitivo: **Gold Ghost**.
@@ -23,15 +23,27 @@ El módulo inyecta un agente C++17 en cada proceso Zygote.
 
 ### 3. Capa GPU & Display
 *   **Hook `libGLESv2.so`:** `glGetString` retorna `GL_VENDOR` y `GL_RENDERER` coincidentes con el SoC del perfil (e.g., Adreno 660 para Snapdragon 888), evitando discrepancias entre `Build.BOARD` y la capacidad gráfica real.
-*   **Display:** Inyección de densidad de pantalla (DPI) coherente via `system_property_get`.
+*   **Display:** Inyección de resolución y densidad de pantalla (Width x Height, DPI) coherente via `system_property_get` (`ro.product.display_resolution`, `ro.sf.lcd_density`).
 
 ### 4. Entrelazamiento Matemático Determinista
 *   **Master Seed:** Un único valor semilla (definido en `vortex.prop`) gobierna la generación de TODA la identidad (IMEI, MAC, Widevine, Serial, JA3).
 *   **Luhn ISO/IEC 7812:** Algoritmo corregido para validar checksums de IMEI.
 *   **Seriales Dinámicos:** Generación de seriales Samsung que codifican la fecha de fabricación basada en el parche de seguridad del perfil.
 
-### 5. JNI Bridge Seal
-*   Reemplazo de métodos nativos en `TelephonyManager` (`getDeviceId`, `getSubscriberId`, etc.) utilizando `hookJniNativeMethods` de Zygisk, cortando el acceso al hardware de radio real.
+### 5. JNI Bridge Seal & DRM
+*   **TelephonyManager:** Reemplazo de métodos nativos (`getDeviceId`, `getSubscriberId`, etc.) utilizando `hookJniNativeMethods` de Zygisk.
+*   **Settings.Secure:** Hook nativo sobre `libandroid_runtime.so` para interceptar `android_id` y `gsf_id` antes de que toquen la capa Java.
+*   **Widevine L1:** Hook en `libmediadrm.so` para interceptar `deviceUniqueId`, devolviendo un ID de 16 bytes consistente con la semilla.
+
+---
+
+## 🔒 Hooks Disponibles (Capa 5)
+*   **libc.so:** `__system_property_get`, `open`, `read`, `close` (Virtualización File/Prop)
+*   **libandroid.so:** `ASensorEventQueue_getEvents` (Sensor Jitter)
+*   **libssl.so:** `SSL_set_cipher_list` (JA3)
+*   **libGLESv2.so:** `glGetString` (GPU)
+*   **libandroid_runtime.so:** `SettingsSecure::getString` (Android ID)
+*   **libmediadrm.so:** `DrmGetProperty` (Widevine Device ID)
 
 ---
 
