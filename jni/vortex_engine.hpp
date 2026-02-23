@@ -50,7 +50,7 @@ inline int luhnChecksum(const std::string& number) {
     int sum = 0, len = number.length();
     for (int i = len - 1; i >= 0; i--) {
         int d = number[i] - '0';
-        if ((len - 1 - i) % 2 != 0) { d *= 2; if (d > 9) d -= 9; }
+        if ((len - 1 - i) % 2 == 0) { d *= 2; if (d > 9) d -= 9; }
         sum += d;
     }
     return (10 - (sum % 10)) % 10;
@@ -76,11 +76,13 @@ public:
 };
 
 inline std::string getRegionForProfile(const std::string& profileName) {
-    std::string lp = toLower(profileName);
-    if (lp.find("global") != std::string::npos || lp.find("eea") != std::string::npos) return "europe";
-    if (lp.find("india")  != std::string::npos) return "india";
-    if (lp.find("br") != std::string::npos || lp.find("latam") != std::string::npos) return "latam";
-    if (lp.find("us") != std::string::npos) return "usa";
+    auto it = VORTEX_PROFILES.find(profileName);
+    if (it != VORTEX_PROFILES.end()) {
+        std::string p = toLower(std::string(it->second.product));
+        if (p.find("global") != std::string::npos || p.find("eea") != std::string::npos) return "europe";
+        if (p.find("india") != std::string::npos) return "india";
+        if (p.size() >= 3 && (p.substr(p.size()-3) == "_us" || p.substr(p.size()-4) == "_usa")) return "usa";
+    }
     return "europe";
 }
 
@@ -135,8 +137,9 @@ inline std::string generateValidImsi(const std::string& profileName, long seed) 
     const auto& pool = IMSI_POOLS.count(region) ? IMSI_POOLS.at(region) : IMSI_POOLS.at("europe");
 
     std::string mccMnc = pool[rng.nextInt(pool.size())];
+    int remaining = 15 - mccMnc.length();
     std::string rest = std::to_string(2 + rng.nextInt(8));
-    for(int i=0; i<8; ++i) rest += std::to_string(rng.nextInt(10));
+    for (int i = 1; i < remaining; ++i) rest += std::to_string(rng.nextInt(10));
     return mccMnc + rest;
 }
 
@@ -173,7 +176,7 @@ inline std::string generateRandomMac(const std::string& brandIn, long seed) {
     } else { oui = OUIS[rng.nextInt(OUIS.size())]; }
 
     std::stringstream ss;
-    ss << std::hex << std::setfill('0');
+    ss << std::hex << std::setfill('0') << std::nouppercase;
     for (size_t i = 0; i < oui.size(); ++i) ss << std::setw(2) << (int)oui[i] << ":";
     for (int i = 0; i < 3; ++i) ss << std::setw(2) << rng.nextInt(256) << (i == 2 ? "" : ":");
     return ss.str();
@@ -230,10 +233,10 @@ inline std::vector<uint8_t> generateWidevineBytes(long seed) {
 }
 
 inline std::string generateWidevineId(long seed) {
-    Random rng(seed);
+    auto bytes = generateWidevineBytes(seed);
     std::stringstream ss;
-    ss << std::hex << std::setfill('0');
-    for(int i=0; i<16; ++i) ss << std::setw(2) << rng.nextInt(256);
+    ss << std::hex << std::setfill('0') << std::nouppercase;
+    for(int i=0; i<16; ++i) ss << std::setw(2) << (int)bytes[i];
     return ss.str();
 }
 
@@ -271,19 +274,7 @@ inline std::string generateTls12CipherSuites(long seed) {
     return res;
 }
 
-inline const char* getGlVersionForProfile(const DeviceFingerprint& fp) {
-    std::string vendor = toLower(std::string(fp.gpuVendor));
-    std::string renderer = toLower(std::string(fp.gpuRenderer));
-    if (vendor == "qualcomm" || renderer.find("adreno") != std::string::npos) {
-        if (renderer.find("660") != std::string::npos) return "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)";
-        return "OpenGL ES 3.2 V@0490.0 (GIT@3b2a1f8, I9e4c321, 1580000000) (Date:03/12/2020)";
-    }
-    if (vendor == "arm" || renderer.find("mali") != std::string::npos) {
-        if (renderer.find("g76") != std::string::npos) return "OpenGL ES 3.2 v1.r23p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2";
-        return "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2";
-    }
-    return "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2";
-}
+inline const char* getGlVersionForProfile(const DeviceFingerprint& fp) { return fp.gpuVersion; }
 
 } // namespace engine
 } // namespace vortex

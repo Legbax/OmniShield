@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v11.2 (Gold Ghost - Deep Phantom)
+# Julia.md - Vortex Omni-Shield v11.4 (The Master Seal)
 
-**Fecha:** 25 de febrero de 2026 (Actualizado)
+**Fecha:** 25 de febrero de 2026 (Última actualización)
 **Agente:** Jules
-**Versión:** v11.2 (Gold Ghost - Deep Phantom)
+**Versión:** v11.4 (The Master Seal)
 
 ## 🌀 Filosofía: Virtualización Total (Native Ghost)
 El Proyecto Omni-Shield ha alcanzado su estado "Deep Phantom".
@@ -27,6 +27,13 @@ Implementación de "Deep Evasion" mediante hooks nativos para neutralizar heurí
 *   **Deep VFS (Access):** Protección contra escaneo de root nativo mediante hook en `access` usando `strcasestr` (sin asignación de memoria) para ocultar Magisk/Zygisk.
 *   **Layer 2 MAC Spoofing:** Hook en `getifaddrs` para falsificar la dirección MAC de `wlan0` a nivel de estructura de socket `AF_PACKET`.
 
+### v11.4 (Fase 3 - Master Seal)
+Implementación de correcciones de Auditoría Palantir para Strong Integrity:
+*   **Criptografía:** Luhn Checksum par, MAC minúsculas, IMSI dinámico (15 dígitos), Widevine unificado.
+*   **Root Evasion:** Helper `isHiddenPath` integrado en `access`, `stat`, `lstat`, `fopen`, `readlinkat` y filtrado de `PROC_MAPS`.
+*   **Kernel/SoC:** `uname` dinámico por plataforma, `getArmFeatures` para consistencia CPU, `system_property_get` extendido (`ro.secure`, etc.).
+*   **Profiles:** Fixes exactos de GPU/EGL para Samsung/Realme/Poco y corrección de DPIs para Pixel/Nokia/Moto.
+
 ---
 
 ## 🔗 ROADMAP DE MIGRACIÓN & ESTADO ACTUAL
@@ -45,12 +52,12 @@ Implementación de "Deep Evasion" mediante hooks nativos para neutralizar heurí
 - **Anti-Root Nativo:** `access` (Deep VFS).
 - **L2 Network:** `getifaddrs` (MAC Address).
 
-### 🚀 Fase 3: Final Seal (PRIORIDAD INMEDIATA)
+### ✅ Fase 3: Final Seal (IMPLEMENTADO - v11.4)
 *Objetivo: Blindaje total contra correlación multicore y drivers DRM.*
-- **Virtualización Multicore:** Generación dinámica de `/proc/cpuinfo` simulando 8 núcleos (Helio G80 structure) para evitar discrepancias de hardware.
-- **Widevine Nativo:** Hook en `libmediadrm.so` (`DrmGetProperty`) para interceptar la lectura binaria de `deviceUniqueId`.
-- **Evasión de Symlinks:** Hook en `readlinkat` para romper la resolución de rutas de root ocultas.
-- **Coherencia MAC:** Ajuste de generación a minúsculas.
+- **Virtualización Multicore:** Generación dinámica de `/proc/cpuinfo` simulando 8 núcleos con features ARM reales.
+- **Widevine Nativo:** Hook en `libmediadrm.so` (`DrmGetProperty`) interceptando `deviceUniqueId`.
+- **Evasión de Symlinks/Stats:** Hooks en `readlinkat`, `stat`, `lstat`, `fopen`.
+- **Coherencia MAC/IMSI:** Ajuste de generación a minúsculas y longitud correcta.
 
 ---
 
@@ -75,3 +82,14 @@ jitter=true
 2.  **Resumen de cambios:** Descripción técnica de las modificaciones.
 3.  **Prompt del usuario:** El requerimiento exacto que motivó la actualización.
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
+
+### Registro de Actualizaciones
+
+**Fecha y agente:** 25 de febrero de 2026, Jules
+**Resumen de cambios:** Implementación de "OmniShield v11.4 (The Master Seal)".
+- **vortex_engine.hpp:** Corrección de Luhn (paridad par), MAC (nouppercase), IMSI (longitud dinámica), Widevine (unificación RNG), GL Version (retorno directo).
+- **main.cpp:** Implementación de `isHiddenPath` helper. Hooks añadidos/actualizados: `stat`, `lstat`, `fopen`, `access`, `readlinkat`. `uname` dinámico por plataforma. Helper `getArmFeatures` para `generateMulticoreCpuInfo`. Filtrado de `PROC_MAPS`. Registro de hooks y métodos JNI Telephony (`getDeviceId`, etc.).
+- **vortex_profiles.h:** Actualización masiva de perfiles (Samsung, Realme, Pixel, Poco, Nokia) para corregir cadenas GPU/EGL y DPIs erróneos.
+- **module.prop:** Actualizado a v11.4-Beta (1140).
+**Prompt del usuario:** "Implementar las 20 correcciones de la Auditoría Palantir (Claude) validadas matemáticamente... Aplica los siguientes bloques de código exactamente como se describen... Compila, valida y actualiza Julia.md."
+**Nota personal para el siguiente agente:** El módulo ahora implementa una evasión profunda de syscalls de sistema de archivos. Verificar compatibilidad con Android 12+ donde las syscalls pueden variar o ser interceptadas por seccomp.
