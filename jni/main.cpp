@@ -40,7 +40,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::mutex g_fdMutex;
@@ -50,6 +50,9 @@ static int (*orig_system_property_get)(const char *key, char *value);
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
 static int (*orig_close)(int fd);
+static int (*orig_stat)(const char*, struct stat*);
+static int (*orig_lstat)(const char*, struct stat*);
+static FILE* (*orig_fopen)(const char*, const char*);
 
 // Phase 2 Originals
 #define EGL_VENDOR 0x3053
@@ -142,6 +145,30 @@ bool shouldHide(const char* str) {
 // Phase 2 Hooks
 // -----------------------------------------------------------------------------
 
+static inline bool isHiddenPath(const char* path) {
+    if (!path) return false;
+    return strcasestr(path, "magisk") || strcasestr(path, "kernelsu") ||
+           strcasestr(path, "/ksu") || strcasestr(path, "susfs") ||
+           strcasestr(path, "shamiko") || strcasestr(path, "lsposed") ||
+           strcasestr(path, "zygisk") || strcasestr(path, "vortex") ||
+           strcasestr(path, "superuser") || strcasestr(path, "/sbin/su") ||
+           strcasestr(path, "com.topjohnwu") || strcasestr(path, "frida") ||
+           strcasestr(path, "/data/adb/modules");
+}
+
+int my_stat(const char* pathname, struct stat* statbuf) {
+    if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
+    return orig_stat(pathname, statbuf);
+}
+int my_lstat(const char* pathname, struct stat* statbuf) {
+    if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
+    return orig_lstat(pathname, statbuf);
+}
+FILE* my_fopen(const char* pathname, const char* mode) {
+    if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
+    return orig_fopen(pathname, mode);
+}
+
 // 1. EGL Spoofing
 const char* my_eglQueryString(void* display, int name) {
     if (name == EGL_VENDOR && VORTEX_PROFILES.count(g_currentProfileName)) {
@@ -166,27 +193,21 @@ int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
 int my_uname(struct utsname *buf) {
     int ret = orig_uname(buf);
     if (ret == 0 && buf != nullptr) {
-        strcpy(buf->machine, "aarch64");
-        strcpy(buf->nodename, "localhost");
-        strcpy(buf->release, "4.19.113-vortex"); // Coherente con VFS
-        strcpy(buf->version, "#1 SMP PREEMPT");
+        strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
+        const char* kernel = "4.14.186-perf+";
+        if (VORTEX_PROFILES.count(g_currentProfileName)) {
+            std::string plat = toLowerStr(VORTEX_PROFILES.at(g_currentProfileName).boardPlatform);
+            if (plat.find("mt6") != std::string::npos) kernel = "4.14.141-perf+";
+            else if (plat.find("kona") != std::string::npos) kernel = "4.19.157-perf+";
+        }
+        strcpy(buf->release, kernel); strcpy(buf->version, "#1 SMP PREEMPT");
     }
     return ret;
 }
 
 // 4. Deep VFS (Root Hiding)
 int my_access(const char *pathname, int mode) {
-    if (pathname != nullptr) {
-        // strcasestr no asigna memoria, garantizando rendimiento en hot-paths
-        if (strcasestr(pathname, "magisk") ||
-            strcasestr(pathname, "lsposed") ||
-            strcasestr(pathname, "twres") ||
-            strcasestr(pathname, "zygisk") ||
-            strcasestr(pathname, "vortex")) {
-            errno = ENOENT;
-            return -1;
-        }
-    }
+    if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_access(pathname, mode);
 }
 
@@ -223,12 +244,19 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 // Phase 3 Hooks & Helpers
 // -----------------------------------------------------------------------------
 
+static std::string getArmFeatures(const std::string& platform) {
+    if (platform.find("mt6768") != std::string::npos || platform.find("sdm670") != std::string::npos || platform.find("exynos850") != std::string::npos)
+        return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm";
+    return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp";
+}
+
 std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
     std::string out;
+    std::string features = getArmFeatures(toLowerStr(fp.boardPlatform));
     for(int i = 0; i < 8; ++i) {
         out += "processor\t: " + std::to_string(i) + "\n";
         out += "BogoMIPS\t: 26.00\n";
-        out += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\n";
+        out += "Features\t: " + features + "\n";
         out += "CPU implementer\t: 0x41\n";
         out += "CPU architecture: 8\n\n";
     }
@@ -251,10 +279,7 @@ int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
 }
 
 ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
-    if (pathname && (strcasestr(pathname, "magisk") || strcasestr(pathname, "vortex") || strcasestr(pathname, "zygisk"))) {
-        errno = ENOENT;
-        return -1;
-    }
+    if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
@@ -282,7 +307,13 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.serialno" || k == "ro.boot.serialno") {
             static std::string serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
             replacement = serial.c_str();
-        } else if (k == "ro.sf.lcd_density") {
+        }
+        else if (k == "ro.secure") replacement = "1";
+        else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") replacement = "0";
+        else if (k == "ro.build.selinux") replacement = "1";
+        else if (k == "ro.hardware.chipname") replacement = fp.hardwareChipname;
+        else if (k == "ro.product.board") replacement = fp.board;
+        else if (k == "ro.sf.lcd_density") {
             replacement = fp.screenDensity;
         } else if (k == "ro.product.display_resolution") {
             static std::string res = std::string(fp.screenWidth) + "x" + std::string(fp.screenHeight);
@@ -317,6 +348,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/net/wlan0/address")) type = WIFI_MAC;
         else if (strstr(pathname, "/sys/class/power_supply/battery/temp")) type = BATTERY_TEMP;
         else if (strstr(pathname, "/sys/class/power_supply/battery/voltage_now")) type = BATTERY_VOLT;
+        else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
 
         if (type != NONE) {
             std::lock_guard<std::mutex> lock(g_fdMutex);
@@ -358,6 +390,18 @@ ssize_t my_read(int fd, void *buf, size_t count) {
             content = vortex::engine::generateBatteryTemp(g_masterSeed) + "\n";
         } else if (type == BATTERY_VOLT) {
             content = vortex::engine::generateBatteryVoltage(g_masterSeed) + "\n";
+        } else if (type == PROC_MAPS) {
+            char tmpBuf[4096];
+            ssize_t realRead = orig_read(fd, tmpBuf, sizeof(tmpBuf) - 1);
+            if (realRead > 0) {
+                tmpBuf[realRead] = '\0';
+                std::istringstream iss(tmpBuf);
+                std::string line, rawContent;
+                while (std::getline(iss, line)) {
+                    if (!isHiddenPath(line.c_str())) rawContent += line + "\n";
+                }
+                content = rawContent;
+            }
         }
 
         std::lock_guard<std::mutex> lock(g_fdMutex); // Evita Race Conditions
@@ -478,6 +522,10 @@ public:
         void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
 
+        DobbyHook((void*)stat, (void*)my_stat, (void**)&orig_stat);
+        DobbyHook((void*)lstat, (void*)my_lstat, (void**)&orig_lstat);
+        DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
+
         // Phase 2 Hooks: Deep Phantom
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
         if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
@@ -537,6 +585,15 @@ public:
             {"getPropertyByteArray", "(Ljava/lang/String;)[B", (void*)my_getPropertyByteArray}
         };
         api->hookJniNativeMethods(env, "android/media/MediaDrm", drmMethods, 1);
+
+        JNINativeMethod telephonyMethods[] = {
+            {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
+            {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
+            {"getSimSerialNumber", "(I)Ljava/lang/String;", (void*)my_getSimSerialNumber},
+            {"getLine1Number", "(I)Ljava/lang/String;", (void*)my_getLine1Number},
+        };
+        api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 4);
+        api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 4);
 
         LOGD("Vortex Gold Ghost loaded. Profile: %s", g_currentProfileName.c_str());
     }
