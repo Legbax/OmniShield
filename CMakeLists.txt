@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.4.1)
+
+project(vortex)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include_directories(jni/include)
+
+# Stub for Dobby implementation to allow linking check
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/dobby_stub.cpp "
+#include \"dobby.h\"
+extern \"C\" {
+int DobbyHook(void *address, void *fake_func, void **out_origin_func) { return 0; }
+const char *DobbyGetVersion() { return \"1.0\"; }
+void *DobbySymbolResolver(const char *image_name, const char *symbol_name) { return 0; }
+}
+")
+
+add_library(vortex SHARED
+    jni/main.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/dobby_stub.cpp
+)
+
+target_link_libraries(vortex
+    log
+)
