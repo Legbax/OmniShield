@@ -85,6 +85,7 @@ static const GLubyte* (*orig_glGetString)(GLenum name);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jobject, jobject, jstring);
+static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jobject, jobject, jstring, jint);
 
 // Helper
 inline std::string toLowerStr(const char* s) {
@@ -136,10 +137,16 @@ bool shouldHide(const char* key) {
 
 static inline bool isHiddenPath(const char* path) {
     if (!path || path[0] == '\0') return false;
+    // Obfuscated checks for "omnishield" and "vortex"
+    bool h1 = false, h2 = false;
+    // "om" + "ni" + "shi" + "eld"
+    if (strstr(path, "om") && strstr(path, "ni") && strstr(path, "shi") && strstr(path, "eld")) h1 = true;
+    // "vor" + "tex"
+    if (strstr(path, "vor") && strstr(path, "tex")) h2 = true;
+
     return strcasestr(path, "magisk") || strcasestr(path, "kernelsu") ||
            strcasestr(path, "susfs") || strcasestr(path, "omni_data") ||
-           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones") ||
-           strcasestr(path, "omnishield") || strcasestr(path, "vortex");
+           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones") || h1 || h2;
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -390,7 +397,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         double uptime = 0, idle = 0;
                         if (sscanf(tmpBuf, "%lf %lf", &uptime, &idle) >= 1) {
                              uptime += 259200 + (g_masterSeed % 1036800);
-                             idle += (259200 + (g_masterSeed % 1036800)) * 4.0;
+                             // Idle time as a coherent fraction (e.g. 80%) of uptime to avoid math anomalies
+                             idle = uptime * 0.80;
                              std::stringstream ss;
                              ss << std::fixed << std::setprecision(2) << uptime << " " << idle << "\n";
                              content = ss.str();
@@ -585,7 +593,7 @@ public:
 
 // Settings.Secure (getStringForUser - API 30+)
 void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
-if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getString);
+if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
 
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {

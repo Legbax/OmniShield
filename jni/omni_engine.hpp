@@ -225,7 +225,8 @@ inline std::vector<uint8_t> generateWidevineBytes(long seed) {
     return id;
 }
 inline std::string generateWidevineId(long seed) {
-    auto bytes = generateWidevineBytes(seed); std::stringstream ss;
+    std::vector<uint8_t> bytes = generateWidevineBytes(seed);
+    std::stringstream ss;
     ss << std::hex << std::setfill('0') << std::nouppercase;
     for(int i=0; i<16; ++i) ss << std::setw(2) << (int)bytes[i];
     return ss.str();

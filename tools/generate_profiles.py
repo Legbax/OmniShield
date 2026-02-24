@@ -46,7 +46,9 @@ def generate_header(input_file, output_file):
             "boardPlatform", "eglDriver", "openGlEs", "hardwareChipname",
             "zygote", "vendorFingerprint", "display", "buildDescription",
             "buildFlavor", "buildHost", "buildUser", "buildDateUtc",
-            "buildVersionCodename", "buildVersionPreviewSdk"
+            "buildVersionCodename", "buildVersionPreviewSdk", "gpuVendor",
+            "gpuRenderer", "gpuVersion", "screenWidth", "screenHeight",
+            "screenDensity"
         ]
 
         for field in ordered_fields:
