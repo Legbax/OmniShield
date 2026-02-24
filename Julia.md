@@ -231,3 +231,19 @@ jitter=true
 - **Versión:** Bump a v11.9.4.
 **Prompt del usuario:** "PR12... Fix Definitivo de openat (Cierre del Vector dirfd)... resolución de FDs sin estado (/proc/self/fd/)."
 **Nota para el siguiente agente:** El hook de openat ahora es capaz de resolver cualquier descriptor de archivo a su ruta absoluta para aplicar las reglas de VFS y ocultamiento.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR13 - Deep Memory & Prop Tree Shield)
+**Resumen de cambios:** v11.9.5 — Deep Memory & Prop Tree Shield.
+- **Deep Memory Shield:** Implementación de `PROC_MEMINFO` para virtualizar `/proc/meminfo`. La RAM total se falsifica dinámicamente según el perfil (4/6/8/12 GB) manteniendo la estructura real del kernel (buffers, swap, vmalloc) para evitar detección heurística de anomalías de formato.
+- **Prop Tree Shield:** Bloqueo proactivo de acceso a `/dev/__properties__/` en `my_open` y `my_openat`. Esto impide que herramientas anti-fraude hagan mmap directo sobre el árbol de propiedades, forzando el uso de `__system_property_get` que ya tenemos interceptado.
+- **Intelligence RAM:** Extensión de `struct DeviceFingerprint` con `ram_gb` y actualización masiva de todos los perfiles con capacidades de memoria realistas para cada modelo.
+**Prompt del usuario:** "Implementación PR13 (Deep Memory & Prop Tree Shield)... Cerraremos la fuga de memoria física (/proc/meminfo) y el mapeo en crudo del árbol de propiedades (/dev/__properties__/)."
+**Nota para el siguiente agente:** La memoria RAM reportada por el sistema ahora es coherente con el perfil de dispositivo emulado. El acceso directo a las propiedades del sistema está blindado.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR14 - Consolidado)
+**Resumen de cambios:** v11.9.6 — Hardware Consistency & Modern Prop Shield.
+- **Hardware Blocking:** Implementación de bloqueo de drivers de GPU contradictorios (/dev/mali vs /dev/kgsl) en `my_open` y `my_openat`. Esto previene la detección de quimeras de hardware (ej. perfil Snapdragon con driver Mali accesible).
+- **VFS Completo:** Extensión del sistema VFS para virtualizar `/proc/modules`, `/proc/self/mounts` y `/sys/devices/system/cpu/.../cpuinfo_max_freq`. La frecuencia de CPU se falsea según el SoC (Qualcomm 2.84GHz vs Otros 2.0GHz).
+- **Modern Prop Shield:** Hook completo a `__system_property_read_callback` para interceptar la API moderna de lectura de propiedades en Android 11+. Implementa filtrado (shouldHide) y spoofing consistente con `my_system_property_get`.
+**Prompt del usuario:** "PR14 Consolidado... reparar omisiones anteriores y añadir el blindaje definitivo de la API moderna de propiedades..."
+**Nota para el siguiente agente:** El sistema ahora intercepta todas las vías de lectura de propiedades (legacy y callback) y bloquea el acceso a hardware gráfico inconsistente.
