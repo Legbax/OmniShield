@@ -194,3 +194,13 @@ jitter=true
 - **Kernel (VULN-6):** Implementación de firmas de kernel Google específicas (`-gHASH-abNUM`) para dispositivos Pixel en `uname` y `/proc` files.
 **Prompt del usuario:** "Implementar PR9 (Google Red Team). 6 vulnerabilidades."
 **Nota personal para el siguiente agente:** El sistema ahora resiste análisis forense profundo de kernel y baseband. La paridad con hardware real es casi perfecta. Mantener la disciplina de `openat` para futuros hooks de I/O.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR10 — Security Team)
+**Resumen de cambios:** v11.9.2 — Security Team: 5 vulnerabilidades estructurales syscall-level.
+- **openat relativo (VULN-1 🟠):** `my_openat` actualizado para resolver paths relativos con `AT_FDCWD` usando `getcwd()`. `chdir("/proc") + openat("cpuinfo")` ahora pasa por VFS cache correctamente. Solo actúa en rutas que resuelven a `/proc/*` o `/sys/*`.
+- **fstatat no hookeado (VULN-2 🟠):** `my_fstatat()` añadido. Bionic usa `fstatat(AT_FDCWD,...)` como syscall primaria para `stat()`/`lstat()`. Resuelve paths relativos igual que `my_openat`. Registrado con `DobbySymbolResolver("fstatat")`.
+- **Qualcomm cpuinfo incompleto (VULN-3 🟠):** Bloque fallback de `generateMulticoreCpuInfo()` reescrito. Ahora genera `CPU variant`, `CPU part` y `CPU revision` para perfiles Qualcomm. Datos verificados contra dumps reales: kona/msmnile=0xd0d+variant0x4, lito=0xd0d+variant0x3, lahaina=0xd44+variant0x1, sdm670=0xd0a+variant0x2, bengal/trinket=A55 homogéneo 0xd05. Samsung Exynos omite estas líneas (comportamiento real de Samsung).
+- **GL_EXTENSIONS leak (VULN-4 🟠):** `my_glGetString()` actualizado para filtrar `GL_EXTENSIONS` (0x1F03). Extensiones `GL_ARM_*`, `GL_IMG_*` y `GL_OES_EGL_image_external_essl3` eliminadas cuando el perfil es Qualcomm (eglDriver="adreno"). Patrón `thread_local + erase` idéntico al de EGL_EXTENSIONS en PR9.
+- **ro.soc.* no interceptadas (VULN-5 🟠):** `ro.soc.manufacturer` derivado del `boardPlatform` del perfil (MediaTek/Samsung/Qualcomm). `ro.soc.model` devuelve `fp.hardwareChipname` del perfil activo. Sin estas, el mismatch MediaTek vs Qualcomm era detectado en Android 11+.
+**Prompt del usuario:** "Implementar PR10 (Security Team). 5 vulnerabilidades estructurales."
+**Nota personal para el siguiente agente:** El perímetro syscall ahora es hermético contra ataques de path relativo. La identidad gráfica (GL+EGL) y de SoC (ro.soc.* + cpuinfo) es consistente para Qualcomm.

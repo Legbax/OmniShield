@@ -65,6 +65,7 @@ static ssize_t (*orig_pread)(int fd, void* buf, size_t count, off_t offset);
 static ssize_t (*orig_pread64)(int fd, void* buf, size_t count, off64_t offset);
 static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
+static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static FILE* (*orig_fopen)(const char*, const char*);
 
 // Phase 2 Originals
@@ -169,6 +170,21 @@ int my_stat(const char* pathname, struct stat* statbuf) {
 int my_lstat(const char* pathname, struct stat* statbuf) {
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_lstat(pathname, statbuf);
+}
+
+int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    // Resolver path absoluto si es relativo con AT_FDCWD
+    if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
+        char cwd[512] = {};
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            std::string full = std::string(cwd) + "/" + pathname;
+            if (isHiddenPath(full.c_str())) { errno = ENOENT; return -1; }
+        }
+    } else if (isHiddenPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_fstatat(dirfd, pathname, statbuf, flags);
 }
 FILE* my_fopen(const char* pathname, const char* mode) {
     if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
@@ -339,9 +355,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             out += "CPU revision\t: 1\n\n";
         }
     } else {
-        // Fallback: Qualcomm (19.2MHz timer → 38.40) vs Exynos/otros (26MHz → 26.00)
-        // Qualcomm platforms: msmnile, kona, lahaina, atoll, lito, bengal, holi, trinket, sdm670
-        // Google Pixel: siempre Qualcomm (aunque hardware=codename, brand=google)
+        // Fallback: Qualcomm big.LITTLE A77/A78+A55 vs Exynos/otros (A55 homogeneous)
         std::string brandLower = toLowerStr(fp.brand);
         bool isQualcomm = (brandLower == "google") ||
             (platform.find("msmnile") != std::string::npos) ||
@@ -355,12 +369,42 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             (platform.find("sdm670")  != std::string::npos);
         std::string bogomips = isQualcomm ? "38.40" : "26.00";
 
+        // Qualcomm: big.LITTLE topology o A55 homogéneo según familia
+        // bengal y trinket = A55 homogéneo. Resto = big(A77/A78) + LITTLE(A55)
+        bool isHomogeneous = (platform.find("bengal")  != std::string::npos) ||
+                             (platform.find("trinket") != std::string::npos);
+
+        // Parámetros del núcleo big según plataforma Qualcomm
+        const char* bigPart    = "0xd0d";  // Cortex-A77 (default)
+        const char* bigVariant = "0x1";
+        const char* bigRev     = "0";
+        if (platform.find("kona") != std::string::npos ||
+            platform.find("msmnile") != std::string::npos) {
+            bigPart = "0xd0d"; bigVariant = "0x4"; bigRev = "0";
+        } else if (platform.find("lahaina") != std::string::npos) {
+            bigPart = "0xd44"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A78
+        } else if (platform.find("lito") != std::string::npos) {
+            bigPart = "0xd0d"; bigVariant = "0x3"; bigRev = "0";
+        } else if (platform.find("sdm670") != std::string::npos) {
+            bigPart = "0xd0a"; bigVariant = "0x2"; bigRev = "1"; // Cortex-A75
+        }
+
+        int bigCoreStart = isHomogeneous ? fp.core_count : fp.core_count - 2;
+
         for(int i = 0; i < fp.core_count; ++i) {
+            bool isBig = isQualcomm && !isHomogeneous && (i >= bigCoreStart);
             out += "processor\t: " + std::to_string(i) + "\n";
             out += "BogoMIPS\t: " + bogomips + "\n";
             out += "Features\t: " + features + "\n";
             out += "CPU implementer\t: 0x41\n";
-            out += "CPU architecture: 8\n\n";
+            out += "CPU architecture: 8\n";
+            if (isQualcomm) {
+                // ARM64 Qualcomm: incluir variant, part y revision (obligatorios)
+                out += "CPU variant\t: " + std::string(isBig ? bigVariant : "0x0") + "\n";
+                out += "CPU part\t: "    + std::string(isBig ? bigPart    : "0xd05") + "\n";
+                out += "CPU revision\t: " + std::string(isBig ? bigRev   : "5") + "\n";
+            }
+            out += "\n";
         }
     }
     out += "Hardware\t: " + std::string(fp.hardware) + "\n";
@@ -447,6 +491,21 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "gsm.version.ril-impl")
             dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
+        else if (k == "ro.soc.manufacturer") {
+            // Derivar el fabricante del SoC del boardPlatform del perfil activo
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos)
+                dynamic_buffer = "MediaTek";
+            else if (plat.find("exynos") != std::string::npos ||
+                     plat.find("s5e")    != std::string::npos)
+                dynamic_buffer = "Samsung";
+            else
+                dynamic_buffer = "Qualcomm";   // kona, lito, atoll, bengal, etc.
+        }
+        else if (k == "ro.soc.model") {
+            // ro.soc.model = el chip model del perfil (hardwareChipname)
+            dynamic_buffer = fp.hardwareChipname;
+        }
 
         if (!dynamic_buffer.empty()) {
             int len = dynamic_buffer.length();
@@ -600,12 +659,27 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
-    // Todos los paths sensibles (/proc/*, /sys/*) son absolutos.
-    // Para paths absolutos: my_open maneja el VFS cache y llama orig_open
-    // (que en bionic ES openat(AT_FDCWD,...) — semánticamente equivalente).
-    // Para paths relativos: no son rutas de /proc ni /sys → no requieren spoofing.
     if (pathname && pathname[0] == '/') {
+        // Path absoluto: delegamos directamente a my_open (que tiene toda la lógica VFS)
         return my_open(pathname, flags, mode);
+    }
+    if (pathname && dirfd == AT_FDCWD) {
+        // Path relativo desde CWD: resolver a path absoluto para VFS lookup
+        char cwd[512] = {};
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            std::string full = std::string(cwd) + "/" + pathname;
+            // Verificar si el path absoluto resultante es una ruta que el VFS gestiona
+            // Si cae en una ruta sensible (/proc/*, /sys/*), lo pasamos por my_open
+            if (full.find("/proc/") != std::string::npos ||
+                full.find("/sys/")  != std::string::npos) {
+                return my_open(full.c_str(), flags, mode);
+            }
+            // También verificar isHiddenPath para root-hiding
+            if (isHiddenPath(full.c_str())) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
     }
     return orig_openat(dirfd, pathname, flags, mode);
 }
@@ -708,12 +782,46 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 // -----------------------------------------------------------------------------
 // Hooks: GPU
 // -----------------------------------------------------------------------------
+#define GL_EXTENSIONS 0x1F03
+
 const GLubyte* my_glGetString(GLenum name) {
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        if (name == GL_VENDOR) return (const GLubyte*)fp.gpuVendor;
+        if (name == GL_VENDOR)   return (const GLubyte*)fp.gpuVendor;
         if (name == GL_RENDERER) return (const GLubyte*)fp.gpuRenderer;
-        if (name == GL_VERSION) return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
+        if (name == GL_VERSION)  return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
+
+        if (name == GL_EXTENSIONS) {
+            const GLubyte* orig_ext = orig_glGetString(name);
+            if (!orig_ext) return orig_ext;
+
+            std::string egl = toLowerStr(fp.eglDriver);
+            if (egl == "adreno") {
+                // Perfil Qualcomm: eliminar extensiones ARM/Mali de las GL extensions
+                // (mismo principio que EGL_EXTENSIONS — erase, no replace)
+                static thread_local std::string gl_ext_cache;
+                gl_ext_cache = reinterpret_cast<const char*>(orig_ext);
+
+                static const char* ARM_GL_EXTS[] = {
+                    "GL_ARM_", "GL_IMG_", "GL_OES_EGL_image_external_essl3",
+                    nullptr
+                };
+                for (int i = 0; ARM_GL_EXTS[i]; ++i) {
+                    size_t pos;
+                    while ((pos = gl_ext_cache.find(ARM_GL_EXTS[i])) != std::string::npos) {
+                        // GL_EXTENSIONS usa espacios como separadores
+                        size_t end = gl_ext_cache.find(' ', pos);
+                        if (end == std::string::npos) gl_ext_cache.erase(pos);
+                        else gl_ext_cache.erase(pos, end - pos + 1);
+                    }
+                }
+                // Limpiar espacios dobles resultantes del erase
+                while (gl_ext_cache.find("  ") != std::string::npos)
+                    gl_ext_cache.replace(gl_ext_cache.find("  "), 2, " ");
+
+                return reinterpret_cast<const GLubyte*>(gl_ext_cache.c_str());
+            }
+        }
     }
     return orig_glGetString(name);
 }
@@ -811,6 +919,8 @@ public:
         DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
         DobbyHook((void*)stat, (void*)my_stat, (void**)&orig_stat);
         DobbyHook((void*)lstat, (void*)my_lstat, (void**)&orig_lstat);
+        void* fstatat_func = DobbySymbolResolver(nullptr, "fstatat");
+        if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
         DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
         DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
