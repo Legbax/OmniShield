@@ -9,9 +9,10 @@
 #include <ctime>
 #include <algorithm>
 #include <sys/time.h>
-#include "vortex_profiles.h"
+#include <cmath>
+#include "omni_profiles.h"
 
-namespace vortex {
+namespace omni {
 namespace engine {
 
 // TACs mapped by brand
@@ -46,6 +47,7 @@ inline std::string toLower(const std::string& str) {
     return s;
 }
 
+// 1. LUHN FIX: Paridad par para base de 14 dígitos
 inline int luhnChecksum(const std::string& number) {
     int sum = 0, len = number.length();
     for (int i = len - 1; i >= 0; i--) {
@@ -76,8 +78,8 @@ public:
 };
 
 inline std::string getRegionForProfile(const std::string& profileName) {
-    auto it = VORTEX_PROFILES.find(profileName);
-    if (it != VORTEX_PROFILES.end()) {
+    auto it = G_DEVICE_PROFILES.find(profileName);
+    if (it != G_DEVICE_PROFILES.end()) {
         std::string p = toLower(std::string(it->second.product));
         if (p.find("global") != std::string::npos || p.find("eea") != std::string::npos) return "europe";
         if (p.find("india") != std::string::npos) return "india";
@@ -91,8 +93,8 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
     std::string brand = "default";
     bool isQualcomm = false;
 
-    auto it = VORTEX_PROFILES.find(profileName);
-    if (it != VORTEX_PROFILES.end()) {
+    auto it = G_DEVICE_PROFILES.find(profileName);
+    if (it != G_DEVICE_PROFILES.end()) {
         brand = toLower(it->second.brand);
         isQualcomm = (toLower(std::string(it->second.eglDriver)) == "adreno");
     }
@@ -113,18 +115,11 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
     return base + std::to_string(luhnChecksum(base));
 }
 
+// ICCID: Estándar ITU-T E.118 (89...)
 inline std::string generateValidIccid(const std::string& profileName, long seed) {
-    static const std::map<std::string, std::pair<std::string,std::string>> ICCID_MCC_MNC = {
-        {"india", {"404", "20"}}, {"europe", {"234", "20"}}, {"latam", {"724", "06"}}, {"usa", {"310", "260"}}
-    };
-    Random rng(seed);
-    std::string region = getRegionForProfile(profileName);
-    auto mcc_mnc = ICCID_MCC_MNC.count(region) ? ICCID_MCC_MNC.at(region) : ICCID_MCC_MNC.at("europe");
-
-    std::string base = "89" + mcc_mnc.first + mcc_mnc.second;
-    while (base.size() < 18) base += std::to_string(rng.nextInt(10));
-    base = base.substr(0, 18);
-    return base + std::to_string(luhnChecksum(base));
+    Random rng(seed); std::string iccid = "895201";
+    for(int i=0; i<12; ++i) iccid += std::to_string(rng.nextInt(10));
+    return iccid + std::to_string(luhnChecksum(iccid));
 }
 
 inline std::string generateValidImsi(const std::string& profileName, long seed) {
@@ -236,20 +231,21 @@ inline std::string generateWidevineId(long seed) {
     return ss.str();
 }
 
+// Temperatura: Oscilación orgánica sinusoidal
 inline std::string generateBatteryTemp(long seed) {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    long timeSlice = (ts.tv_sec * 10L) + (ts.tv_nsec / 100000000L);
-    Random rng(seed + timeSlice);
-    float temp = rng.nextFloat(340.0f, 390.0f); // 34.0C - 39.0C
-    return std::to_string((int)temp);
+    struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
+    double variation = std::sin((double)ts.tv_sec / 120.0) * 15.0;
+    int temp = 330 + (int)variation;
+    return std::to_string(temp);
 }
 
+// Voltaje: Variación lenta en µV basada en minutos (CLOCK_BOOTTIME)
 inline std::string generateBatteryVoltage(long seed) {
-    struct timeval tv; gettimeofday(&tv, nullptr);
-    long timeMicros = (long)tv.tv_sec * 1000000L + tv.tv_usec;
-    Random rng(seed + timeMicros / 500);
-    long baseUv = 3850000L; // 3.85V -> µV
-    return std::to_string(baseUv + (rng.nextInt(300000) - 150000));
+    struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
+    long timeSlice = ts.tv_sec / 60;
+    Random rng(seed + timeSlice);
+    int uv = (rng.nextInt(400) + 3700) * 1000;
+    return std::to_string(uv);
 }
 
 inline std::string generateTls13CipherSuites(long seed) {
@@ -273,4 +269,4 @@ inline std::string generateTls12CipherSuites(long seed) {
 inline const char* getGlVersionForProfile(const DeviceFingerprint& fp) { return fp.gpuVersion; }
 
 } // namespace engine
-} // namespace vortex
+} // namespace omni
