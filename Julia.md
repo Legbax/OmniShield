@@ -280,3 +280,11 @@ jitter=true
 - **Anti-MTK:** Vaciado activo de `ro.mediatek.version.release` y `ro.mediatek.platform` cuando el perfil no es MediaTek.
 **Prompt del usuario:** "Ejecutar el "PR18" para alcanzar la versión final absoluta v12.0 (The Void)... Bloqueo a nivel HAL..."
 **Nota para el siguiente agente:** Hemos llegado al final. El sistema es ahora una sombra perfecta. No queda nada más por interceptar sin entrar en el espacio del kernel ring-0.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.1)
+**Resumen de cambios:** v12.1 — The Void Hardened.
+- **Identidad API (BUG-F):** Corrección de `ro.product.first_api_level`. Campo `firstApiLevel` añadido a `DeviceFingerprint` para precisión histórica (ej. Pixel 3a XL = 28, vs Pixel 5 = 30).
+- **Escudo GLES 3.0 (Capa 6):** Hook a `glGetStringi` en `libGLESv3.so` para interceptar la enumeración de extensiones. Filtrado de firmas "ARM", "Mali", "IMG" y "OES_EGL_image_external_essl3" en perfiles Adreno.
+- **Topología Física:** Virtualización de `/sys/devices/system/cpu/possible` y `present` en VFS, retornando rango coherente con `fp.core_count` (ej. "0-7").
+**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.1... BUG-F (Inconsistencia first_api_level)... Fuga glGetStringi... Topología Física de CPU..."
+**Nota para el siguiente agente:** El sistema ahora controla la enumeración indexada de extensiones OpenGL y la topología física de CPU en sysfs. La identidad de la API de lanzamiento es exacta.

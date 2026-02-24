@@ -50,7 +50,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -102,6 +102,7 @@ typedef unsigned int GLenum;
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
+static const GLubyte* (*orig_glGetStringi)(GLenum name, GLuint index);
 
 // Vulkan & Sensors
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
@@ -550,9 +551,7 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (region == "europe") ? "Europe/London" : "America/New_York";
         }
         else if (k == "ro.product.first_api_level") {
-            int release_api = 0;
-            try { release_api = std::stoi(fp.release); } catch (...) {}
-            dynamic_buffer = (release_api >= 11) ? "30" : "29";
+            dynamic_buffer = fp.firstApiLevel;
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
         else if (k == "gsm.version.baseband")               dynamic_buffer = fp.radioVersion;
@@ -653,6 +652,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/asound/cards")) type = PROC_ASOUND;
         else if (strstr(pathname, "/proc/bus/input/devices")) type = PROC_INPUT;
         else if (strstr(pathname, "/sys/class/thermal/") && strstr(pathname, "type")) type = SYS_THERMAL;
+        else if (strstr(pathname, "/sys/devices/system/cpu/possible")) type = SYS_CPU_POSSIBLE;
+        else if (strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_PRESENT;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -850,6 +851,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     } else {
                         content = "tsens_tz_sensor\n";
                     }
+                } else if (type == SYS_CPU_POSSIBLE || type == SYS_CPU_PRESENT) {
+                    content = "0-" + std::to_string(fp.core_count - 1) + "\n";
                 }
             }
 
@@ -1065,6 +1068,27 @@ const GLubyte* my_glGetString(GLenum name) {
         }
     }
     return orig_glGetString(name);
+}
+
+const GLubyte* my_glGetStringi(GLenum name, GLuint index) {
+    const GLubyte* ret = orig_glGetStringi(name, index);
+    if (!ret) return ret;
+
+    if (name == GL_EXTENSIONS && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        if (toLowerStr(fp.eglDriver) == "adreno") {
+            std::string ext = reinterpret_cast<const char*>(ret);
+            // Si encontramos una extensión prohibida de ARM/Mali/IMG, la reemplazamos
+            // por una extensión segura y genérica de Qualcomm para no romper el índice.
+            if (ext.find("ARM") != std::string::npos ||
+                ext.find("Mali") != std::string::npos ||
+                ext.find("IMG") != std::string::npos ||
+                ext.find("OES_EGL_image_external_essl3") != std::string::npos) {
+                return (const GLubyte*)"GL_OES_compressed_ETC1_RGB8_texture";
+            }
+        }
+    }
+    return ret;
 }
 
 // -----------------------------------------------------------------------------
@@ -1319,6 +1343,9 @@ public:
         // GPU Hooks
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
+
+        void* gli_func = DobbySymbolResolver("libGLESv3.so", "glGetStringi");
+        if (gli_func) DobbyHook(gli_func, (void*)my_glGetStringi, (void**)&orig_glGetStringi);
 
         // Vulkan
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
