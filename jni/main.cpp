@@ -26,10 +26,10 @@
 
 #include "zygisk.hpp"
 #include "dobby.h"
-#include "vortex_profiles.h"
-#include "vortex_engine.hpp"
+#include "omni_profiles.h"
+#include "omni_engine.hpp"
 
-#define LOG_TAG "VortexNative"
+#define LOG_TAG "AndroidSystem"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
@@ -105,7 +105,7 @@ inline std::string toLowerStr(const char* s) {
 
 // Config
 void readConfig() {
-    std::ifstream file("/data/adb/vortex/vortex.prop");
+    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
     if (!file.is_open()) return;
     std::string line;
     while (std::getline(file, line)) {
@@ -129,8 +129,8 @@ bool shouldHide(const char* str) {
     if (!str || str[0] == '\0') return false;
     std::string s = toLowerStr(str);
 
-    if (VORTEX_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
+    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::vector<std::string> legit = {toLowerStr(fp.hardware), toLowerStr(fp.hardwareChipname), toLowerStr(fp.boardPlatform)};
         for (const auto& l : legit) if (!l.empty() && s.find(l) != std::string::npos) return false;
     }
@@ -142,14 +142,10 @@ bool shouldHide(const char* str) {
 // -----------------------------------------------------------------------------
 
 static inline bool isHiddenPath(const char* path) {
-    if (!path) return false;
+    if (!path || path[0] == '\0') return false;
     return strcasestr(path, "magisk") || strcasestr(path, "kernelsu") ||
-           strcasestr(path, "/ksu") || strcasestr(path, "susfs") ||
-           strcasestr(path, "shamiko") || strcasestr(path, "lsposed") ||
-           strcasestr(path, "zygisk") || strcasestr(path, "vortex") ||
-           strcasestr(path, "superuser") || strcasestr(path, "/sbin/su") ||
-           strcasestr(path, "com.topjohnwu") || strcasestr(path, "frida") ||
-           strcasestr(path, "/data/adb/modules");
+           strcasestr(path, "susfs") || strcasestr(path, "omni_data") ||
+           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones");
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -167,8 +163,8 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 
 // 1. EGL Spoofing
 const char* my_eglQueryString(void* display, int name) {
-    if (name == EGL_VENDOR && VORTEX_PROFILES.count(g_currentProfileName)) {
-        return VORTEX_PROFILES.at(g_currentProfileName).gpuVendor;
+    if (name == EGL_VENDOR && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        return G_DEVICE_PROFILES.at(g_currentProfileName).gpuVendor;
     }
     return orig_eglQueryString(display, name);
 }
@@ -190,13 +186,16 @@ int my_uname(struct utsname *buf) {
     int ret = orig_uname(buf);
     if (ret == 0 && buf != nullptr) {
         strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
-        const char* kernel = "4.14.186-perf+";
-        if (VORTEX_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(VORTEX_PROFILES.at(g_currentProfileName).boardPlatform);
+
+        std::string kernel = "4.14.186-perf+";
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             if (plat.find("mt6") != std::string::npos) kernel = "4.14.141-perf+";
             else if (plat.find("kona") != std::string::npos) kernel = "4.19.157-perf+";
         }
-        strcpy(buf->release, kernel); strcpy(buf->version, "#1 SMP PREEMPT");
+
+        strcpy(buf->release, kernel.c_str());
+        strcpy(buf->version, "#1 SMP PREEMPT");
     }
     return ret;
 }
@@ -218,9 +217,9 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 
                 // Validación de seguridad contra punteros nulos
                 if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
-                    std::string brand = VORTEX_PROFILES.count(g_currentProfileName) ?
-                                        VORTEX_PROFILES.at(g_currentProfileName).brand : "default";
-                    std::string mac_str = vortex::engine::generateRandomMac(brand, g_masterSeed + 50);
+                    std::string brand = G_DEVICE_PROFILES.count(g_currentProfileName) ?
+                                        G_DEVICE_PROFILES.at(g_currentProfileName).brand : "default";
+                    std::string mac_str = omni::engine::generateRandomMac(brand, g_masterSeed + 50);
 
                     // Sobrescribir bytes reales
                     unsigned int mac[6];
@@ -264,7 +263,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
 
 int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
     if (name && strcmp(name, "deviceUniqueId") == 0) {
-        auto rawId = vortex::engine::generateWidevineBytes(g_masterSeed);
+        auto rawId = omni::engine::generateWidevineBytes(g_masterSeed);
         if (*size >= 16) {
             memcpy(value, rawId.data(), 16);
             *size = 16;
@@ -286,45 +285,42 @@ int my_system_property_get(const char *key, char *value) {
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
     int ret = orig_system_property_get(key, value);
 
-    if (VORTEX_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
+    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::string k = key;
-        const char* replacement = nullptr;
+        std::string dynamic_buffer; // Use local buffer instead of static
 
-        if (k == "ro.product.model") replacement = fp.model;
-        else if (k == "ro.product.brand") replacement = fp.brand;
-        else if (k == "ro.product.manufacturer") replacement = fp.manufacturer;
-        else if (k == "ro.product.device") replacement = fp.device;
-        else if (k == "ro.product.name") replacement = fp.product;
-        else if (k == "ro.hardware") replacement = fp.hardware;
-        else if (k == "ro.board.platform") replacement = fp.boardPlatform;
-        else if (k == "ro.build.fingerprint") replacement = fp.fingerprint;
-        else if (k == "ro.build.id") replacement = fp.buildId;
+        if (k == "ro.product.model") dynamic_buffer = fp.model;
+        else if (k == "ro.product.brand") dynamic_buffer = fp.brand;
+        else if (k == "ro.product.manufacturer") dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.device") dynamic_buffer = fp.device;
+        else if (k == "ro.product.name") dynamic_buffer = fp.product;
+        else if (k == "ro.hardware") dynamic_buffer = fp.hardware;
+        else if (k == "ro.board.platform") dynamic_buffer = fp.boardPlatform;
+        else if (k == "ro.build.fingerprint") dynamic_buffer = fp.fingerprint;
+        else if (k == "ro.build.id") dynamic_buffer = fp.buildId;
         else if (k == "ro.serialno" || k == "ro.boot.serialno") {
-            static std::string serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
-            replacement = serial.c_str();
+            dynamic_buffer = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
         }
-        else if (k == "ro.build.display.id") replacement = fp.display;
-        else if (k == "ro.build.tags") replacement = fp.tags;
-        else if (k == "ro.build.version.sdk") replacement = "30";
-        else if (k == "ro.secure" || k == "ro.build.selinux") replacement = "1";
-        else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") replacement = "0";
-        else if (k == "ro.hardware.chipname") replacement = fp.hardwareChipname;
-        else if (k == "ro.product.board") replacement = fp.board;
+        else if (k == "ro.build.display.id") dynamic_buffer = fp.display;
+        else if (k == "ro.build.tags") dynamic_buffer = fp.tags;
+        else if (k == "ro.build.version.sdk") dynamic_buffer = "30";
+        else if (k == "ro.secure" || k == "ro.build.selinux") dynamic_buffer = "1";
+        else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") dynamic_buffer = "0";
+        else if (k == "ro.hardware.chipname") dynamic_buffer = fp.hardwareChipname;
+        else if (k == "ro.product.board") dynamic_buffer = fp.board;
         else if (k == "ro.sf.lcd_density") {
-            replacement = fp.screenDensity;
+            dynamic_buffer = fp.screenDensity;
         } else if (k == "ro.product.display_resolution") {
-            static std::string res = std::string(fp.screenWidth) + "x" + std::string(fp.screenHeight);
-            replacement = res.c_str();
+            dynamic_buffer = std::string(fp.screenWidth) + "x" + std::string(fp.screenHeight);
         } else if (k == "gsm.device.id" || k == "ro.ril.miui.imei0") {
-            static std::string imei = vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed);
-            replacement = imei.c_str();
+            dynamic_buffer = omni::engine::generateValidImei(g_currentProfileName, g_masterSeed);
         }
 
-        if (replacement) {
-            int len = strlen(replacement);
+        if (!dynamic_buffer.empty()) {
+            int len = dynamic_buffer.length();
             if (len >= 92) len = 91;
-            strncpy(value, replacement, len);
+            strncpy(value, dynamic_buffer.c_str(), len);
             value[len] = '\0';
             return len;
         }
@@ -370,12 +366,12 @@ ssize_t my_read(int fd, void *buf, size_t count) {
     FileType type = NONE;
     { std::lock_guard<std::mutex> lock(g_fdMutex); if(g_fdMap.count(fd)) type = g_fdMap[fd]; }
 
-    if (type != NONE && VORTEX_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
+    if (type != NONE && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::string content;
 
-        std::string dyn_serial = vortex::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
-        std::string dyn_mac = vortex::engine::generateRandomMac(fp.brand, g_masterSeed + 50);
+        std::string dyn_serial = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
+        std::string dyn_mac = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 50);
 
         if (type == PROC_VERSION) {
             std::string plat = toLowerStr(fp.boardPlatform);
@@ -387,8 +383,8 @@ ssize_t my_read(int fd, void *buf, size_t count) {
             content = generateMulticoreCpuInfo(fp);
         } else if (type == USB_SERIAL) { content = dyn_serial + "\n";
         } else if (type == WIFI_MAC) { content = dyn_mac + "\n";
-        } else if (type == BATTERY_TEMP) { content = vortex::engine::generateBatteryTemp(g_masterSeed) + "\n";
-        } else if (type == BATTERY_VOLT) { content = vortex::engine::generateBatteryVoltage(g_masterSeed) + "\n";
+        } else if (type == BATTERY_TEMP) { content = omni::engine::generateBatteryTemp(g_masterSeed) + "\n";
+        } else if (type == BATTERY_VOLT) { content = omni::engine::generateBatteryVoltage(g_masterSeed) + "\n";
         } else if (type == PROC_MAPS) {
             char tmpBuf[4096];
             ssize_t realRead = orig_read(fd, tmpBuf, sizeof(tmpBuf) - 1);
@@ -439,19 +435,19 @@ ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* e
 // -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
-int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, vortex::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
-int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, vortex::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
-int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, vortex::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, omni::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
 
 // -----------------------------------------------------------------------------
 // Hooks: GPU
 // -----------------------------------------------------------------------------
 const GLubyte* my_glGetString(GLenum name) {
-    if (VORTEX_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = VORTEX_PROFILES.at(g_currentProfileName);
+    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         if (name == GL_VENDOR) return (const GLubyte*)fp.gpuVendor;
         if (name == GL_RENDERER) return (const GLubyte*)fp.gpuRenderer;
-        if (name == GL_VERSION) return (const GLubyte*)vortex::engine::getGlVersionForProfile(fp);
+        if (name == GL_VERSION) return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
     }
     return orig_glGetString(name);
 }
@@ -463,9 +459,9 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
     const char* key = env->GetStringUTFChars(name, nullptr);
     jstring result = nullptr;
     if (strcmp(key, "android_id") == 0) {
-        result = env->NewStringUTF(vortex::engine::generateRandomId(16, g_masterSeed).c_str());
+        result = env->NewStringUTF(omni::engine::generateRandomId(16, g_masterSeed).c_str());
     } else if (strcmp(key, "gsf_id") == 0) {
-        result = env->NewStringUTF(vortex::engine::generateRandomId(16, g_masterSeed + 1).c_str());
+        result = env->NewStringUTF(omni::engine::generateRandomId(16, g_masterSeed + 1).c_str());
     }
     env->ReleaseStringUTFChars(name, key);
     if (result) return result;
@@ -478,7 +474,7 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
 jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jprop) {
     const char* prop = env->GetStringUTFChars(jprop, nullptr);
     if (strcmp(prop, "deviceUniqueId") == 0) {
-        auto rawId = vortex::engine::generateWidevineBytes(g_masterSeed);
+        auto rawId = omni::engine::generateWidevineBytes(g_masterSeed);
         jbyteArray jarray = env->NewByteArray(16);
         env->SetByteArrayRegion(jarray, 0, 16, (jbyte*)rawId.data());
         env->ReleaseStringUTFChars(jprop, prop);
@@ -489,16 +485,16 @@ jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jp
 }
 
 jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
-    return env->NewStringUTF(vortex::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId).c_str());
+    return env->NewStringUTF(omni::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId).c_str());
 }
 jstring JNICALL my_getSubscriberId(JNIEnv* env, jobject thiz, jint subId) {
-    return env->NewStringUTF(vortex::engine::generateValidImsi(g_currentProfileName, g_masterSeed + subId).c_str());
+    return env->NewStringUTF(omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed + subId).c_str());
 }
 jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) {
-    return env->NewStringUTF(vortex::engine::generateValidIccid(g_currentProfileName, g_masterSeed + subId + 100).c_str());
+    return env->NewStringUTF(omni::engine::generateValidIccid(g_currentProfileName, g_masterSeed + subId + 100).c_str());
 }
 jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
-    return env->NewStringUTF(vortex::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str());
+    return env->NewStringUTF(omni::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str());
 }
 
 
@@ -547,6 +543,8 @@ public:
         // TLS 1.3
         void* tls13_ctx = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
         if (tls13_ctx) DobbyHook(tls13_ctx, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
+        void* tls13_ssl = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
+        if (tls13_ssl) DobbyHook(tls13_ssl, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
@@ -589,7 +587,7 @@ public:
         api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 4);
         api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 4);
 
-        LOGD("Vortex Gold Ghost loaded. Profile: %s", g_currentProfileName.c_str());
+        LOGD("System Integrity loaded. Profile: %s", g_currentProfileName.c_str());
     }
     void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
