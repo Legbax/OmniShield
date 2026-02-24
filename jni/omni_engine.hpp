@@ -117,10 +117,20 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
     return base + std::to_string(luhnChecksum(base));
 }
 
-// ICCID: Estándar ITU-T E.118 (89...)
+// ICCID: Region-Aware ICCID Generator
 inline std::string generateValidIccid(const std::string& profileName, long seed) {
-    Random rng(seed); std::string iccid = "895201";
-    for(int i=0; i<12; ++i) iccid += std::to_string(rng.nextInt(10));
+    static const std::map<std::string, std::string> ICCID_PREFIX = {
+        {"usa",    "89101"},
+        {"europe", "89440"},
+        {"latam",  "89520"},
+    };
+    Random rng(seed);
+    std::string region = getRegionForProfile(profileName);
+    std::string prefix = ICCID_PREFIX.count(region) ? ICCID_PREFIX.at(region) : "89101";
+    std::string iccid = prefix;
+    int targetBaseLen = 18;
+    int remaining = targetBaseLen - (int)prefix.size();
+    for(int i = 0; i < remaining; ++i) iccid += std::to_string(rng.nextInt(10));
     return iccid + std::to_string(luhnChecksum(iccid));
 }
 

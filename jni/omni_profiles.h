@@ -58,7 +58,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V84.P47",
         "V12.5.6.0.RJCMIXM",
-        "2025-11-01",
+        "2021-10-05",
         "11",
         "mt6768",
         "mali",
@@ -80,7 +80,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2340",
         "395",
-    8,
+        8
     } },
     { "POCO X3 Pro", {
         "Xiaomi",
@@ -97,7 +97,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.1.c3-00186-SM8150_GEN_PACK-1",
         "V12.5.3.0.RJUMIXM",
-        "2025-11-01",
+        "2021-10-01",
         "11",
         "msmnile",
         "adreno",
@@ -119,7 +119,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
-    8,
+        8
     } },
     { "Mi 10T", {
         "Xiaomi",
@@ -136,7 +136,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1",
         "V12.5.1.0.RJDMIXM",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "kona",
         "adreno",
@@ -158,7 +158,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
-    8,
+        8
     } },
     { "Redmi Note 10 Pro", {
         "Xiaomi",
@@ -175,7 +175,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00026-SM7150_GEN_PACK-1",
         "V12.5.4.0.RKGMIXM",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "atoll",
         "adreno",
@@ -197,7 +197,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
-    8,
+        8
     } },
     { "Redmi Note 9 Pro", {
         "Xiaomi",
@@ -214,7 +214,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1",
         "V12.5.1.0.RJZMIXM",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "atoll",
         "adreno",
@@ -231,12 +231,12 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "REL",
         "0",
         "Qualcomm",
-        "Adreno (TM) 642L",
+        "Adreno (TM) 618",
         "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Redmi Note 10", {
         "Xiaomi",
@@ -253,9 +253,9 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00055-SM6150_GEN_PACK-1",
         "V12.5.6.0.RKFMIXM",
-        "2025-11-01",
+        "2021-09-01",
         "11",
-        "bengal",
+        "atoll",
         "adreno",
         "196610",
         "SM6150",
@@ -270,12 +270,12 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "REL",
         "0",
         "Qualcomm",
-        "Adreno (TM) 610",
+        "Adreno (TM) 612",
         "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
         "1080",
         "2400",
         "409",
-    8,
+        8
     } },
     { "POCO M3 Pro 5G", {
         "Xiaomi",
@@ -292,7 +292,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V73.6",
         "V12.5.2.0.RKRMIXM",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "mt6833",
         "mali",
@@ -314,7 +314,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "POCO X3 NFC", {
         "Xiaomi",
@@ -331,7 +331,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00026-SM7150_GEN_PACK-1",
         "V12.5.2.0.RJGMIXM",
-        "2025-11-01",
+        "2021-10-01",
         "11",
         "atoll",
         "adreno",
@@ -353,7 +353,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
-    8,
+        8
     } },
     { "Mi 11 Lite", {
         "Xiaomi",
@@ -370,7 +370,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00026-SM7150_GEN_PACK-1",
         "V12.5.3.0.RKAMIXM",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "atoll",
         "adreno",
@@ -392,7 +392,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Mi 11", {
         "Xiaomi",
@@ -409,7 +409,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.3.c1-00076-SM8350_GEN_PACK-1",
         "V12.5.6.0.RKBMIXM",
-        "2025-11-01",
+        "2021-10-01",
         "11",
         "lahaina",
         "adreno",
@@ -431,7 +431,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Redmi 10X 4G", {
         "Xiaomi",
@@ -448,7 +448,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V110.6",
         "V12.5.3.0.QJJCNXM",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "mt6769",
         "mali",
@@ -470,7 +470,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "POCO F3", {
         "Xiaomi",
@@ -487,7 +487,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1",
         "V12.5.5.0.RKHMIXM",
-        "2025-11-01",
+        "2021-09-01",
         "11",
         "kona",
         "adreno",
@@ -509,7 +509,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "386",
-    8,
+        8
     } },
     { "Galaxy A52", {
         "samsung",
@@ -526,7 +526,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1",
         "A525FXXU4AUH1",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "atoll",
         "adreno",
@@ -548,7 +548,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "386",
-    8,
+        8
     } },
     { "Galaxy A72", {
         "samsung",
@@ -565,7 +565,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1",
         "A725FXXU3AUH2",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "atoll",
         "adreno",
@@ -581,13 +581,13 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000",
         "REL",
         "0",
-        "ARM",
-        "Mali-G57 MC3",
-        "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2",
+        "Qualcomm",
+        "Adreno (TM) 618",
+        "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy A32 5G", {
         "samsung",
@@ -604,7 +604,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V84.6",
         "A326BXXU4AUH1",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "mt6853",
         "mali",
@@ -620,13 +620,13 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000",
         "REL",
         "0",
-        "Qualcomm",
-        "Adreno (TM) 618",
-        "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
+        "ARM",
+        "Mali-G57 MC3",
+        "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2",
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy S20 FE", {
         "samsung",
@@ -643,7 +643,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1",
         "G781BXXU3CUJ2",
-        "2025-11-01",
+        "2021-10-01",
         "11",
         "kona",
         "adreno",
@@ -665,7 +665,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy A51", {
         "samsung",
@@ -682,7 +682,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "",
         "A515FXXU4CUG1",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "exynos9610",
         "mali",
@@ -704,7 +704,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy M31", {
         "samsung",
@@ -721,7 +721,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "",
         "M315FXXU4CUG1",
-        "2025-11-01",
+        "2021-11-01",
         "11",
         "exynos850",
         "mali",
@@ -743,7 +743,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy A12", {
         "samsung",
@@ -760,7 +760,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V56.6",
         "A125FXXU5BUJ1",
-        "2025-11-01",
+        "2021-10-01",
         "11",
         "mt6765",
         "powervr",
@@ -782,7 +782,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy A21s", {
         "samsung",
@@ -799,7 +799,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "g850-210401-5286",
         "A217FXXU4CUJ1",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "exynos850",
         "mali",
@@ -821,7 +821,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Galaxy A31", {
         "samsung",
@@ -838,7 +838,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V84.P47",
         "A315FXXU4CUH1",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "mt6768",
         "mali",
@@ -860,7 +860,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "411",
-    8,
+        8
     } },
     { "Galaxy F62", {
         "samsung",
@@ -877,7 +877,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "",
         "E625FXXU2BUG1",
-        "2025-11-01",
+        "2021-07-01",
         "11",
         "exynos9825",
         "mali",
@@ -899,7 +899,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "393",
-    8,
+        8
     } },
     { "OnePlus 8T", {
         "OnePlus",
@@ -916,7 +916,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1",
         "2107142215",
-        "2025-11-01",
+        "2021-07-05",
         "11",
         "kona",
         "adreno",
@@ -938,7 +938,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "401",
-    8,
+        8
     } },
     { "OnePlus Nord", {
         "OnePlus",
@@ -955,7 +955,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1",
         "2105101635",
-        "2025-11-01",
+        "2021-06-05",
         "11",
         "lito",
         "adreno",
@@ -977,7 +977,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "OnePlus N10 5G", {
         "OnePlus",
@@ -994,7 +994,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.VT.5.2-00040-SM6350_GEN_PACK-1",
         "2104132208",
-        "2025-11-01",
+        "2021-04-05",
         "11",
         "lito",
         "adreno",
@@ -1016,7 +1016,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "OnePlus 8", {
         "OnePlus",
@@ -1033,7 +1033,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1",
         "2105100150",
-        "2025-11-01",
+        "2021-06-05",
         "11",
         "kona",
         "adreno",
@@ -1055,7 +1055,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Pixel 5", {
         "Google",
@@ -1072,7 +1072,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1",
         "7474174",
-        "2025-11-01",
+        "2021-08-05",
         "11",
         "lito",
         "adreno",
@@ -1094,7 +1094,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "432",
-    8,
+        8
     } },
     { "Pixel 4a 5G", {
         "Google",
@@ -1111,7 +1111,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "g7250-00195-210614-B-7352378",
         "7380771",
-        "2025-11-01",
+        "2021-07-05",
         "11",
         "lito",
         "adreno",
@@ -1133,7 +1133,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "413",
-    8,
+        8
     } },
     { "Pixel 4a", {
         "Google",
@@ -1150,7 +1150,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00022-SM7150_GEN_PACK-1",
         "7390230",
-        "2025-11-01",
+        "2021-08-05",
         "11",
         "trinket",
         "adreno",
@@ -1172,7 +1172,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "443",
-    8,
+        8
     } },
     { "Pixel 3a XL", {
         "Google",
@@ -1189,7 +1189,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.3.0-00079-SDM670_GEN_PACK-1",
         "6734798",
-        "2025-11-01",
+        "2021-05-05",
         "11",
         "sdm670",
         "adreno",
@@ -1211,7 +1211,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "400",
-    8,
+        8
     } },
     { "Moto G Power 2021", {
         "motorola",
@@ -1228,7 +1228,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00055-SM6115_GEN_PACK-1",
         "2b4fae",
-        "2025-11-01",
+        "2021-05-01",
         "11",
         "bengal",
         "adreno",
@@ -1245,12 +1245,12 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "REL",
         "0",
         "Qualcomm",
-        "Adreno (TM) 618",
+        "Adreno (TM) 610",
         "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
         "1080",
         "2400",
         "386",
-    8,
+        8
     } },
     { "Moto G Stylus 2021", {
         "motorola",
@@ -1267,12 +1267,12 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00055-SM6150_GEN_PACK-1",
         "1.0.0.0",
-        "2025-11-01",
+        "2021-05-01",
         "11",
         "bengal",
         "adreno",
         "196610",
-        "SM6150",
+        "SM4350",
         "zygote64_32",
         "motorola/nairo_retail/nairo:11/RPNS31.Q1-45-20/1.0.0.0:user/release-keys",
         "RPNS31.Q1-45-20",
@@ -1284,12 +1284,12 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "REL",
         "0",
         "Qualcomm",
-        "Adreno (TM) 618",
+        "Adreno (TM) 619",
         "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
         "1080",
         "2400",
         "386",
-    8,
+        8
     } },
     { "Moto Edge", {
         "motorola",
@@ -1306,7 +1306,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1",
         "1.0.0.0",
-        "2025-11-01",
+        "2021-04-01",
         "11",
         "lito",
         "adreno",
@@ -1328,7 +1328,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2340",
         "384",
-    8,
+        8
     } },
     { "Moto Edge Plus", {
         "motorola",
@@ -1345,7 +1345,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.HI.3.2.c1.1-00125-SM8250_GEN_PACK-1",
         "1.0.0.0",
-        "2025-11-01",
+        "2021-05-01",
         "11",
         "kona",
         "adreno",
@@ -1367,7 +1367,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2340",
         "384",
-    8,
+        8
     } },
     { "Nokia 8.3 5G", {
         "HMD Global",
@@ -1384,7 +1384,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1",
         "00WW_3_510",
-        "2025-11-01",
+        "2021-08-01",
         "11",
         "lito",
         "adreno",
@@ -1406,7 +1406,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Nokia 5.4", {
         "HMD Global",
@@ -1423,7 +1423,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1",
         "00WW_2_440",
-        "2025-11-01",
+        "2021-06-01",
         "11",
         "bengal",
         "adreno",
@@ -1440,12 +1440,12 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "REL",
         "0",
         "Qualcomm",
-        "Adreno (TM) 618",
+        "Adreno (TM) 610",
         "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)",
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Realme 8 Pro", {
         "realme",
@@ -1462,7 +1462,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1",
         "1636363205855",
-        "2025-11-01",
+        "2021-11-01",
         "11",
         "atoll",
         "adreno",
@@ -1484,7 +1484,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "Realme GT Master", {
         "realme",
@@ -1501,7 +1501,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MPSS.VT.5.2-00095-SM7325_GEN_PACK-1",
         "1638316800000",
-        "2025-11-01",
+        "2021-12-01",
         "11",
         "holi",
         "adreno",
@@ -1523,7 +1523,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
     { "ASUS ZenFone 7", {
         "asus",
@@ -1540,7 +1540,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "M3.13.24.51-Sake_0000100",
         "18.0840.2101.26-0",
-        "2025-11-01",
+        "2021-09-01",
         "11",
         "kona",
         "adreno",
@@ -1562,7 +1562,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
-    8,
+        8
     } },
     { "Realme 8", {
         "realme",
@@ -1579,7 +1579,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "user",
         "MOLY.LR12A.R3.MP.V89.6",
         "1630454400000",
-        "2025-11-01",
+        "2021-09-01",
         "11",
         "mt6785",
         "mali",
@@ -1601,6 +1601,6 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
-    8,
+        8
     } },
 };

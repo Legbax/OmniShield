@@ -149,3 +149,11 @@ jitter=true
 - **Validation:** Confirmed zero "EEA" or "nsxx" artifacts in header files.
 **Prompt del usuario:** "Directiva de Refactorización: Omni-Shield Native v11.8.1... Consolidación de Identidad USA/Global..."
 **Nota personal para el siguiente agente:** The system now enforces USA identity by default and prevents VFS data races during configuration generation changes.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (Core Update)
+**Resumen de cambios:** Actualización masiva de `jni/omni_profiles.h`, `jni/omni_engine.hpp` y `jni/main.cpp`.
+- **Profiles:** Inclusión de `core_count` en fingerprints y actualización de perfiles (Redmi, POCO, Samsung, etc) con fechas de build más realistas (2021).
+- **Engine:** Lógica específica por marca para TACs e ICCID (regiones). Generación de Serial y MAC optimizada.
+- **Main:** Implementación de hooks para `lseek`/`pread` (VFS), `eglQueryString` con limpieza de strings ARM/Mali para Adreno, y hooks específicos para `Settings.Secure` con firmas C++.
+**Prompt del usuario:** "Reemplaza estos 3 archivos por esto..."
+**Nota personal para el siguiente agente:** Se ha consolidado la lógica de VFS y EGL. Verificar estabilidad en dispositivos con GPUs no-Adreno.

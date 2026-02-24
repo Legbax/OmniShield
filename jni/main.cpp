@@ -62,6 +62,12 @@ static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
 static FILE* (*orig_fopen)(const char*, const char*);
 
+// VFS Pointers
+static off_t (*orig_lseek)(int fd, off_t offset, int whence);
+static off64_t (*orig_lseek64)(int fd, off64_t offset, int whence);
+static ssize_t (*orig_pread)(int fd, void* buf, size_t count, off_t offset);
+static ssize_t (*orig_pread64)(int fd, void* buf, size_t count, off64_t offset);
+
 // Phase 2 Originals
 #define EGL_VENDOR 0x3053
 static const char* (*orig_eglQueryString)(void* display, int name);
@@ -89,9 +95,9 @@ typedef unsigned int GLenum;
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
 
-// Settings.Secure
-static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jobject, jobject, jstring);
-static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jobject, jobject, jstring, jint);
+// Settings.Secure (C++ Signatures)
+static jstring (*orig_SettingsSecure_getString_2args)(JNIEnv*, jstring);
+static jstring (*orig_SettingsSecure_getStringForUser_3args)(JNIEnv*, jstring, jint);
 
 // Helper
 inline std::string toLowerStr(const char* s) {
@@ -143,16 +149,16 @@ bool shouldHide(const char* key) {
 
 static inline bool isHiddenPath(const char* path) {
     if (!path || path[0] == '\0') return false;
-    // Obfuscated checks for "omnishield" and "vortex"
-    bool h1 = false, h2 = false;
-    // "om" + "ni" + "shi" + "eld"
-    if (strstr(path, "om") && strstr(path, "ni") && strstr(path, "shi") && strstr(path, "eld")) h1 = true;
-    // "vor" + "tex"
-    if (strstr(path, "vor") && strstr(path, "tex")) h2 = true;
-
-    return strcasestr(path, "magisk") || strcasestr(path, "kernelsu") ||
-           strcasestr(path, "susfs") || strcasestr(path, "omni_data") ||
-           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones") || h1 || h2;
+    static const char* HIDDEN_TOKENS[] = {
+        "omnishield", "omni_data", "vortex",
+        "magisk", "kernelsu", "susfs",
+        "android_cache_data", "tombstones",
+        nullptr
+    };
+    for (int i = 0; HIDDEN_TOKENS[i] != nullptr; ++i) {
+        if (strcasestr(path, HIDDEN_TOKENS[i])) return true;
+    }
+    return false;
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -169,9 +175,43 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 }
 
 // 1. EGL Spoofing
+#define EGL_EXTENSIONS_ENUM 0x3055
+
 const char* my_eglQueryString(void* display, int name) {
-    if (name == EGL_VENDOR && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        return G_DEVICE_PROFILES.at(g_currentProfileName).gpuVendor;
+    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+
+        if (name == EGL_VENDOR) return fp.gpuVendor;
+
+        if (name == EGL_EXTENSIONS_ENUM) {
+            const char* orig_ext = orig_eglQueryString(display, name);
+            if (!orig_ext) return orig_ext;
+
+            std::string egl = toLowerStr(fp.eglDriver);
+            bool profileIsAdreno = (egl == "adreno");
+
+            if (profileIsAdreno) {
+                static thread_local std::string ext_cache;
+                ext_cache = orig_ext;
+
+                static const char* ARM_EXTS[] = {"EGL_ARM_", "EGL_MALI_", "EGL_IMG_", nullptr};
+                for (int i = 0; ARM_EXTS[i]; ++i) {
+                    size_t pos;
+                    while ((pos = ext_cache.find(ARM_EXTS[i])) != std::string::npos) {
+                        size_t end = ext_cache.find(' ', pos);
+                        if (end == std::string::npos) {
+                            ext_cache.erase(pos);
+                        } else {
+                            ext_cache.erase(pos, end - pos + 1);
+                        }
+                    }
+                }
+                while (ext_cache.find("  ") != std::string::npos) {
+                    ext_cache.replace(ext_cache.find("  "), 2, " ");
+                }
+                return ext_cache.c_str();
+            }
+        }
     }
     return orig_eglQueryString(display, name);
 }
@@ -179,9 +219,7 @@ const char* my_eglQueryString(void* display, int name) {
 // 2. Uptime Spoofing
 int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
     int ret = orig_clock_gettime(clockid, tp);
-    // Solo modificamos relojes de uptime de sistema
     if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
-        // Offset determinista: Base de 3 días (259200s) + hasta 12 días extra según semilla
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         tp->tv_sec += added_uptime_seconds;
     }
@@ -224,10 +262,7 @@ int my_getifaddrs(struct ifaddrs **ifap) {
         while (ifa) {
             if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
                 struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
-
-                // Validación de seguridad contra punteros nulos
                 if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
-                    // Static MAC 02:00:00:00:00:00 for AOSP privacy
                     unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
                     memcpy(s->sll_addr, static_mac, 6);
                 }
@@ -253,17 +288,33 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
     std::string platform = toLowerStr(fp.boardPlatform);
     std::string features = getArmFeatures(platform);
 
-    if (platform.find("mt6768") != std::string::npos) {
+    if (platform.find("mt6768") != std::string::npos ||
+        platform.find("mt6769") != std::string::npos ||
+        platform.find("mt6833") != std::string::npos ||
+        platform.find("mt6853") != std::string::npos) {
+        int bigCoreStart = fp.core_count - 2;
+        if (bigCoreStart < 0) bigCoreStart = 0;
         for(int i = 0; i < fp.core_count; ++i) {
-            bool isBig = (i >= 6);
+            bool isBig = (i >= bigCoreStart);
             out += "processor\t: " + std::to_string(i) + "\n";
             out += "BogoMIPS\t: " + std::string(isBig ? "52.00" : "26.00") + "\n";
             out += "Features\t: " + features + "\n";
             out += "CPU implementer\t: 0x41\n";
             out += "CPU architecture: 8\n";
             out += "CPU variant\t: 0x0\n";
-            out += "CPU part\t: " + std::string(isBig ? "0xd0a" : "0xd03") + "\n";
-            out += "CPU revision\t: 4\n\n";
+            out += "CPU part\t: " + std::string(isBig ? "0xd0a" : "0xd05") + "\n";
+            out += "CPU revision\t: " + std::string(isBig ? "2" : "1") + "\n\n";
+        }
+    } else if (platform.find("mt6785") != std::string::npos) {
+        for(int i = 0; i < fp.core_count; ++i) {
+            out += "processor\t: " + std::to_string(i) + "\n";
+            out += "BogoMIPS\t: 26.00\n";
+            out += "Features\t: " + features + "\n";
+            out += "CPU implementer\t: 0x41\n";
+            out += "CPU architecture: 8\n";
+            out += "CPU variant\t: 0x0\n";
+            out += "CPU part\t: 0xd05\n";
+            out += "CPU revision\t: 1\n\n";
         }
     } else {
         for(int i = 0; i < fp.core_count; ++i) {
@@ -295,7 +346,7 @@ int my_system_property_get(const char *key, char *value) {
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::string k = key;
-        std::string dynamic_buffer; // Use local buffer instead of static
+        std::string dynamic_buffer;
 
         if (k == "ro.product.model") dynamic_buffer = fp.model;
         else if (k == "ro.product.brand") dynamic_buffer = fp.brand;
@@ -330,6 +381,27 @@ int my_system_property_get(const char *key, char *value) {
         } else if (k == "ro.ril.miui.imei1") {
             dynamic_buffer = omni::engine::generateValidImei(g_currentProfileName, g_masterSeed + 1);
         }
+        else if (k == "ro.build.version.incremental") dynamic_buffer = fp.incremental;
+        else if (k == "ro.build.version.security_patch") dynamic_buffer = fp.securityPatch;
+        else if (k == "ro.build.description") dynamic_buffer = fp.buildDescription;
+        else if (k == "ro.build.flavor") dynamic_buffer = fp.buildFlavor;
+        else if (k == "ro.build.host") dynamic_buffer = fp.buildHost;
+        else if (k == "ro.build.user") dynamic_buffer = fp.buildUser;
+        else if (k == "ro.build.date.utc") dynamic_buffer = fp.buildDateUtc;
+        else if (k == "ro.build.version.codename") dynamic_buffer = fp.buildVersionCodename;
+        else if (k == "ro.build.version.preview_sdk") dynamic_buffer = fp.buildVersionPreviewSdk;
+        else if (k == "ro.build.type") dynamic_buffer = fp.type;
+        else if (k == "ro.build.version.release") dynamic_buffer = fp.release;
+        else if (k == "ro.vendor.build.fingerprint") dynamic_buffer = fp.vendorFingerprint;
+        else if (k == "ro.bootloader" || k == "ro.boot.bootloader") dynamic_buffer = fp.bootloader;
+        else if (k == "ro.zygote") dynamic_buffer = fp.zygote;
+        else if (k == "ro.product.system.model" || k == "ro.product.vendor.model" || k == "ro.product.odm.model") dynamic_buffer = fp.model;
+        else if (k == "ro.product.first_api_level") {
+            int release_api = 0;
+            try { release_api = std::stoi(fp.release); } catch (...) {}
+            dynamic_buffer = (release_api >= 11) ? "30" : "29";
+        }
+        else if (k == "ro.build.version.base_os") dynamic_buffer = "";
 
         if (!dynamic_buffer.empty()) {
             int len = dynamic_buffer.length();
@@ -403,7 +475,6 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         double uptime = 0, idle = 0;
                         if (sscanf(tmpBuf, "%lf %lf", &uptime, &idle) >= 1) {
                              uptime += 259200 + (g_masterSeed % 1036800);
-                             // Idle time as a coherent fraction (e.g. 80%) of uptime to avoid math anomalies
                              idle = uptime * 0.80;
                              std::stringstream ss;
                              ss << std::fixed << std::setprecision(2) << uptime << " " << idle << "\n";
@@ -453,15 +524,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
             const CachedContent& cc = g_fdContentCache[fd];
-
-            // Anti-Regression: Check for stale data generation
-            if (cc.generation != g_configGeneration) {
-                // If generation mismatch, we treat as EOF or invalid.
-                // Or fallback to orig_read? Prompt says "invalida la lectura".
-                // Returning 0 (EOF) or -1 (Error) is safest.
-                // Assuming EOF to avoid crash.
-                return 0;
-            }
+            if (cc.generation != g_configGeneration) return 0;
 
             const std::string& content = cc.content;
             size_t& offset = g_fdOffsetMap[fd];
@@ -478,6 +541,43 @@ ssize_t my_read(int fd, void *buf, size_t count) {
     }
     return orig_read(fd, buf, count);
 }
+
+off_t my_lseek(int fd, off_t offset, int whence) {
+    std::lock_guard<std::mutex> lock(g_fdMutex);
+    if (g_fdContentCache.count(fd)) {
+        size_t size = g_fdContentCache[fd].content.size();
+        size_t& pos = g_fdOffsetMap[fd];
+        if (whence == SEEK_SET) pos = std::min((size_t)std::max((off_t)0, offset), size);
+        else if (whence == SEEK_CUR) pos = std::min((size_t)std::max((off_t)0, (off_t)pos + offset), size);
+        else if (whence == SEEK_END) pos = size;
+        return (off_t)pos;
+    }
+    return orig_lseek(fd, offset, whence);
+}
+
+off64_t my_lseek64(int fd, off64_t offset, int whence) {
+    return (off64_t)my_lseek(fd, (off_t)offset, whence);
+}
+
+ssize_t my_pread(int fd, void* buf, size_t count, off_t offset) {
+    std::lock_guard<std::mutex> lock(g_fdMutex);
+    if (g_fdContentCache.count(fd)) {
+        const CachedContent& cc = g_fdContentCache[fd];
+        if (cc.generation != g_configGeneration) return 0;
+        const std::string& content = cc.content;
+        if ((size_t)offset >= content.size()) return 0;
+        size_t available = content.size() - (size_t)offset;
+        size_t toRead = std::min(count, available);
+        memcpy(buf, content.c_str() + offset, toRead);
+        return (ssize_t)toRead;
+    }
+    return orig_pread(fd, buf, count, offset);
+}
+
+ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
+    return my_pread(fd, buf, count, (off_t)offset);
+}
+
 
 // -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
@@ -505,8 +605,11 @@ const GLubyte* my_glGetString(GLenum name) {
 // -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
-static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject resolver, jstring name) {
+static jstring my_SettingsSecure_getString_2args(JNIEnv* env, jstring name) {
+    if (!name) return nullptr;
     const char* key = env->GetStringUTFChars(name, nullptr);
+    if (!key) return nullptr;
+
     jstring result = nullptr;
     if (strcmp(key, "android_id") == 0) {
         result = env->NewStringUTF(omni::engine::generateRandomId(16, g_masterSeed).c_str());
@@ -514,12 +617,13 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
         result = env->NewStringUTF(omni::engine::generateRandomId(16, g_masterSeed + 1).c_str());
     }
     env->ReleaseStringUTFChars(name, key);
+
     if (result) return result;
-    return orig_SettingsSecure_getString(env, thiz, resolver, name);
+    return orig_SettingsSecure_getString_2args(env, name);
 }
 
-static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jobject thiz, jobject resolver, jstring name, jint userHandle) {
-    return my_SettingsSecure_getString(env, thiz, resolver, name);
+static jstring my_SettingsSecure_getStringForUser_3args(JNIEnv* env, jstring name, jint userHandle) {
+    return my_SettingsSecure_getString_2args(env, name);
 }
 
 // -----------------------------------------------------------------------------
@@ -537,7 +641,6 @@ jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) {
 jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
     return env->NewStringUTF(omni::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str());
 }
-
 
 // -----------------------------------------------------------------------------
 // Module Main
@@ -564,6 +667,19 @@ public:
 
         void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
+
+        // VFS Extension Hooks
+        void* lseek_func = DobbySymbolResolver(nullptr, "lseek");
+        if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
+
+        void* lseek64_func = DobbySymbolResolver(nullptr, "lseek64");
+        if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
+
+        void* pread_func = DobbySymbolResolver(nullptr, "pread");
+        if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
+
+        void* pread64_func = DobbySymbolResolver(nullptr, "pread64");
+        if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
@@ -595,7 +711,7 @@ public:
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
 
-        // Settings.Secure (Android ID)
+        // Settings.Secure (Android ID) API < 30
         static const char* SETTINGS_SYMBOLS[] = {
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
             "_ZN7android16SettingsProvider9getStringEP7_JNIEnvP8_jobjectP8_jstring",
@@ -606,11 +722,11 @@ public:
         for (int si = 0; SETTINGS_SYMBOLS[si] && !settings_func; ++si) {
             settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
         }
-        if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+        if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString_2args, (void**)&orig_SettingsSecure_getString_2args);
 
-// Settings.Secure (getStringForUser - API 30+)
-void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
-if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+        // Settings.Secure (getStringForUser - API 30+)
+        void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
+        if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser_3args, (void**)&orig_SettingsSecure_getStringForUser_3args);
 
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {
