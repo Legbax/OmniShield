@@ -33,15 +33,15 @@ jobs:
     - name: Package Module
       run: |
         mkdir -p dist/zygisk
-        cp build/libvortex.so dist/zygisk/arm64-v8a.so
+        cp build/libomnishield.so dist/zygisk/arm64-v8a.so
         cp module.prop dist/
         cp post-fs-data.sh dist/
         cp service.sh dist/
         cd dist
-        zip -r omnishield-v11.2-release.zip .
+        zip -r omnishield-v11.8-release.zip .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: omnishield-v11.2-release
-        path: dist/omnishield-v11.2-release.zip
+        name: omnishield-v11.8-release
+        path: dist/omnishield-v11.8-release.zip
