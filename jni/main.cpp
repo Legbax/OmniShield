@@ -25,6 +25,8 @@
 #include <sys/socket.h>
 #include <errno.h>
 #include <vulkan/vulkan.h>
+#include <sys/sysinfo.h>
+#include <dirent.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -48,7 +50,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -80,6 +82,10 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+
+// Phase 4 Originals (v11.9.9)
+static int (*orig_sysinfo)(struct sysinfo *info);
+static struct dirent* (*orig_readdir)(DIR *dirp);
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -568,6 +574,12 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
         else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
         else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
+        else if (strstr(pathname, "/sys/class/graphics/fb0/virtual_size")) type = SYS_FB0_SIZE;
+        else if (strstr(pathname, "/proc/asound/cards")) type = PROC_ASOUND;
+        else if (strstr(pathname, "/proc/bus/input/devices")) type = PROC_INPUT;
+        else if (strstr(pathname, "/sys/class/thermal/") && strstr(pathname, "type")) type = SYS_THERMAL;
+        // Bloqueo directo de KSU/Batería MTK
+        else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
         if (type != NONE) {
             std::string content;
@@ -722,6 +734,36 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     else content = "Snapdragon\n";
                 } else if (type == SYS_SOC_ID) {
                     content = std::string(fp.hardwareChipname) + "\n";
+                } else if (type == SYS_FB0_SIZE) {
+                    content = std::string(fp.screenWidth) + "," + std::string(fp.screenHeight) + "\n";
+                } else if (type == PROC_ASOUND) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt") != std::string::npos) {
+                        char tmpBuf[1024]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    } else if (plat.find("exynos") != std::string::npos) {
+                        content = " 0 [samsung        ]: sm-a52 - samsung\n                      samsung\n";
+                    } else {
+                        content = " 0 [sndkona        ]: snd_kona - snd_kona\n                      snd_kona\n";
+                    }
+                } else if (type == PROC_INPUT) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt") != std::string::npos) {
+                        char tmpBuf[4096]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    } else {
+                        content = "I: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"sec_touchscreen\"\nP: Phys=\nS: Sysfs=/devices/virtual/input/input1\nU: Uniq=\nH: Handlers=event1\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0\nB: ABS=260800000000000\n\nI: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\nS: Sysfs=/devices/platform/soc/soc:gpio_keys/input/input0\nU: Uniq=\nH: Handlers=event0\nB: PROP=0\nB: EV=3\nB: KEY=10000000000000 0\n\n";
+                    }
+                } else if (type == SYS_THERMAL) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt") != std::string::npos) {
+                        char tmpBuf[128]; ssize_t r;
+                        if ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    } else if (plat.find("exynos") != std::string::npos) {
+                        content = "exynos-therm\n";
+                    } else {
+                        content = "tsens_tz_sensor\n";
+                    }
                 }
             }
 
@@ -1001,6 +1043,38 @@ const char* my_Sensor_getVendor(void* sensor) {
 }
 
 // -----------------------------------------------------------------------------
+// Hooks: sysinfo (Uptime Paradox Fix)
+// -----------------------------------------------------------------------------
+int my_sysinfo(struct sysinfo *info) {
+    int ret = orig_sysinfo(info);
+    if (ret == 0 && info != nullptr) {
+        long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
+        info->uptime += added_uptime_seconds;
+    }
+    return ret;
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: readdir (Ocultación de nodos de batería MTK)
+// -----------------------------------------------------------------------------
+struct dirent* my_readdir(DIR *dirp) {
+    struct dirent* ret;
+    while ((ret = orig_readdir(dirp)) != nullptr) {
+        std::string dname = toLowerStr(ret->d_name);
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                if (dname.find("mtk") != std::string::npos || dname.find("mt_bat") != std::string::npos) {
+                    continue; // Saltar archivos de MediaTek si no emulamos MTK
+                }
+            }
+        }
+        return ret;
+    }
+    return nullptr;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
 static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
@@ -1133,6 +1207,12 @@ public:
         if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
         DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
         DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
+
+        void* sysinfo_func = DobbySymbolResolver(nullptr, "sysinfo");
+        if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
+
+        void* readdir_func = DobbySymbolResolver(nullptr, "readdir");
+        if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
