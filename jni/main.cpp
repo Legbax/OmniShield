@@ -83,6 +83,7 @@ typedef struct ssl_st SSL;
 static int (*orig_SSL_CTX_set_ciphersuites)(SSL_CTX *ctx, const char *str);
 static int (*orig_SSL_set1_tls13_ciphersuites)(SSL *ssl, const char *str);
 static int (*orig_SSL_set_cipher_list)(SSL *ssl, const char *str);
+static int (*orig_SSL_set_ciphersuites)(SSL *ssl, const char *str);
 
 // GL Pointers
 typedef unsigned char GLubyte;
@@ -125,16 +126,17 @@ void readConfig() {
     if (g_config.count("jitter")) g_enableJitter = (g_config["jitter"] == "true");
 }
 
-bool shouldHide(const char* str) {
-    if (!str || str[0] == '\0') return false;
-    std::string s = toLowerStr(str);
-
+bool shouldHide(const char* key) {
+    if (!key || key[0] == '\0') return false;
+    std::string s = toLowerStr(key);
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        std::vector<std::string> legit = {toLowerStr(fp.hardware), toLowerStr(fp.hardwareChipname), toLowerStr(fp.boardPlatform)};
-        for (const auto& l : legit) if (!l.empty() && s.find(l) != std::string::npos) return false;
+        if (toLowerStr(fp.brand).find("xiaomi") != std::string::npos ||
+            toLowerStr(fp.hardware).find("mt") != std::string::npos) {
+            if (s.find("mediatek") != std::string::npos) return false;
+        }
     }
-    return s.find("mediatek") != std::string::npos || s.find("mt67") != std::string::npos || s.find("lancelot") != std::string::npos;
+    return s.find("mediatek") != std::string::npos || s.find("lancelot") != std::string::npos;
 }
 
 // -----------------------------------------------------------------------------
@@ -187,14 +189,15 @@ int my_uname(struct utsname *buf) {
     if (ret == 0 && buf != nullptr) {
         strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
 
-        std::string kernel = "4.14.186-perf+";
+        std::string kv = "4.14.186-perf+";
         if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            if (plat.find("mt6") != std::string::npos) kernel = "4.14.141-perf+";
-            else if (plat.find("kona") != std::string::npos) kernel = "4.19.157-perf+";
+            if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
+            else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
+            else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
         }
 
-        strcpy(buf->release, kernel.c_str());
+        strcpy(buf->release, kv.c_str());
         strcpy(buf->version, "#1 SMP PREEMPT");
     }
     return ret;
@@ -378,7 +381,8 @@ ssize_t my_read(int fd, void *buf, size_t count) {
             std::string kv = "4.14.186-perf+";
             if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
             else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
-            content = "Linux version " + kv + " (builder@vortex) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
+            else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+            content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
         } else if (type == PROC_CPUINFO) {
             content = generateMulticoreCpuInfo(fp);
         } else if (type == USB_SERIAL) { content = dyn_serial + "\n";
@@ -438,6 +442,9 @@ ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* e
 int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
 int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
 int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, omni::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
+    return orig_SSL_set_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str());
+}
 
 // -----------------------------------------------------------------------------
 // Hooks: GPU
@@ -501,7 +508,7 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
-class VortexModule : public zygisk::Module {
+class OmniModule : public zygisk::Module {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
         this->api = api;
@@ -545,6 +552,8 @@ public:
         if (tls13_ctx) DobbyHook(tls13_ctx, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
         void* tls13_ssl = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
         if (tls13_ssl) DobbyHook(tls13_ssl, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
+        void* tls13_set = DobbySymbolResolver("libssl.so", "SSL_set_ciphersuites");
+        if (tls13_set) DobbyHook(tls13_set, (void*)my_SSL_set_ciphersuites, (void**)&orig_SSL_set_ciphersuites);
 
         // Android/Sensor Hooks
         void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
@@ -596,5 +605,5 @@ private:
     JNIEnv *env;
 };
 
-static VortexModule module_instance;
+static OmniModule module_instance;
 extern "C" { void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { api->registerModule(&module_instance); } }
