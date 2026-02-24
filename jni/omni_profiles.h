@@ -40,6 +40,7 @@ struct DeviceFingerprint {
     const char* screenHeight;
     const char* screenDensity;
     int core_count;
+    int ram_gb;
 };
 
 static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
@@ -81,6 +82,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2340",
         "395",
     8,
+    4,
     } },
     { "POCO X3 Pro", {
         "Xiaomi",
@@ -119,6 +121,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
+    8,
     8,
     } },
     { "Mi 10T", {
@@ -159,6 +162,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "394",
     8,
+    8,
     } },
     { "Redmi Note 10 Pro", {
         "Xiaomi",
@@ -198,6 +202,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "394",
     8,
+    6,
     } },
     { "Redmi Note 9 Pro", {
         "Xiaomi",
@@ -237,6 +242,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    6,
     } },
     { "Redmi Note 10", {
         "Xiaomi",
@@ -276,6 +282,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "409",
     8,
+    4,
     } },
     { "POCO M3 Pro 5G", {
         "Xiaomi",
@@ -315,6 +322,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    6,
     } },
     { "POCO X3 NFC", {
         "Xiaomi",
@@ -354,6 +362,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "394",
     8,
+    6,
     } },
     { "Mi 11 Lite", {
         "Xiaomi",
@@ -393,6 +402,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    6,
     } },
     { "Mi 11", {
         "Xiaomi",
@@ -431,6 +441,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
+    8,
     8,
     } },
     { "Redmi 10X 4G", {
@@ -471,6 +482,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "POCO F3", {
         "Xiaomi",
@@ -509,6 +521,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "386",
+    8,
     8,
     } },
     { "Galaxy A52", {
@@ -549,6 +562,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "386",
     8,
+    6,
     } },
     { "Galaxy A72", {
         "samsung",
@@ -587,6 +601,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
+    8,
     8,
     } },
     { "Galaxy A32 5G", {
@@ -627,6 +642,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "Galaxy S20 FE", {
         "samsung",
@@ -665,6 +681,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
+    8,
     8,
     } },
     { "Galaxy A51", {
@@ -705,6 +722,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "Galaxy M31", {
         "samsung",
@@ -744,6 +762,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    6,
     } },
     { "Galaxy A12", {
         "samsung",
@@ -783,6 +802,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "Galaxy A21s", {
         "samsung",
@@ -822,6 +842,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "Galaxy A31", {
         "samsung",
@@ -861,6 +882,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "411",
     8,
+    4,
     } },
     { "Galaxy F62", {
         "samsung",
@@ -900,6 +922,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "393",
     8,
+    6,
     } },
     { "OnePlus 8T", {
         "OnePlus",
@@ -939,6 +962,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "401",
     8,
+    12,
     } },
     { "OnePlus Nord", {
         "OnePlus",
@@ -977,6 +1001,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
+    8,
     8,
     } },
     { "OnePlus N10 5G", {
@@ -1017,6 +1042,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    6,
     } },
     { "OnePlus 8", {
         "OnePlus",
@@ -1055,6 +1081,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
+    8,
     8,
     } },
     { "Pixel 5", {
@@ -1095,6 +1122,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "432",
     8,
+    8,
     } },
     { "Pixel 4a 5G", {
         "Google",
@@ -1134,6 +1162,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "413",
     8,
+    6,
     } },
     { "Pixel 4a", {
         "Google",
@@ -1173,6 +1202,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "443",
     8,
+    6,
     } },
     { "Pixel 3a XL", {
         "Google",
@@ -1212,6 +1242,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "400",
     8,
+    4,
     } },
     { "Moto G Power 2021", {
         "motorola",
@@ -1251,6 +1282,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "386",
     8,
+    4,
     } },
     { "Moto G Stylus 2021", {
         "motorola",
@@ -1290,6 +1322,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "386",
     8,
+    4,
     } },
     { "Moto Edge", {
         "motorola",
@@ -1329,6 +1362,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2340",
         "384",
     8,
+    6,
     } },
     { "Moto Edge Plus", {
         "motorola",
@@ -1368,6 +1402,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2340",
         "384",
     8,
+    12,
     } },
     { "Nokia 8.3 5G", {
         "HMD Global",
@@ -1407,6 +1442,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "Nokia 5.4", {
         "HMD Global",
@@ -1446,6 +1482,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    4,
     } },
     { "Realme 8 Pro", {
         "realme",
@@ -1484,6 +1521,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "404",
+    8,
     8,
     } },
     { "Realme GT Master", {
@@ -1524,6 +1562,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    8,
     } },
     { "ASUS ZenFone 7", {
         "asus",
@@ -1562,6 +1601,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1080",
         "2400",
         "394",
+    8,
     8,
     } },
     { "Realme 8", {
@@ -1602,5 +1642,6 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "2400",
         "404",
     8,
+    6,
     } },
 };

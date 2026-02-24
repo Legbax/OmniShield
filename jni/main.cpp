@@ -47,7 +47,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -523,6 +523,10 @@ int my_system_property_get(const char *key, char *value) {
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
 int my_open(const char *pathname, int flags, mode_t mode) {
+    if (pathname && strstr(pathname, "/dev/__properties__/")) {
+        errno = EACCES;
+        return -1;
+    }
     int fd = orig_open(pathname, flags, mode);
     if (fd >= 0 && pathname) {
         FileType type = NONE;
@@ -538,6 +542,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
+        else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
 
         if (type != NONE) {
             std::string content;
@@ -650,6 +655,26 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     else if (plat2.find("atoll")   != std::string::npos || plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-perf+";
                     else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-perf+";
                     content = kv2 + "\n";
+                } else if (type == PROC_MEMINFO) {
+                    char tmpBuf[8192];
+                    ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
+                    if (r > 0) {
+                        tmpBuf[r] = '\0';
+                        std::string memData = tmpBuf;
+                        // Calcular RAM realista en kB restando reserva de kernel (~150MB)
+                        long fakeMemKb = (long)fp.ram_gb * 1048576L - 153600L;
+
+                        size_t pos = memData.find("MemTotal:");
+                        if (pos != std::string::npos) {
+                            size_t end = memData.find('\n', pos);
+                            if (end != std::string::npos) {
+                                std::stringstream ss;
+                                ss << "MemTotal:       " << fakeMemKb << " kB";
+                                memData.replace(pos, end - pos, ss.str());
+                            }
+                        }
+                        content = memData;
+                    }
                 }
             }
 
@@ -665,6 +690,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    if (pathname && strstr(pathname, "/dev/__properties__/")) {
+        errno = EACCES;
+        return -1;
+    }
     // Ruta absoluta → delegar directamente a my_open (que ya tiene la lógica VFS)
     if (pathname && pathname[0] == '/') {
         return my_open(pathname, flags, mode);
