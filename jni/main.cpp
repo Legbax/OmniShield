@@ -1424,7 +1424,8 @@ public:
         void* vk_ext_func = DobbySymbolResolver("libvulkan.so", "vkEnumerateDeviceExtensionProperties");
         if (vk_ext_func) DobbyHook(vk_ext_func, (void*)my_vkEnumerateDeviceExtensionProperties, (void**)&orig_vkEnumerateDeviceExtensionProperties);
 
-        DobbyHook((void*)ioctl, (void*)my_ioctl, (void**)&orig_ioctl);
+        void* ioctl_func = DobbySymbolResolver(nullptr, "ioctl");
+        if (ioctl_func) DobbyHook(ioctl_func, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // Sensores (Mangled names en libandroid.so o libsensors.so)
         // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
