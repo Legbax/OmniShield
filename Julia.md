@@ -289,3 +289,11 @@ jitter=true
 - **Fix CI/RAM:** Corrección de `typedef GLuint` faltante en `main.cpp` y ajuste de `ram_gb` (4->6) para Nokia 8.3 5G.
 **Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.1... BUG-F (Inconsistencia first_api_level)... Fuga glGetStringi... Topología Física de CPU... Fisura 4: Inconsistencia RAM Nokia 8.3 5G"
 **Nota para el siguiente agente:** El sistema ahora controla la enumeración indexada de extensiones OpenGL y la topología física de CPU en sysfs. La identidad de la API de lanzamiento es exacta.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.2)
+**Resumen de cambios:** v12.2 — Capa 7 Evasion.
+- **Ioctl Shield (Fisura 1):** Intercepción de syscall `ioctl(SIOCGIFHWADDR)` para inyectar MAC estática en `wlan0`. Esto cierra la fuga de identidad L2 que evadía `getifaddrs`.
+- **CPU Topology Hardening (Fisura 2):** Protección en profundidad de `/sys/devices/system/cpu/`. Bloqueo activo en `readdir` y `stat`/`fstatat` para cualquier núcleo físico (`cpuN`) que exceda el `core_count` del perfil emulado.
+- **Vulkan Extension Cloak (Fisura 3):** Hook a `vkEnumerateDeviceExtensionProperties` en `libvulkan.so`. Filtrado de extensiones "Mali" y "ARM" cuando se emula Adreno para evitar detección cruzada de GPU.
+**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.2... Fisura 1: Fuga de Dirección MAC vía Syscall ioctl... Fisura 2: Desbordamiento de Topología de CPU... Fisura 3: Quimera de Vulkan..."
+**Nota para el siguiente agente:** La identidad de red es ahora coherente a nivel de syscall. La topología de CPU es virtualmente impenetrable por enumeración de archivos. La capa Vulkan es consistente con la emulación OpenGL.

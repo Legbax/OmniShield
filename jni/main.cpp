@@ -27,6 +27,8 @@
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <dirent.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -71,6 +73,7 @@ static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
 static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static FILE* (*orig_fopen)(const char*, const char*);
+static int (*orig_ioctl)(int fd, unsigned long request, void* arg);
 
 // Phase 2 Originals
 #define EGL_VENDOR 0x3053
@@ -107,6 +110,7 @@ static const GLubyte* (*orig_glGetStringi)(GLenum name, GLuint index);
 
 // Vulkan & Sensors
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
+static VkResult (*orig_vkEnumerateDeviceExtensionProperties)(VkPhysicalDevice physicalDevice, const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
 static const char* (*orig_Sensor_getName)(void* sensor);
 static const char* (*orig_Sensor_getVendor)(void* sensor);
 
@@ -179,6 +183,17 @@ static inline bool isHiddenPath(const char* path) {
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
+    if (pathname && strncmp(pathname, "/sys/devices/system/cpu/cpu", 27) == 0) {
+        int cpu_id;
+        if (sscanf(pathname, "/sys/devices/system/cpu/cpu%d", &cpu_id) == 1) {
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) {
+                    errno = ENOENT;
+                    return -1;
+                }
+            }
+        }
+    }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_stat(pathname, statbuf);
 }
@@ -188,6 +203,17 @@ int my_lstat(const char* pathname, struct stat* statbuf) {
 }
 
 int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    if (pathname && strncmp(pathname, "/sys/devices/system/cpu/cpu", 27) == 0) {
+        int cpu_id;
+        if (sscanf(pathname, "/sys/devices/system/cpu/cpu%d", &cpu_id) == 1) {
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) {
+                    errno = ENOENT;
+                    return -1;
+                }
+            }
+        }
+    }
     // Resolver path absoluto si es relativo con AT_FDCWD
     if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
         char cwd[512] = {};
@@ -1172,6 +1198,12 @@ struct dirent* my_readdir(DIR *dirp) {
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
+        if (strncmp(dname.c_str(), "cpu", 3) == 0 && isdigit(dname[3])) {
+            int cpu_id = std::stoi(dname.substr(3));
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                 if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) continue;
+            }
+        }
         if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             if (plat.find("mt") == std::string::npos) {
@@ -1263,6 +1295,43 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 }
 
 
+int my_ioctl(int fd, unsigned long request, void* arg) {
+    int ret = orig_ioctl(fd, request, arg);
+    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (strcmp(ifr->ifr_name, "wlan0") == 0) {
+            unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
+        }
+    }
+    return ret;
+}
+
+VkResult my_vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice, const char* pLayerName,
+    uint32_t* pPropertyCount, VkExtensionProperties* pProperties) {
+
+    VkResult ret = orig_vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+    if (ret == VK_SUCCESS && pProperties != nullptr && pPropertyCount != nullptr) {
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
+            if (egl == "adreno") {
+                uint32_t validCount = 0;
+                for (uint32_t i = 0; i < *pPropertyCount; ++i) {
+                    std::string extName = toLowerStr(pProperties[i].extensionName);
+                    if (extName.find("arm") == std::string::npos && extName.find("mali") == std::string::npos) {
+                        pProperties[validCount] = pProperties[i];
+                        validCount++;
+                    }
+                }
+                *pPropertyCount = validCount;
+            }
+        }
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
@@ -1351,6 +1420,11 @@ public:
         // Vulkan
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
         if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
+
+        void* vk_ext_func = DobbySymbolResolver("libvulkan.so", "vkEnumerateDeviceExtensionProperties");
+        if (vk_ext_func) DobbyHook(vk_ext_func, (void*)my_vkEnumerateDeviceExtensionProperties, (void**)&orig_vkEnumerateDeviceExtensionProperties);
+
+        DobbyHook((void*)ioctl, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // Sensores (Mangled names en libandroid.so o libsensors.so)
         // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
