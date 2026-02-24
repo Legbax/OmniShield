@@ -41,7 +41,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, std::string> g_fdContentCache; // Cache content for stable reads
@@ -344,6 +344,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/power_supply/battery/temp")) type = BATTERY_TEMP;
         else if (strstr(pathname, "/sys/class/power_supply/battery/voltage_now")) type = BATTERY_VOLT;
         else if (strstr(pathname, "/sys/class/power_supply/battery/capacity")) type = BATTERY_CAPACITY;
+        else if (strstr(pathname, "/sys/class/power_supply/battery/status")) type = BATTERY_STATUS;
         else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
 
@@ -379,6 +380,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = omni::engine::generateBatteryVoltage(g_masterSeed) + "\n";
                 } else if (type == BATTERY_CAPACITY) {
                     content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
+                } else if (type == BATTERY_STATUS) {
+                    content = "Not charging\n";
                 } else if (type == PROC_UPTIME) {
                     char tmpBuf[256];
                     ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
@@ -490,6 +493,10 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
     return orig_SettingsSecure_getString(env, thiz, resolver, name);
 }
 
+static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jobject thiz, jobject resolver, jstring name, jint userHandle) {
+    return my_SettingsSecure_getString(env, thiz, resolver, name);
+}
+
 // -----------------------------------------------------------------------------
 // Hooks: Telephony (JNI Bridge)
 // -----------------------------------------------------------------------------
@@ -568,7 +575,6 @@ public:
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
             "_ZN7android16SettingsProvider9getStringEP7_JNIEnvP8_jobjectP8_jstring",
             "_ZN7android8Settings6Secure9getStringEP7_JNIEnvP8_jobjectP8_jstring",
-            "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi",
             nullptr
         };
         void* settings_func = nullptr;
@@ -576,6 +582,10 @@ public:
             settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
         }
         if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+
+// Settings.Secure (getStringForUser - API 30+)
+void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
+if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getString);
 
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {
