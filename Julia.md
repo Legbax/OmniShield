@@ -297,3 +297,11 @@ jitter=true
 - **Vulkan Extension Cloak (Fisura 3):** Hook a `vkEnumerateDeviceExtensionProperties` en `libvulkan.so`. Filtrado de extensiones "Mali" y "ARM" cuando se emula Adreno para evitar detección cruzada de GPU.
 **Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.2... Fisura 1: Fuga de Dirección MAC vía Syscall ioctl... Fisura 2: Desbordamiento de Topología de CPU... Fisura 3: Quimera de Vulkan..."
 **Nota para el siguiente agente:** La identidad de red es ahora coherente a nivel de syscall. La topología de CPU es virtualmente impenetrable por enumeración de archivos. La capa Vulkan es consistente con la emulación OpenGL.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.3)
+**Resumen de cambios:** v12.3 — The Deep Void (Capa 7/8 Hardening).
+- **OpenCL Identity (Fisura 1):** Intercepción de `clGetDeviceInfo` en `libOpenCL.so`. Spoofing de `CL_DEVICE_VENDOR` (Qualcomm) y `CL_DEVICE_NAME` (Renderer del perfil) en perfiles Adreno para unificar la identidad gráfica en todas las APIs.
+- **Cmdline Sanitization (Fisura 2):** Virtualización de `/proc/cmdline`. Eliminación de flags del bootloader original (`androidboot.hardware=mt6768`) reemplazándolos con el `boardPlatform` emulado.
+- **CPU Governor Shield (Fisura 3):** Expansión del VFS para cubrir `scaling_max_freq`, `scaling_min_freq`, y `cpuinfo_min_freq`. Implementación de frecuencia mínima genérica (300MHz) para evitar detección de gobernadores propietarios.
+**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.3... Fisura 1: Fuga de Identidad Gráfica vía OpenCL... Fisura 2: Parámetros de Arranque del Kernel... Fisura 3: Frecuencias de Escalado..."
+**Nota para el siguiente agente:** El sistema ahora presenta una identidad gráfica monolítica (GLES+Vulkan+OpenCL) y oculta rastros del bootloader en el kernel space virtualizado.

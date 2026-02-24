@@ -52,7 +52,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT, PROC_CMDLINE };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -74,6 +74,7 @@ static int (*orig_lstat)(const char*, struct stat*);
 static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static FILE* (*orig_fopen)(const char*, const char*);
 static int (*orig_ioctl)(int fd, unsigned long request, void* arg);
+static int (*orig_clGetDeviceInfo)(void* device, unsigned int param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret);
 
 // Phase 2 Originals
 #define EGL_VENDOR 0x3053
@@ -669,9 +670,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
+        else if (strstr(pathname, "/proc/cmdline")) type = PROC_CMDLINE;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
-        else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
+        else if (strstr(pathname, "/sys/devices/system/cpu/") && (strstr(pathname, "cpuinfo_max_freq") || strstr(pathname, "scaling_max_freq") || strstr(pathname, "scaling_min_freq") || strstr(pathname, "cpuinfo_min_freq"))) type = SYS_CPU_FREQ;
         else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
         else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
         else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
@@ -814,6 +816,17 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         }
                         content = memData;
                     }
+                } else if (type == PROC_CMDLINE) {
+                    char tmpBuf[4096]; ssize_t r; std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
+
+                    size_t hw_pos = rawFile.find("androidboot.hardware=");
+                    if (hw_pos != std::string::npos) {
+                        size_t space_pos = rawFile.find(' ', hw_pos);
+                        if (space_pos == std::string::npos) space_pos = rawFile.length();
+                        rawFile.replace(hw_pos + 21, space_pos - (hw_pos + 21), fp.boardPlatform);
+                    }
+                    content = rawFile;
                 } else if (type == PROC_MODULES || type == PROC_MOUNTS) {
                     char tmpBuf[4096]; ssize_t r; std::string rawFile;
                     while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
@@ -822,16 +835,20 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         if (!isHiddenPath(line.c_str())) content += line + "\n";
                     }
                 } else if (type == SYS_CPU_FREQ) {
-                    std::string plat = toLowerStr(fp.boardPlatform);
-                    // Per-SoC big-core max frequency from real hardware dumps
-                    if      (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos||plat.find("msmnile")!=std::string::npos) content="2841600\n";
-                    else if (plat.find("lito")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm7325")!=std::string::npos) content="2400000\n";
-                    else if (plat.find("atoll")!=std::string::npos||plat.find("sdm670")!=std::string::npos) content="2208000\n";
-                    else if (plat.find("bengal")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm6150")!=std::string::npos||plat.find("trinket")!=std::string::npos) content="2016000\n";
-                    else if (plat.find("exynos9825")!=std::string::npos) content="2730000\n";
-                    else if (plat.find("exynos9611")!=std::string::npos||plat.find("exynos9610")!=std::string::npos) content="2300000\n";
-                    else if (plat.find("mt6785")!=std::string::npos) content="2050000\n";
-                    else content="2000000\n"; // MTK/Exynos850 default
+                    if (strstr(pathname, "min")) {
+                        content = "300000\n";
+                    } else {
+                        std::string plat = toLowerStr(fp.boardPlatform);
+                        // Per-SoC big-core max frequency from real hardware dumps
+                        if      (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos||plat.find("msmnile")!=std::string::npos) content="2841600\n";
+                        else if (plat.find("lito")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm7325")!=std::string::npos) content="2400000\n";
+                        else if (plat.find("atoll")!=std::string::npos||plat.find("sdm670")!=std::string::npos) content="2208000\n";
+                        else if (plat.find("bengal")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm6150")!=std::string::npos||plat.find("trinket")!=std::string::npos) content="2016000\n";
+                        else if (plat.find("exynos9825")!=std::string::npos) content="2730000\n";
+                        else if (plat.find("exynos9611")!=std::string::npos||plat.find("exynos9610")!=std::string::npos) content="2300000\n";
+                        else if (plat.find("mt6785")!=std::string::npos) content="2050000\n";
+                        else content="2000000\n"; // MTK/Exynos850 default
+                    }
                 } else if (type == SYS_SOC_MACHINE) {
                     content = std::string(fp.hardware) + "\n";
                 } else if (type == SYS_SOC_FAMILY) {
@@ -1332,6 +1349,26 @@ VkResult my_vkEnumerateDeviceExtensionProperties(
     return ret;
 }
 
+#define CL_DEVICE_VENDOR 0x102C
+#define CL_DEVICE_NAME 0x102B
+
+int my_clGetDeviceInfo(void* device, unsigned int param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret) {
+    int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
+    if (ret == 0 && param_value != nullptr && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string egl = toLowerStr(fp.eglDriver);
+
+        if (egl == "adreno") {
+            if (param_name == CL_DEVICE_VENDOR) {
+                strncpy((char*)param_value, "Qualcomm", param_value_size);
+            } else if (param_name == CL_DEVICE_NAME) {
+                strncpy((char*)param_value, fp.gpuRenderer, param_value_size);
+            }
+        }
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
@@ -1426,6 +1463,10 @@ public:
 
         void* ioctl_func = DobbySymbolResolver(nullptr, "ioctl");
         if (ioctl_func) DobbyHook(ioctl_func, (void*)my_ioctl, (void**)&orig_ioctl);
+
+        void* opencl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
+        if (!opencl_func) opencl_func = DobbySymbolResolver("libOpenCL.so.1", "clGetDeviceInfo");
+        if (opencl_func) DobbyHook(opencl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
         // Sensores (Mangled names en libandroid.so o libsensors.so)
         // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
