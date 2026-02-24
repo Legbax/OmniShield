@@ -63,3 +63,13 @@ jitter=true
 - **Núcleo (main.cpp):** Logs camuflados ("AndroidSystem"), config oculta, `isHiddenPath` robusto (null check, nuevas rutas), propiedades sin static buffers, `uname` limpio (sin sufijo vortex), hooks TLS 1.3 completos.
 **Prompt del usuario:** "Transmutar el motor en una sombra digital indistinguible... v11.8 (Native Ghost)... eliminar rastro de la palabra Vortex."
 **Nota personal para el siguiente agente:** El módulo es ahora un fantasma nativo. No existen logs identificables ni rutas predecibles. Mantener esta disciplina de sigilo en futuras expansiones.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (Finalización)
+**Resumen de cambios:** Integración de "Master Seal" (v11.4) en arquitectura "Native Ghost" (v11.8).
+- **Corrección de Perfiles (omni_profiles.h):** Ajuste fino de cadenas GPU/EGL para Redmi Note 10, Realme GT Master, Moto G Power/Stylus 2021, Nokia 5.4 y Nokia 8.3 5G.
+    - *Fix Crítico:* Corrección de SoC para Nokia 5.4 (`atoll` -> `bengal`) y reversión de DPI erróneo en Moto G Stylus 2021.
+    - *Fix DPI:* Aplicación correcta de DPI 386 para Nokia 8.3 5G.
+- **Validación de Stealth:** Confirmación de firma de kernel estándar (`builder@android`) y ocultación de trazas (`isHiddenPath`).
+- **Estado:** Despliegue confirmado de "Master Seal" en entorno "Native Ghost".
+**Prompt del usuario:** "Lee el Julia.md y aplica los siguientes cambios... OMNISHIELD v11.4 (THE MASTER SEAL)... Fix specific profile GPU strings."
+**Nota personal para el siguiente agente:** La integridad de los perfiles de hardware es crítica. No modificar las cadenas de GPU sin validación cruzada con dumps reales de `glGetString`.
