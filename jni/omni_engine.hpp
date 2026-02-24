@@ -119,8 +119,25 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
 
 // ICCID: Estándar ITU-T E.118 (89...)
 inline std::string generateValidIccid(const std::string& profileName, long seed) {
-    Random rng(seed); std::string iccid = "895201";
-    for(int i=0; i<12; ++i) iccid += std::to_string(rng.nextInt(10));
+    Random rng(seed);
+    std::string region = getRegionForProfile(profileName);
+    std::string iccid;
+
+    if (region == "usa") {
+        iccid = "89101";
+        // Base length strictly 18 (5 prefix + 13 random)
+        for(int i=0; i<13; ++i) iccid += std::to_string(rng.nextInt(10));
+    } else if (region == "europe") {
+        iccid = "89440";
+        for(int i=0; i<14; ++i) iccid += std::to_string(rng.nextInt(10));
+    } else if (region == "latam") {
+        iccid = "89520";
+        for(int i=0; i<14; ++i) iccid += std::to_string(rng.nextInt(10));
+    } else {
+        iccid = "89101";
+        for(int i=0; i<13; ++i) iccid += std::to_string(rng.nextInt(10));
+    }
+
     return iccid + std::to_string(luhnChecksum(iccid));
 }
 
