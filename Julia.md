@@ -239,3 +239,11 @@ jitter=true
 - **Intelligence RAM:** Extensión de `struct DeviceFingerprint` con `ram_gb` y actualización masiva de todos los perfiles con capacidades de memoria realistas para cada modelo.
 **Prompt del usuario:** "Implementación PR13 (Deep Memory & Prop Tree Shield)... Cerraremos la fuga de memoria física (/proc/meminfo) y el mapeo en crudo del árbol de propiedades (/dev/__properties__/)."
 **Nota para el siguiente agente:** La memoria RAM reportada por el sistema ahora es coherente con el perfil de dispositivo emulado. El acceso directo a las propiedades del sistema está blindado.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR14 - Consolidado)
+**Resumen de cambios:** v11.9.6 — Hardware Consistency & Modern Prop Shield.
+- **Hardware Blocking:** Implementación de bloqueo de drivers de GPU contradictorios (/dev/mali vs /dev/kgsl) en `my_open` y `my_openat`. Esto previene la detección de quimeras de hardware (ej. perfil Snapdragon con driver Mali accesible).
+- **VFS Completo:** Extensión del sistema VFS para virtualizar `/proc/modules`, `/proc/self/mounts` y `/sys/devices/system/cpu/.../cpuinfo_max_freq`. La frecuencia de CPU se falsea según el SoC (Qualcomm 2.84GHz vs Otros 2.0GHz).
+- **Modern Prop Shield:** Hook completo a `__system_property_read_callback` para interceptar la API moderna de lectura de propiedades en Android 11+. Implementa filtrado (shouldHide) y spoofing consistente con `my_system_property_get`.
+**Prompt del usuario:** "PR14 Consolidado... reparar omisiones anteriores y añadir el blindaje definitivo de la API moderna de propiedades..."
+**Nota para el siguiente agente:** El sistema ahora intercepta todas las vías de lectura de propiedades (legacy y callback) y bloquea el acceso a hardware gráfico inconsistente.

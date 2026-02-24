@@ -47,7 +47,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -55,6 +55,7 @@ static std::mutex g_fdMutex;
 
 // Original Pointers
 static int (*orig_system_property_get)(const char *key, char *value);
+static void (*orig_system_property_read_callback)(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie);
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
@@ -527,6 +528,18 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         errno = EACCES;
         return -1;
     }
+    if (pathname) {
+        // Bloquear drivers de GPU contradictorios (Evasión Capa 5)
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
+            std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
+            bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos || plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos);
+
+            // Si el perfil emula Snapdragon/Adreno, la app no debe poder abrir el driver de Mali, y viceversa
+            if (isQcom && strstr(pathname, "/dev/mali")) { errno = ENOENT; return -1; }
+            if (!isQcom && strstr(pathname, "/dev/kgsl")) { errno = ENOENT; return -1; }
+        }
+    }
     int fd = orig_open(pathname, flags, mode);
     if (fd >= 0 && pathname) {
         FileType type = NONE;
@@ -543,6 +556,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
+        else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
+        else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
+        else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
 
         if (type != NONE) {
             std::string content;
@@ -675,6 +691,19 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         }
                         content = memData;
                     }
+                } else if (type == PROC_MODULES || type == PROC_MOUNTS) {
+                    char tmpBuf[4096]; ssize_t r; std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
+                    std::istringstream iss(rawFile); std::string line;
+                    while (std::getline(iss, line)) {
+                        if (!isHiddenPath(line.c_str())) content += line + "\n";
+                    }
+                } else if (type == SYS_CPU_FREQ) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string brand = toLowerStr(fp.brand);
+                    bool isQcom = (brand == "google" || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("msmnile") != std::string::npos);
+                    if (isQcom) content = "2841600\n";
+                    else content = "2000000\n";
                 }
             }
 
@@ -693,6 +722,18 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
         errno = EACCES;
         return -1;
+    }
+    if (pathname) {
+        // Bloquear drivers de GPU contradictorios (Evasión Capa 5)
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
+            std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
+            bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos || plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos);
+
+            // Si el perfil emula Snapdragon/Adreno, la app no debe poder abrir el driver de Mali, y viceversa
+            if (isQcom && strstr(pathname, "/dev/mali")) { errno = ENOENT; return -1; }
+            if (!isQcom && strstr(pathname, "/dev/kgsl")) { errno = ENOENT; return -1; }
+        }
     }
     // Ruta absoluta → delegar directamente a my_open (que ya tiene la lógica VFS)
     if (pathname && pathname[0] == '/') {
@@ -908,6 +949,39 @@ static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jin
     return my_SettingsSecure_getString(env, name);
 }
 
+void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
+    if (!pi || !callback) return;
+
+    struct NameCatcher {
+        std::string name;
+        std::string real_val;
+        uint32_t serial;
+    } catcher;
+
+    auto internal_cb = [](void* c, const char* n, const char* v, uint32_t s) {
+        NameCatcher* catch_ptr = (NameCatcher*)c;
+        if(n) catch_ptr->name = n;
+        if(v) catch_ptr->real_val = v;
+        catch_ptr->serial = s;
+    };
+
+    orig_system_property_read_callback(pi, internal_cb, &catcher);
+
+    if (shouldHide(catcher.name.c_str()) || shouldHide(catcher.real_val.c_str())) {
+        callback(cookie, catcher.name.c_str(), "", catcher.serial);
+        return;
+    }
+
+    char spoofed_val[92] = {0};
+    int ret = my_system_property_get(catcher.name.c_str(), spoofed_val);
+
+    if (ret > 0 && strcmp(spoofed_val, catcher.real_val.c_str()) != 0) {
+        callback(cookie, catcher.name.c_str(), spoofed_val, catcher.serial);
+    } else {
+        callback(cookie, catcher.name.c_str(), catcher.real_val.c_str(), catcher.serial);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Hooks: Telephony (JNI Bridge)
 // -----------------------------------------------------------------------------
@@ -965,6 +1039,9 @@ public:
 
         void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
+
+        void* sysprop_cb_func = DobbySymbolResolver(nullptr, "__system_property_read_callback");
+        if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
