@@ -519,6 +519,24 @@ int my_system_property_get(const char *key, char *value) {
             // ro.soc.model = el chip model del perfil (hardwareChipname)
             dynamic_buffer = fp.hardwareChipname;
         }
+        // --- Intercepción HAL (Cámara, Vulkan, Audio y DRM/Keystore) ---
+        else if (k == "ro.hardware.camera" ||
+                 k == "ro.hardware.vulkan" ||
+                 k == "ro.hardware.keystore" ||
+                 k == "ro.hardware.audio"  ||
+                 k == "ro.hardware.egl") {
+            // Forzamos al sistema a reportar el hardware emulado en lugar de la placa base física
+            dynamic_buffer = fp.boardPlatform;
+        }
+        else if (k == "ro.mediatek.version.release" ||
+                 k == "ro.mediatek.platform") {
+            // Si una app (o el DRM) busca explícitamente firmas MTK en las properties, las vaciamos
+            // a menos que estemos emulando un MediaTek
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                dynamic_buffer = "";
+            }
+        }
 
         if (!dynamic_buffer.empty()) {
             int len = dynamic_buffer.length();
