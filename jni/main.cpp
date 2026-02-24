@@ -56,6 +56,7 @@ static std::mutex g_fdMutex;
 // Original Pointers
 static int (*orig_system_property_get)(const char *key, char *value);
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
+static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
 static int (*orig_close)(int fd);
 static off_t (*orig_lseek)(int fd, off_t offset, int whence);
@@ -234,11 +235,29 @@ int my_uname(struct utsname *buf) {
         if (g_currentProfileName == "Redmi 9") {
              kv = "4.14.186-perf+";
         } else if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
-            else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
-            else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
-            else if (plat.find("sdm670") != std::string::npos) kv = "4.9.189-perf+";
+            const auto& kfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            std::string plat = toLowerStr(kfp.boardPlatform);
+            std::string brd  = toLowerStr(kfp.brand);
+
+            if (brd == "google") {
+                // Google compila sus propios kernels con hashes de commit específicos
+                if (plat.find("lito") != std::string::npos)
+                    kv = "4.19.113-g820a424c538c-ab7336171";        // Pixel 5, 4a 5G
+                else if (plat.find("trinket") != std::string::npos)
+                    kv = "4.14.255-g67c58a7c42a0-ab7336171";        // Pixel 4a
+                else if (plat.find("sdm670") != std::string::npos)
+                    kv = "4.9.189-g5d098cef6d96-ab6174032";         // Pixel 3a XL
+                else
+                    kv = "4.19.113-g820a424c538c-ab7336171";        // fallback Google
+            } else if (plat.find("mt6") != std::string::npos) {
+                kv = "4.14.141-perf+";
+            } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
+                kv = "4.19.157-perf+";
+            } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
+                kv = "4.19.113-perf+";
+            } else if (plat.find("sdm670") != std::string::npos) {
+                kv = "4.9.189-perf+";
+            }
         }
 
         strcpy(buf->release, kv.c_str());
@@ -320,9 +339,25 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             out += "CPU revision\t: 1\n\n";
         }
     } else {
+        // Fallback: Qualcomm (19.2MHz timer → 38.40) vs Exynos/otros (26MHz → 26.00)
+        // Qualcomm platforms: msmnile, kona, lahaina, atoll, lito, bengal, holi, trinket, sdm670
+        // Google Pixel: siempre Qualcomm (aunque hardware=codename, brand=google)
+        std::string brandLower = toLowerStr(fp.brand);
+        bool isQualcomm = (brandLower == "google") ||
+            (platform.find("msmnile") != std::string::npos) ||
+            (platform.find("kona")    != std::string::npos) ||
+            (platform.find("lahaina") != std::string::npos) ||
+            (platform.find("atoll")   != std::string::npos) ||
+            (platform.find("lito")    != std::string::npos) ||
+            (platform.find("bengal")  != std::string::npos) ||
+            (platform.find("holi")    != std::string::npos) ||
+            (platform.find("trinket") != std::string::npos) ||
+            (platform.find("sdm670")  != std::string::npos);
+        std::string bogomips = isQualcomm ? "38.40" : "26.00";
+
         for(int i = 0; i < fp.core_count; ++i) {
             out += "processor\t: " + std::to_string(i) + "\n";
-            out += "BogoMIPS\t: 26.00\n";
+            out += "BogoMIPS\t: " + bogomips + "\n";
             out += "Features\t: " + features + "\n";
             out += "CPU implementer\t: 0x41\n";
             out += "CPU architecture: 8\n\n";
@@ -407,6 +442,11 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (release_api >= 11) ? "30" : "29";
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
+        else if (k == "gsm.version.baseband")               dynamic_buffer = fp.radioVersion;
+        else if (k == "ro.build.expect.baseband")            dynamic_buffer = fp.radioVersion;
+        else if (k == "gsm.version.ril-impl")
+            dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
+        else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
 
         if (!dynamic_buffer.empty()) {
             int len = dynamic_buffer.length();
@@ -446,11 +486,26 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 
                 if (type == PROC_VERSION) {
                     std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string brd  = toLowerStr(fp.brand);
                     std::string kv = "4.14.186-perf+";
-                    if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
-                    else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
-                    else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
-                    else if (plat.find("sdm670") != std::string::npos) kv = "4.9.189-perf+";
+                    if (brd == "google") {
+                        if (plat.find("lito") != std::string::npos)
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat.find("trinket") != std::string::npos)
+                            kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("sdm670") != std::string::npos)
+                            kv = "4.9.189-g5d098cef6d96-ab6174032";
+                        else
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat.find("mt6") != std::string::npos) {
+                        kv = "4.14.141-perf+";
+                    } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
+                        kv = "4.19.157-perf+";
+                    } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
+                        kv = "4.19.113-perf+";
+                    } else if (plat.find("sdm670") != std::string::npos) {
+                        kv = "4.9.189-perf+";
+                    }
 
                     long dateUtc = 0;
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
@@ -465,7 +520,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == USB_SERIAL) {
                     content = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch) + "\n";
                 } else if (type == WIFI_MAC) {
-                    content = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 50) + "\n";
+                    // Android 10+ AOSP privacy: todas las apps sin root ven 02:00:00:00:00:00
+                    // getifaddrs ya devuelve esto. El VFS DEBE ser coherente.
+                    content = "02:00:00:00:00:00\n";
                 } else if (type == BATTERY_TEMP) {
                     content = omni::engine::generateBatteryTemp(g_masterSeed) + "\n";
                 } else if (type == BATTERY_VOLT) {
@@ -473,20 +530,31 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == BATTERY_CAPACITY) {
                     content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
                 } else if (type == BATTERY_STATUS) {
-                    content = "Not charging\n";
+                    content = "Discharging\n";
                 } else if (type == PROC_OSRELEASE) {
                     std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string brd  = toLowerStr(fp.brand);
                     std::string kv = "4.14.186-perf+";
-                    if (plat.find("mt6") != std::string::npos)
+                    if (brd == "google") {
+                        if (plat.find("lito") != std::string::npos)
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat.find("trinket") != std::string::npos)
+                            kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("sdm670") != std::string::npos)
+                            kv = "4.9.189-g5d098cef6d96-ab6174032";
+                        else
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat.find("mt6") != std::string::npos) {
                         kv = "4.14.141-perf+";
-                    else if (plat.find("kona") != std::string::npos ||
-                             plat.find("lahaina") != std::string::npos)
+                    } else if (plat.find("kona") != std::string::npos ||
+                               plat.find("lahaina") != std::string::npos) {
                         kv = "4.19.157-perf+";
-                    else if (plat.find("atoll") != std::string::npos ||
-                             plat.find("lito") != std::string::npos)
+                    } else if (plat.find("atoll") != std::string::npos ||
+                               plat.find("lito") != std::string::npos) {
                         kv = "4.19.113-perf+";
-                    else if (plat.find("sdm670") != std::string::npos)
+                    } else if (plat.find("sdm670") != std::string::npos) {
                         kv = "4.9.189-perf+";
+                    }
                     content = kv + "\n";
                 } else if (type == PROC_UPTIME) {
                     char tmpBuf[256];
@@ -529,6 +597,17 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         }
     }
     return fd;
+}
+
+int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    // Todos los paths sensibles (/proc/*, /sys/*) son absolutos.
+    // Para paths absolutos: my_open maneja el VFS cache y llama orig_open
+    // (que en bionic ES openat(AT_FDCWD,...) — semánticamente equivalente).
+    // Para paths relativos: no son rutas de /proc ni /sys → no requieren spoofing.
+    if (pathname && pathname[0] == '/') {
+        return my_open(pathname, flags, mode);
+    }
+    return orig_openat(dirfd, pathname, flags, mode);
 }
 
 int my_close(int fd) {
@@ -700,6 +779,9 @@ public:
         // Libc Hooks (Phase 1)
         void* open_func = DobbySymbolResolver(nullptr, "open");
         if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
+
+        void* openat_func = DobbySymbolResolver(nullptr, "openat");
+        if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
 
         void* read_func = DobbySymbolResolver(nullptr, "read");
         if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);

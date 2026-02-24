@@ -172,3 +172,25 @@ jitter=true
   - BUG-SIM-08 generatePhoneNumber: NANP USA exactamente 10 dígitos locales
 **Prompt del usuario:** "Implementar PR7 Plan Definitivo + PR8 Simulation Findings. 16+8 bugs. v11.8.1→v11.9."
 **Nota personal para el siguiente agente:** v11.9 cierra todos los vectores de detección documentados hasta la fecha. Los 5 ciclos de simulación PR8 confirmaron cero errores residuales tras estos cambios. No modificar firmas GPU sin validación cruzada contra dumps reales de `glGetString`. Los perfiles OnePlus usan nombre comercial en `device`, no codename — es comportamiento oficial OxygenOS.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR9 — Google Red Team)
+**Resumen de cambios:** v11.9.1 — Google Red Team: 6 vulnerabilidades de Capa 5.
+- **Baseband (VULN-1):** Interceptado , ,  y  (LTE).
+- **VFS (VULN-2):** Implementado hook para  delegando a  para rutas absolutas (evasión de bypass).
+- **Red (VULN-3):** Unificación de MAC address VFS () a  (AOSP standard).
+- **CPU (VULN-4):** Corrección de BogoMIPS para Qualcomm (19.2MHz → 38.40) en fallback genérico.
+- **Batería (VULN-5):** Cambio de estado "Not charging" a "Discharging" (coherencia física).
+- **Kernel (VULN-6):** Implementación de firmas de kernel Google específicas () para dispositivos Pixel en Linux y  files.
+**Prompt del usuario:** "Implementar PR9 (Google Red Team). 6 vulnerabilidades."
+**Nota personal para el siguiente agente:** El sistema ahora resiste análisis forense profundo de kernel y baseband. La paridad con hardware real es casi perfecta. Mantener la disciplina de  para futuros hooks de I/O.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR9 — Google Red Team)
+**Resumen de cambios:** v11.9.1 — Google Red Team: 6 vulnerabilidades de Capa 5.
+- **Baseband (VULN-1):** Interceptado `gsm.version.baseband`, `ro.build.expect.baseband`, `gsm.version.ril-impl` y `ro.telephony.default_network` (LTE).
+- **VFS (VULN-2):** Implementado hook para `openat()` delegando a `my_open` para rutas absolutas (evasión de bypass).
+- **Red (VULN-3):** Unificación de MAC address VFS (`/sys/class/net/wlan0/address`) a `02:00:00:00:00:00` (AOSP standard).
+- **CPU (VULN-4):** Corrección de BogoMIPS para Qualcomm (19.2MHz → 38.40) en fallback genérico.
+- **Batería (VULN-5):** Cambio de estado "Not charging" a "Discharging" (coherencia física).
+- **Kernel (VULN-6):** Implementación de firmas de kernel Google específicas (`-gHASH-abNUM`) para dispositivos Pixel en `uname` y `/proc` files.
+**Prompt del usuario:** "Implementar PR9 (Google Red Team). 6 vulnerabilidades."
+**Nota personal para el siguiente agente:** El sistema ahora resiste análisis forense profundo de kernel y baseband. La paridad con hardware real es casi perfecta. Mantener la disciplina de `openat` para futuros hooks de I/O.
