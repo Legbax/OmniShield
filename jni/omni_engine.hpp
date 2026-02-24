@@ -231,19 +231,16 @@ inline std::string generateWidevineId(long seed) {
     return ss.str();
 }
 
-// Temperatura: Oscilación orgánica sinusoidal
+// Temperatura: Estática basada en semilla
 inline std::string generateBatteryTemp(long seed) {
-    struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
-    double variation = std::sin((double)ts.tv_sec / 120.0) * 15.0;
-    int temp = 330 + (int)variation;
+    Random rng(seed);
+    int temp = 330 + rng.nextInt(30);
     return std::to_string(temp);
 }
 
-// Voltaje: Variación lenta en µV basada en minutos (CLOCK_BOOTTIME)
+// Voltaje: Estática basada en semilla
 inline std::string generateBatteryVoltage(long seed) {
-    struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
-    long timeSlice = ts.tv_sec / 60;
-    Random rng(seed + timeSlice);
+    Random rng(seed);
     int uv = (rng.nextInt(400) + 3700) * 1000;
     return std::to_string(uv);
 }

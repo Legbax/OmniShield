@@ -18,6 +18,7 @@
 #include <chrono>
 #include <random>
 #include <time.h>
+#include <iomanip>
 #include <sys/utsname.h>
 #include <ifaddrs.h>
 #include <linux/if_packet.h>
@@ -40,7 +41,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, std::string> g_fdContentCache; // Cache content for stable reads
@@ -64,19 +65,7 @@ static int (*orig_access)(const char *pathname, int mode);
 static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Phase 3 Originals
-typedef int (*orig_DrmGetProperty_t)(void*, const char*, char*, size_t*);
-static orig_DrmGetProperty_t orig_DrmGetProperty;
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
-
-// Sensor Structures
-typedef struct {
-    int32_t version; int32_t sensor; int32_t type; int32_t reserved0;
-    int64_t timestamp;
-    union { float data[16]; uint64_t step_counter; };
-    int32_t flags; int32_t reserved1[3];
-} ASensorEvent;
-typedef struct ASensorEventQueue ASensorEventQueue;
-static ssize_t (*orig_ASensorEventQueue_getEvents)(ASensorEventQueue* queue, ASensorEvent* events, size_t count);
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -149,7 +138,8 @@ static inline bool isHiddenPath(const char* path) {
     if (!path || path[0] == '\0') return false;
     return strcasestr(path, "magisk") || strcasestr(path, "kernelsu") ||
            strcasestr(path, "susfs") || strcasestr(path, "omni_data") ||
-           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones");
+           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones") ||
+           strcasestr(path, "omnishield") || strcasestr(path, "vortex");
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -192,7 +182,9 @@ int my_uname(struct utsname *buf) {
         strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
 
         std::string kv = "4.14.186-perf+";
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        if (g_currentProfileName == "Redmi 9") {
+             kv = "4.14.186-perf+";
+        } else if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
             else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
@@ -222,16 +214,9 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 
                 // Validación de seguridad contra punteros nulos
                 if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
-                    std::string brand = G_DEVICE_PROFILES.count(g_currentProfileName) ?
-                                        G_DEVICE_PROFILES.at(g_currentProfileName).brand : "default";
-                    std::string mac_str = omni::engine::generateRandomMac(brand, g_masterSeed + 50);
-
-                    // Sobrescribir bytes reales
-                    unsigned int mac[6];
-                    if (sscanf(mac_str.c_str(), "%x:%x:%x:%x:%x:%x",
-                        &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
-                        for(int i = 0; i < 6; ++i) s->sll_addr[i] = (unsigned char)mac[i];
-                    }
+                    // Static MAC 02:00:00:00:00:00 for AOSP privacy
+                    unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+                    memcpy(s->sll_addr, static_mac, 6);
                 }
             }
             ifa = ifa->ifa_next;
@@ -252,30 +237,34 @@ static std::string getArmFeatures(const std::string& platform) {
 
 std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
     std::string out;
-    std::string features = getArmFeatures(toLowerStr(fp.boardPlatform));
-    for(int i = 0; i < 8; ++i) {
-        out += "processor\t: " + std::to_string(i) + "\n";
-        out += "BogoMIPS\t: 26.00\n";
-        out += "Features\t: " + features + "\n";
-        out += "CPU implementer\t: 0x41\n";
-        out += "CPU architecture: 8\n\n";
+    std::string platform = toLowerStr(fp.boardPlatform);
+    std::string features = getArmFeatures(platform);
+
+    if (platform.find("mt6768") != std::string::npos) {
+        for(int i = 0; i < 8; ++i) {
+            bool isBig = (i >= 6);
+            out += "processor\t: " + std::to_string(i) + "\n";
+            out += "BogoMIPS\t: " + std::string(isBig ? "52.00" : "26.00") + "\n";
+            out += "Features\t: " + features + "\n";
+            out += "CPU implementer\t: 0x41\n";
+            out += "CPU architecture: 8\n";
+            out += "CPU variant\t: 0x0\n";
+            out += "CPU part\t: " + std::string(isBig ? "0xd0a" : "0xd03") + "\n";
+            out += "CPU revision\t: 4\n\n";
+        }
+    } else {
+        for(int i = 0; i < 8; ++i) {
+            out += "processor\t: " + std::to_string(i) + "\n";
+            out += "BogoMIPS\t: 26.00\n";
+            out += "Features\t: " + features + "\n";
+            out += "CPU implementer\t: 0x41\n";
+            out += "CPU architecture: 8\n\n";
+        }
     }
     out += "Hardware\t: " + std::string(fp.hardware) + "\n";
     out += "Revision\t: 0000\n";
     out += "Serial\t\t: 0000000000000000\n";
     return out;
-}
-
-int my_DrmGetProperty(void* self, const char* name, char* value, size_t* size) {
-    if (name && strcmp(name, "deviceUniqueId") == 0) {
-        auto rawId = omni::engine::generateWidevineBytes(g_masterSeed);
-        if (*size >= 16) {
-            memcpy(value, rawId.data(), 16);
-            *size = 16;
-            return 0;
-        }
-    }
-    return orig_DrmGetProperty(self, name, value, size);
 }
 
 ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
@@ -309,7 +298,12 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.build.display.id") dynamic_buffer = fp.display;
         else if (k == "ro.build.tags") dynamic_buffer = fp.tags;
-        else if (k == "ro.build.version.sdk") dynamic_buffer = "30";
+        else if (k == "ro.build.version.sdk") {
+             if (strcmp(fp.release, "11") == 0) dynamic_buffer = "30";
+             else if (strcmp(fp.release, "10") == 0) dynamic_buffer = "29";
+             else if (strcmp(fp.release, "12") == 0) dynamic_buffer = "31";
+             else dynamic_buffer = "30";
+        }
         else if (k == "ro.secure" || k == "ro.build.selinux") dynamic_buffer = "1";
         else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") dynamic_buffer = "0";
         else if (k == "ro.hardware.chipname") dynamic_buffer = fp.hardwareChipname;
@@ -318,8 +312,10 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = fp.screenDensity;
         } else if (k == "ro.product.display_resolution") {
             dynamic_buffer = std::string(fp.screenWidth) + "x" + std::string(fp.screenHeight);
-        } else if (k == "gsm.device.id" || k == "ro.ril.miui.imei0") {
+        } else if (k == "gsm.device.id" || k == "ro.ril.miui.imei0" || k == "ro.ril.miui.meid" || k == "ro.ril.oem.imei") {
             dynamic_buffer = omni::engine::generateValidImei(g_currentProfileName, g_masterSeed);
+        } else if (k == "ro.ril.miui.imei1") {
+            dynamic_buffer = omni::engine::generateValidImei(g_currentProfileName, g_masterSeed + 1);
         }
 
         if (!dynamic_buffer.empty()) {
@@ -347,6 +343,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/net/wlan0/address")) type = WIFI_MAC;
         else if (strstr(pathname, "/sys/class/power_supply/battery/temp")) type = BATTERY_TEMP;
         else if (strstr(pathname, "/sys/class/power_supply/battery/voltage_now")) type = BATTERY_VOLT;
+        else if (strstr(pathname, "/sys/class/power_supply/battery/capacity")) type = BATTERY_CAPACITY;
+        else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
 
         if (type != NONE) {
@@ -360,7 +358,15 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
                     else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
                     else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
-                    content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
+
+                    long dateUtc = 0;
+                    try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
+                    char dateBuf[128];
+                    time_t t = (time_t)dateUtc;
+                    struct tm* tm_info = gmtime(&t);
+                    strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", tm_info);
+
+                    content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(dateBuf) + "\n";
                 } else if (type == PROC_CPUINFO) {
                     content = generateMulticoreCpuInfo(fp);
                 } else if (type == USB_SERIAL) {
@@ -371,6 +377,24 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = omni::engine::generateBatteryTemp(g_masterSeed) + "\n";
                 } else if (type == BATTERY_VOLT) {
                     content = omni::engine::generateBatteryVoltage(g_masterSeed) + "\n";
+                } else if (type == BATTERY_CAPACITY) {
+                    content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
+                } else if (type == PROC_UPTIME) {
+                    char tmpBuf[256];
+                    ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
+                    if (r > 0) {
+                        tmpBuf[r] = '\0';
+                        double uptime = 0, idle = 0;
+                        if (sscanf(tmpBuf, "%lf %lf", &uptime, &idle) >= 1) {
+                             uptime += 259200 + (g_masterSeed % 1036800);
+                             idle += (259200 + (g_masterSeed % 1036800)) * 4.0;
+                             std::stringstream ss;
+                             ss << std::fixed << std::setprecision(2) << uptime << " " << idle << "\n";
+                             content = ss.str();
+                        } else {
+                             content = std::string(tmpBuf);
+                        }
+                    }
                 } else if (type == PROC_MAPS) {
                     char tmpBuf[4096];
                     ssize_t r;
@@ -428,27 +452,6 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 }
 
 // -----------------------------------------------------------------------------
-// Hooks: Sensor Jitter
-// -----------------------------------------------------------------------------
-ssize_t my_ASensorEventQueue_getEvents(ASensorEventQueue* queue, ASensorEvent* events, size_t count) {
-    ssize_t ret = orig_ASensorEventQueue_getEvents(queue, events, count);
-    if (ret > 0 && g_enableJitter) {
-        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-        long dynSeed = g_masterSeed ^ (ts.tv_nsec >> 10);
-        std::mt19937 gen(dynSeed);
-        std::uniform_real_distribution<float> dist(-0.002f, 0.002f);
-        for (ssize_t i = 0; i < ret; ++i) {
-            if (events[i].type == 1 || events[i].type == 4 || events[i].type == 2) {
-                events[i].data[0] += dist(gen);
-                events[i].data[1] += dist(gen);
-                events[i].data[2] += dist(gen);
-            }
-        }
-    }
-    return ret;
-}
-
-// -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
 int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
@@ -488,21 +491,8 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject re
 }
 
 // -----------------------------------------------------------------------------
-// Hooks: Widevine (JNI Bridge)
+// Hooks: Telephony (JNI Bridge)
 // -----------------------------------------------------------------------------
-jbyteArray JNICALL my_getPropertyByteArray(JNIEnv* env, jobject thiz, jstring jprop) {
-    const char* prop = env->GetStringUTFChars(jprop, nullptr);
-    if (strcmp(prop, "deviceUniqueId") == 0) {
-        auto rawId = omni::engine::generateWidevineBytes(g_masterSeed);
-        jbyteArray jarray = env->NewByteArray(16);
-        env->SetByteArrayRegion(jarray, 0, 16, (jbyte*)rawId.data());
-        env->ReleaseStringUTFChars(jprop, prop);
-        return jarray;
-    }
-    env->ReleaseStringUTFChars(jprop, prop);
-    return nullptr;
-}
-
 jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
     return env->NewStringUTF(omni::engine::generateValidImei(g_currentProfileName, g_masterSeed + slotId).c_str());
 }
@@ -556,8 +546,6 @@ public:
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
         if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
-        void* drm_func = DobbySymbolResolver("libmediadrm.so", "DrmGetProperty");
-        if (drm_func) DobbyHook(drm_func, (void*)my_DrmGetProperty, (void**)&orig_DrmGetProperty);
 
         // TLS 1.3
         void* tls13_ctx = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
@@ -566,10 +554,6 @@ public:
         if (tls13_ssl) DobbyHook(tls13_ssl, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
         void* tls13_set = DobbySymbolResolver("libssl.so", "SSL_set_ciphersuites");
         if (tls13_set) DobbyHook(tls13_set, (void*)my_SSL_set_ciphersuites, (void**)&orig_SSL_set_ciphersuites);
-
-        // Android/Sensor Hooks
-        void* sensor_func = DobbySymbolResolver("libandroid.so", "ASensorEventQueue_getEvents");
-        if (sensor_func) DobbyHook(sensor_func, (void*)my_ASensorEventQueue_getEvents, (void**)&orig_ASensorEventQueue_getEvents);
 
         // Network Hooks (TLS 1.2)
         void* ssl12_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
@@ -584,6 +568,7 @@ public:
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
             "_ZN7android16SettingsProvider9getStringEP7_JNIEnvP8_jobjectP8_jstring",
             "_ZN7android8Settings6Secure9getStringEP7_JNIEnvP8_jobjectP8_jstring",
+            "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi",
             nullptr
         };
         void* settings_func = nullptr;
@@ -592,21 +577,17 @@ public:
         }
         if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
 
-        // JNI Bridge for MediaDrm
-        JNINativeMethod drmMethods[] = {
-            {"getPropertyByteArray", "(Ljava/lang/String;)[B", (void*)my_getPropertyByteArray}
-        };
-        api->hookJniNativeMethods(env, "android/media/MediaDrm", drmMethods, 1);
-
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {
             {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
             {"getSimSerialNumber", "(I)Ljava/lang/String;", (void*)my_getSimSerialNumber},
             {"getLine1Number", "(I)Ljava/lang/String;", (void*)my_getLine1Number},
+            {"getImei", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
+            {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
         };
-        api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 4);
-        api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 4);
+        api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
+        api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
 
         LOGD("System Integrity loaded. Profile: %s", g_currentProfileName.c_str());
     }

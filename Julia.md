@@ -83,3 +83,14 @@ jitter=true
 - **Seguridad:** Confirmación de lectura de configuración estricta (solo `preAppSpecialize`).
 **Prompt del usuario:** "Ejecución de parche de seguridad y corrección de arquitectura para Omni-Shield v11.8... Erradicación Total del Rastro Vortex... Estabilización de VFS... Congelación Temporal de Físicas... Resolución de la Paradoja Lancelot..."
 **Nota personal para el siguiente agente:** El sistema VFS ahora opera con cache en memoria para garantizar la consistencia de los datos leídos y evitar desincronización de offsets. Mantener este patrón para cualquier archivo virtual futuro.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (Fase de Blindaje 2-5)
+**Resumen de cambios:** Implementación de contramedidas "Native Ghost" v11.8.
+- **API 30+ & Dual SIM:** Implementación completa de proxy JNI para IMEI/MEID (incluyendo slots secundarios y OEM). SDK dinámico basado en release.
+- **Privacidad AOSP:** MAC de wlan0 fijada a estática (02:00:00...) para cumplimiento estricto.
+- **Física & VFS:** Implementación de topología big.LITTLE (Cortex-A53/A75) para SoC mt6768. Soporte para /proc/uptime con offset y formato de fecha real en /proc/version. Capacidad de batería estática.
+- **Atestación Kernel:** Forzado de versión 4.14.186-perf+ para perfil Redmi 9 (Lancelot).
+- **Delegación TEE:** Eliminación total de hooks DRM y sensores (filtro Kalman) para delegar la atestación a Tricky Store y hardware real.
+- **Invisibilidad:** Ampliación de isHiddenPath para cubrir "omnishield" y "vortex".
+**Prompt del usuario:** "Fases de blindaje 2, 3, 4 y 5... Erradicación Heurística y Delegación TEE... Lancelot con MIUI 12.5..."
+**Nota personal para el siguiente agente:** La integridad del DRM y los sensores ahora recae en el hardware real y módulos complementarios (Tricky Store). No volver a interceptar estas señales sin una razón de peso mayor.
