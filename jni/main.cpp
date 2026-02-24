@@ -1077,7 +1077,7 @@ const GLubyte* my_glGetStringi(GLenum name, GLuint index) {
 
     if (name == GL_EXTENSIONS && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        if (toLowerStr(fp.eglDriver).find("adreno") != std::string::npos) {
+        if (toLowerStr(fp.eglDriver) == "adreno") {
             std::string ext = reinterpret_cast<const char*>(ret);
             // Si encontramos una extensión prohibida de ARM/Mali/IMG, la reemplazamos
             // por una extensión segura y genérica de Qualcomm para no romper el índice.
