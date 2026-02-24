@@ -518,6 +518,8 @@ int my_close(int fd) {
 
 // Atomic VFS helpers
 ssize_t perform_virtual_read(int fd, void* buf, size_t count, off64_t offset) {
+    // This helper logic is now integrated into my_read directly for full atomicity
+    // It's kept here for pread which doesn't update offset
     std::lock_guard<std::mutex> lock(g_fdMutex);
     if (g_fdContentCache.count(fd)) {
         const CachedContent& cc = g_fdContentCache[fd];
@@ -535,18 +537,27 @@ ssize_t perform_virtual_read(int fd, void* buf, size_t count, off64_t offset) {
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
-    off64_t current_offset = 0;
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
-        if (g_fdOffsetMap.count(fd)) current_offset = g_fdOffsetMap[fd];
-        else return orig_read(fd, buf, count);
-    }
+        if (g_fdContentCache.count(fd)) {
+             const CachedContent& cc = g_fdContentCache[fd];
+             if (cc.generation != g_configGeneration) return 0;
 
-    ssize_t ret = perform_virtual_read(fd, buf, count, current_offset);
-    if (ret >= 0) {
-        std::lock_guard<std::mutex> lock(g_fdMutex);
-        if (g_fdOffsetMap.count(fd)) g_fdOffsetMap[fd] += ret;
-        return ret;
+             // Ensure offset exists
+             if (g_fdOffsetMap.find(fd) == g_fdOffsetMap.end()) g_fdOffsetMap[fd] = 0;
+             off64_t& offset = g_fdOffsetMap[fd];
+
+             const std::string& content = cc.content;
+             if ((size_t)offset >= content.size()) return 0;
+
+             size_t available = content.size() - (size_t)offset;
+             size_t toRead = std::min(count, available);
+             memcpy(buf, content.c_str() + (size_t)offset, toRead);
+
+             // Atomic update
+             offset += toRead;
+             return (ssize_t)toRead;
+        }
     }
     return orig_read(fd, buf, count);
 }
