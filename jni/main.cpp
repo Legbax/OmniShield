@@ -487,6 +487,7 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.build.version.preview_sdk")       dynamic_buffer = fp.buildVersionPreviewSdk;
         else if (k == "ro.build.type")                      dynamic_buffer = fp.type;
         else if (k == "ro.build.version.release")           dynamic_buffer = fp.release;
+        else if (k == "ro.build.version.min_supported_target_sdk") dynamic_buffer = "23"; // Forzado para API 30 (Android 11)
         else if (k == "ro.vendor.build.fingerprint")        dynamic_buffer = fp.vendorFingerprint;
         else if (k == "ro.bootloader" || k == "ro.boot.bootloader") dynamic_buffer = fp.bootloader;
         else if (k == "ro.zygote")                          dynamic_buffer = fp.zygote;
@@ -675,8 +676,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         double uptime = 0, idle = 0;
                         if (sscanf(tmpBuf, "%lf %lf", &uptime, &idle) >= 1) {
                              uptime += 259200 + (g_masterSeed % 1036800);
-                             // Idle time as a coherent fraction (e.g. 80%) of uptime to avoid math anomalies
-                             idle = uptime * 0.80;
+                             // Simular una carga de CPU dinámica (75% - 85%) para evitar firmas de virtualización perfectas
+                             double jitter_factor = 0.75 + ((double)(g_masterSeed % 1000) / 10000.0);
+                             idle = uptime * jitter_factor;
                              std::stringstream ss;
                              ss << std::fixed << std::setprecision(2) << uptime << " " << idle << "\n";
                              content = ss.str();
