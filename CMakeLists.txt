@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(vortex)
+project(omnishield)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,11 +17,11 @@ void *DobbySymbolResolver(const char *image_name, const char *symbol_name) { ret
 }
 ")
 
-add_library(vortex SHARED
+add_library(omnishield SHARED
     jni/main.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/dobby_stub.cpp
 )
 
-target_link_libraries(vortex
+target_link_libraries(omnishield
     log
 )

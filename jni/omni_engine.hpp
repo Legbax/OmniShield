@@ -81,11 +81,13 @@ inline std::string getRegionForProfile(const std::string& profileName) {
     auto it = G_DEVICE_PROFILES.find(profileName);
     if (it != G_DEVICE_PROFILES.end()) {
         std::string p = toLower(std::string(it->second.product));
-        if (p.find("global") != std::string::npos || p.find("eea") != std::string::npos) return "europe";
-        if (p.find("india") != std::string::npos) return "india";
+        // "global" priority: must return "usa"
+        if (p.find("global") != std::string::npos) return "usa";
+        if (p.find("eea") != std::string::npos) return "europe";
+        // Removed India logic
         if (p.size() >= 3 && (p.substr(p.size()-3) == "_us" || p.substr(p.size()-4) == "_usa")) return "usa";
     }
-    return "europe";
+    return "usa"; // Safe default
 }
 
 inline std::string generateValidImei(const std::string& profileName, long seed) {
@@ -225,25 +227,23 @@ inline std::vector<uint8_t> generateWidevineBytes(long seed) {
     return id;
 }
 inline std::string generateWidevineId(long seed) {
-    auto bytes = generateWidevineBytes(seed); std::stringstream ss;
+    std::vector<uint8_t> bytes = generateWidevineBytes(seed);
+    std::stringstream ss;
     ss << std::hex << std::setfill('0') << std::nouppercase;
     for(int i=0; i<16; ++i) ss << std::setw(2) << (int)bytes[i];
     return ss.str();
 }
 
-// Temperatura: Oscilación orgánica sinusoidal
+// Temperatura: Estática basada en semilla
 inline std::string generateBatteryTemp(long seed) {
-    struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
-    double variation = std::sin((double)ts.tv_sec / 120.0) * 15.0;
-    int temp = 330 + (int)variation;
+    Random rng(seed);
+    int temp = 330 + rng.nextInt(30);
     return std::to_string(temp);
 }
 
-// Voltaje: Variación lenta en µV basada en minutos (CLOCK_BOOTTIME)
+// Voltaje: Estática basada en semilla
 inline std::string generateBatteryVoltage(long seed) {
-    struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
-    long timeSlice = ts.tv_sec / 60;
-    Random rng(seed + timeSlice);
+    Random rng(seed);
     int uv = (rng.nextInt(400) + 3700) * 1000;
     return std::to_string(uv);
 }
