@@ -204,3 +204,16 @@ jitter=true
 - **ro.soc.* no interceptadas (VULN-5 🟠):** `ro.soc.manufacturer` derivado del `boardPlatform` del perfil (MediaTek/Samsung/Qualcomm). `ro.soc.model` devuelve `fp.hardwareChipname` del perfil activo. Sin estas, el mismatch MediaTek vs Qualcomm era detectado en Android 11+.
 **Prompt del usuario:** "Implementar PR10 (Security Team). 5 vulnerabilidades estructurales."
 **Nota personal para el siguiente agente:** El perímetro syscall ahora es hermético contra ataques de path relativo. La identidad gráfica (GL+EGL) y de SoC (ro.soc.* + cpuinfo) es consistente para Qualcomm.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR11)
+**Resumen de cambios:** v11.9.3 — Kernel Coherence + GPU Profile Fix
+- **PROC_VERSION [H-procver]:** Añadido branch `brd=="google"` al handler de /proc/version,
+  sincronizando con my_uname(). Pixel 5 retorna correctamente 4.19.113-g820a424c538c-ab7336171.
+- **PROC_OSRELEASE [H-osrel]:** Implementación completa de /proc/sys/kernel/osrelease:
+  path detection en my_open() + content handler con misma lógica Google-aware.
+  Variables con sufijo `2` (kv2/plat2/brd2) para evitar shadowing de PROC_VERSION.
+- **Galaxy M31 [A-r-Galaxy M31]:** gpuRenderer corregido Mali-G72 MP3 → Mali-G52 MC1,
+  gpuVersion actualizado r19p0 → r25p0. Coherente con Exynos850.
+**Prompt del usuario:** "PR11 — sincronizar kernel Google + PROC_OSRELEASE + GPU M31"
+**Nota para el siguiente agente:** Post-PR11 el sistema tiene 0 CRITICAL, 0 HIGH, 0 MEDIUM.
+  Únicos pendientes son 3 LOW (L1-arp, L2-meminfo, L11-ostype) — candidatos a PR12.

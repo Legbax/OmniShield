@@ -537,6 +537,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
+        else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
 
         if (type != NONE) {
             std::string content;
@@ -548,23 +549,14 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::string brd  = toLowerStr(fp.brand);
                     std::string kv = "4.14.186-perf+";
                     if (brd == "google") {
-                        if (plat.find("lito") != std::string::npos)
-                            kv = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat.find("trinket") != std::string::npos)
-                            kv = "4.14.255-g67c58a7c42a0-ab7336171";
-                        else if (plat.find("sdm670") != std::string::npos)
-                            kv = "4.9.189-g5d098cef6d96-ab6174032";
-                        else
-                            kv = "4.19.113-g820a424c538c-ab7336171";
-                    } else if (plat.find("mt6") != std::string::npos) {
-                        kv = "4.14.141-perf+";
-                    } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
-                        kv = "4.19.157-perf+";
-                    } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
-                        kv = "4.19.113-perf+";
-                    } else if (plat.find("sdm670") != std::string::npos) {
-                        kv = "4.9.189-perf+";
-                    }
+                        if (plat.find("lito")    != std::string::npos) kv = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat.find("trinket") != std::string::npos) kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("sdm670")  != std::string::npos) kv = "4.9.189-g5d098cef6d96-ab6174032";
+                        else kv = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
+                    else if (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos) kv="4.19.157-perf+";
+                    else if (plat.find("atoll")!=std::string::npos||plat.find("lito")!=std::string::npos) kv="4.19.113-perf+";
+                    else if (plat.find("sdm670")!=std::string::npos) kv="4.9.189-perf+";
 
                     long dateUtc = 0;
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
@@ -644,6 +636,20 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     while (std::getline(iss, line)) {
                         if (!isHiddenPath(line.c_str())) content += line + "\n";
                     }
+                } else if (type == PROC_OSRELEASE) {
+                    std::string plat2 = toLowerStr(fp.boardPlatform);
+                    std::string brd2  = toLowerStr(fp.brand);
+                    std::string kv2 = "4.14.186-perf+";
+                    if (brd2 == "google") {
+                        if (plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat2.find("trinket") != std::string::npos) kv2 = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-g5d098cef6d96-ab6174032";
+                        else kv2 = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat2.find("mt6")    != std::string::npos) kv2 = "4.14.141-perf+";
+                    else if (plat2.find("kona")    != std::string::npos || plat2.find("lahaina") != std::string::npos) kv2 = "4.19.157-perf+";
+                    else if (plat2.find("atoll")   != std::string::npos || plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-perf+";
+                    else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-perf+";
+                    content = kv2 + "\n";
                 }
             }
 
