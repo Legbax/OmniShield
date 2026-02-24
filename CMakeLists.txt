@@ -24,4 +24,5 @@ add_library(omnishield SHARED
 
 target_link_libraries(omnishield
     log
+    vulkan
 )

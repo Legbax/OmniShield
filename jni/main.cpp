@@ -24,6 +24,7 @@
 #include <linux/if_packet.h>
 #include <sys/socket.h>
 #include <errno.h>
+#include <vulkan/vulkan.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -47,7 +48,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -95,6 +96,11 @@ typedef unsigned int GLenum;
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
+
+// Vulkan & Sensors
+static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
+static const char* (*orig_Sensor_getName)(void* sensor);
+static const char* (*orig_Sensor_getVendor)(void* sensor);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
@@ -559,6 +565,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
         else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
+        else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
+        else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
+        else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
 
         if (type != NONE) {
             std::string content;
@@ -704,6 +713,15 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     bool isQcom = (brand == "google" || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("msmnile") != std::string::npos);
                     if (isQcom) content = "2841600\n";
                     else content = "2000000\n";
+                } else if (type == SYS_SOC_MACHINE) {
+                    content = std::string(fp.hardware) + "\n";
+                } else if (type == SYS_SOC_FAMILY) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos) content = "MediaTek\n";
+                    else if (plat.find("exynos") != std::string::npos || plat.find("s5e") != std::string::npos) content = "Samsung\n";
+                    else content = "Snapdragon\n";
+                } else if (type == SYS_SOC_ID) {
+                    content = std::string(fp.hardwareChipname) + "\n";
                 }
             }
 
@@ -922,6 +940,67 @@ const GLubyte* my_glGetString(GLenum name) {
 }
 
 // -----------------------------------------------------------------------------
+// Hooks: Vulkan API
+// -----------------------------------------------------------------------------
+void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
+    orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
+    if (pProperties && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string egl = toLowerStr(fp.eglDriver);
+
+        // Sobreescribir con los datos del perfil emulado
+        strncpy(pProperties->deviceName, fp.gpuRenderer, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
+        pProperties->deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1] = '\0';
+
+        if (egl == "adreno") {
+            pProperties->vendorID = 0x5143; // Qualcomm
+        } else if (egl == "mali") {
+            pProperties->vendorID = 0x13B5; // ARM
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: SensorManager (Limpieza de firmas MTK/Xiaomi)
+// -----------------------------------------------------------------------------
+const char* my_Sensor_getName(void* sensor) {
+    const char* orig_name = orig_Sensor_getName(sensor);
+    if (!orig_name) return nullptr;
+
+    static thread_local std::string name_cache;
+    name_cache = orig_name;
+
+    std::string lower_name = toLowerStr(orig_name);
+    if (lower_name.find("mtk") != std::string::npos ||
+        lower_name.find("mediatek") != std::string::npos ||
+        lower_name.find("xiaomi") != std::string::npos) {
+
+        size_t pos;
+        while ((pos = name_cache.find("MTK")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
+        while ((pos = name_cache.find("mtk")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
+        while ((pos = name_cache.find("MediaTek")) != std::string::npos) name_cache.replace(pos, 8, "AOSP");
+        while ((pos = name_cache.find("Xiaomi")) != std::string::npos) name_cache.replace(pos, 6, "AOSP");
+    }
+    return name_cache.c_str();
+}
+
+const char* my_Sensor_getVendor(void* sensor) {
+    const char* orig_vendor = orig_Sensor_getVendor(sensor);
+    if (!orig_vendor) return nullptr;
+
+    static thread_local std::string vendor_cache;
+    vendor_cache = orig_vendor;
+
+    std::string lower_vendor = toLowerStr(orig_vendor);
+    if (lower_vendor.find("mtk") != std::string::npos ||
+        lower_vendor.find("mediatek") != std::string::npos ||
+        lower_vendor.find("xiaomi") != std::string::npos) {
+        vendor_cache = "AOSP Framework"; // Vendor genérico y seguro
+    }
+    return vendor_cache.c_str();
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
 static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
@@ -1075,6 +1154,21 @@ public:
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
 
+        // Vulkan
+        void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
+        if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
+
+        // Sensores (Mangled names en libandroid.so o libsensors.so)
+        // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
+        // _ZNK7android6Sensor9getVendorEv -> android::Sensor::getVendor() const
+        void* sensor_name_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor7getNameEv");
+        if (!sensor_name_func) sensor_name_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor7getNameEv");
+        if (sensor_name_func) DobbyHook(sensor_name_func, (void*)my_Sensor_getName, (void**)&orig_Sensor_getName);
+
+        void* sensor_vendor_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor9getVendorEv");
+        if (!sensor_vendor_func) sensor_vendor_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor9getVendorEv");
+        if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
+
         // Settings.Secure (Android ID)
         static const char* SETTINGS_SYMBOLS[] = {
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
@@ -1088,9 +1182,9 @@ public:
         }
         if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
 
-// Settings.Secure (getStringForUser - API 30+)
-void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
-if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+        // Settings.Secure (getStringForUser - API 30+)
+        void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
+        if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
 
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {

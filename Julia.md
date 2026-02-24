@@ -247,3 +247,12 @@ jitter=true
 - **Modern Prop Shield:** Hook completo a `__system_property_read_callback` para interceptar la API moderna de lectura de propiedades en Android 11+. Implementa filtrado (shouldHide) y spoofing consistente con `my_system_property_get`.
 **Prompt del usuario:** "PR14 Consolidado... reparar omisiones anteriores y añadir el blindaje definitivo de la API moderna de propiedades..."
 **Nota para el siguiente agente:** El sistema ahora intercepta todas las vías de lectura de propiedades (legacy y callback) y bloquea el acceso a hardware gráfico inconsistente.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR15 - Final Hardware Identity)
+**Resumen de cambios:** v11.9.7 — Final Hardware Identity Shield.
+- **Vulkan API Spoofing:** Implementación de `vkGetPhysicalDeviceProperties` hook para inyectar `deviceName` y `vendorID` del perfil (Qualcomm 0x5143 / ARM 0x13B5). Enlazado con `libvulkan.so`.
+- **Sensor Sanitization:** Hooks en `Sensor::getName` y `Sensor::getVendor` para eliminar firmas "MTK", "MediaTek" y "Xiaomi", reemplazándolas con "AOSP" genérico.
+- **SoC Identity VFS:** Expansión del VFS para manejar `/sys/devices/soc0/machine`, `family` y `soc_id`, retornando valores coherentes con el perfil activo.
+- **CMake Update:** Inclusión de `vulkan` en `target_link_libraries`.
+**Prompt del usuario:** "Misión: Ejecutar el "PR15". Esta es la actualización final (v11.9.7). Vas a implementar los 3 escudos de hardware definitivos: 1) Falsificación de la API Vulkan... 2) Sanitización de los Sensores Físicos... 3) Expansión del VFS..."
+**Nota para el siguiente agente:** El sistema ahora posee una identidad de hardware completa a nivel de gráficos (Vulkan/GLES), sensores y SoC. La coherencia es total. Proyecto Omni-Shield completado.
