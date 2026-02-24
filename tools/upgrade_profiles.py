@@ -69,7 +69,7 @@ def upgrade_profiles(input_file, output_file):
         f.write("#pragma once\n#include <string>\n#include <map>\n\nstruct DeviceFingerprint {\n")
         all_keys = keys + ["gpuVendor", "gpuRenderer", "gpuVersion", "screenWidth", "screenHeight", "screenDensity"]
         for field in all_keys: f.write(f"    const char* {field};\n")
-        f.write("};\n\nstatic const std::map<std::string, DeviceFingerprint> VORTEX_PROFILES = {\n")
+        f.write("};\n\nstatic const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {\n")
 
         for name, vals in profiles:
             f.write(f'    {{ "{name}", {{\n')
@@ -78,4 +78,4 @@ def upgrade_profiles(input_file, output_file):
         f.write("};\n")
 
 if __name__ == "__main__":
-    upgrade_profiles("jni/vortex_profiles.h", "jni/vortex_profiles.h")
+    upgrade_profiles("jni/omni_profiles.h", "jni/omni_profiles.h")

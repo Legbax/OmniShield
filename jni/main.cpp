@@ -43,6 +43,7 @@ static bool g_enableJitter = true;
 enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
+static std::map<int, std::string> g_fdContentCache; // Cache content for stable reads
 static std::mutex g_fdMutex;
 
 // Original Pointers
@@ -129,6 +130,7 @@ void readConfig() {
 bool shouldHide(const char* key) {
     if (!key || key[0] == '\0') return false;
     std::string s = toLowerStr(key);
+    if (g_currentProfileName == "Redmi 9" && s.find("lancelot") != std::string::npos) return false;
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         if (toLowerStr(fp.brand).find("xiaomi") != std::string::npos ||
@@ -348,9 +350,48 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
 
         if (type != NONE) {
-            std::lock_guard<std::mutex> lock(g_fdMutex);
-            g_fdMap[fd] = type;
-            g_fdOffsetMap[fd] = 0;
+            std::string content;
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+
+                if (type == PROC_VERSION) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string kv = "4.14.186-perf+";
+                    if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
+                    else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
+                    else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+                    content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
+                } else if (type == PROC_CPUINFO) {
+                    content = generateMulticoreCpuInfo(fp);
+                } else if (type == USB_SERIAL) {
+                    content = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch) + "\n";
+                } else if (type == WIFI_MAC) {
+                    content = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 50) + "\n";
+                } else if (type == BATTERY_TEMP) {
+                    content = omni::engine::generateBatteryTemp(g_masterSeed) + "\n";
+                } else if (type == BATTERY_VOLT) {
+                    content = omni::engine::generateBatteryVoltage(g_masterSeed) + "\n";
+                } else if (type == PROC_MAPS) {
+                    char tmpBuf[4096];
+                    ssize_t r;
+                    std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) {
+                        rawFile.append(tmpBuf, r);
+                    }
+                    std::istringstream iss(rawFile);
+                    std::string line;
+                    while (std::getline(iss, line)) {
+                        if (!isHiddenPath(line.c_str())) content += line + "\n";
+                    }
+                }
+            }
+
+            if (!content.empty()) {
+                std::lock_guard<std::mutex> lock(g_fdMutex);
+                g_fdMap[fd] = type;
+                g_fdOffsetMap[fd] = 0;
+                g_fdContentCache[fd] = content;
+            }
         }
     }
     return fd;
@@ -361,56 +402,27 @@ int my_close(int fd) {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         g_fdMap.erase(fd);
         g_fdOffsetMap.erase(fd);
+        g_fdContentCache.erase(fd);
     }
     return orig_close ? orig_close(fd) : close(fd);
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
-    FileType type = NONE;
-    { std::lock_guard<std::mutex> lock(g_fdMutex); if(g_fdMap.count(fd)) type = g_fdMap[fd]; }
-
-    if (type != NONE && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        std::string content;
-
-        std::string dyn_serial = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
-        std::string dyn_mac = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 50);
-
-        if (type == PROC_VERSION) {
-            std::string plat = toLowerStr(fp.boardPlatform);
-            std::string kv = "4.14.186-perf+";
-            if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
-            else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
-            else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
-            content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(fp.buildDateUtc) + "\n";
-        } else if (type == PROC_CPUINFO) {
-            content = generateMulticoreCpuInfo(fp);
-        } else if (type == USB_SERIAL) { content = dyn_serial + "\n";
-        } else if (type == WIFI_MAC) { content = dyn_mac + "\n";
-        } else if (type == BATTERY_TEMP) { content = omni::engine::generateBatteryTemp(g_masterSeed) + "\n";
-        } else if (type == BATTERY_VOLT) { content = omni::engine::generateBatteryVoltage(g_masterSeed) + "\n";
-        } else if (type == PROC_MAPS) {
-            char tmpBuf[4096];
-            ssize_t realRead = orig_read(fd, tmpBuf, sizeof(tmpBuf) - 1);
-            if (realRead > 0) {
-                tmpBuf[realRead] = '\0';
-                std::istringstream iss(tmpBuf);
-                std::string line, rawContent;
-                while (std::getline(iss, line)) {
-                    if (!isHiddenPath(line.c_str())) rawContent += line + "\n";
-                }
-                content = rawContent;
-            }
-        }
-
+    {
         std::lock_guard<std::mutex> lock(g_fdMutex);
-        size_t& offset = g_fdOffsetMap[fd];
-        if (offset >= content.size()) return 0;
-        size_t available = content.size() - offset;
-        size_t toRead = std::min(count, available);
-        memcpy(buf, content.c_str() + offset, toRead);
-        offset += toRead;
-        return (ssize_t)toRead;
+        if (g_fdContentCache.count(fd)) {
+            const std::string& content = g_fdContentCache[fd];
+            size_t& offset = g_fdOffsetMap[fd];
+
+            if (offset >= content.size()) return 0;
+
+            size_t available = content.size() - offset;
+            size_t toRead = std::min(count, available);
+
+            memcpy(buf, content.c_str() + offset, toRead);
+            offset += toRead;
+            return (ssize_t)toRead;
+        }
     }
     return orig_read(fd, buf, count);
 }

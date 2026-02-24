@@ -1,4 +1,4 @@
 #!/system/bin/sh
-# Vortex Post-FS-Data
+# Omni-Shield Post-FS-Data
 # Setup directory
-mkdir -p /data/adb/vortex
+mkdir -p /data/adb/.omni_data

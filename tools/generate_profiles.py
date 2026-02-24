@@ -53,7 +53,7 @@ def generate_header(input_file, output_file):
             f.write(f"    const char* {field};\n")
         f.write("};\n\n")
 
-        f.write("static const std::map<std::string, DeviceFingerprint> VORTEX_PROFILES = {\n")
+        f.write("static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {\n")
 
         for name, fields in profiles:
             f.write(f'    {{ "{name}", {{\n')
@@ -66,4 +66,4 @@ def generate_header(input_file, output_file):
         f.write("};\n")
 
 if __name__ == "__main__":
-    generate_header("DeviceData.kt.txt", "jni/vortex_profiles.h")
+    generate_header("DeviceData.kt.txt", "jni/omni_profiles.h")
