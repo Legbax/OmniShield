@@ -98,6 +98,7 @@ static int (*orig_SSL_set_ciphersuites)(SSL *ssl, const char *str);
 // GL Pointers
 typedef unsigned char GLubyte;
 typedef unsigned int GLenum;
+typedef unsigned int GLuint;
 #define GL_VENDOR 0x1F00
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
@@ -1076,7 +1077,7 @@ const GLubyte* my_glGetStringi(GLenum name, GLuint index) {
 
     if (name == GL_EXTENSIONS && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        if (toLowerStr(fp.eglDriver) == "adreno") {
+        if (toLowerStr(fp.eglDriver).find("adreno") != std::string::npos) {
             std::string ext = reinterpret_cast<const char*>(ret);
             // Si encontramos una extensión prohibida de ARM/Mali/IMG, la reemplazamos
             // por una extensión segura y genérica de Qualcomm para no romper el índice.

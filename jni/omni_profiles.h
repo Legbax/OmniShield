@@ -1478,7 +1478,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "404",
         "29",
     8,
-    4,
+    6,
     } },
     { "Nokia 5.4", {
         "HMD Global",
