@@ -47,7 +47,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, off64_t> g_fdOffsetMap; // Thread-safe offset tracking (using off64_t for both 32/64)
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -228,6 +228,7 @@ int my_uname(struct utsname *buf) {
             if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
             else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
             else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+            else if (plat.find("sdm670") != std::string::npos) kv = "4.9.189-perf+";
         }
         strcpy(buf->release, kv.c_str());
         strcpy(buf->version, "#1 SMP PREEMPT");
@@ -419,6 +420,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/power_supply/battery/status")) type = BATTERY_STATUS;
         else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
+        else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
 
         if (type != NONE) {
             std::string content;
@@ -431,6 +433,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
                     else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
                     else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+                    else if (plat.find("sdm670") != std::string::npos) kv = "4.9.189-perf+";
 
                     long dateUtc = 0;
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
@@ -439,6 +442,14 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     struct tm* tm_info = gmtime(&t);
                     strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", tm_info);
                     content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(dateBuf) + "\n";
+                } else if (type == PROC_OSRELEASE) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string kv = "4.14.186-perf+";
+                    if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
+                    else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
+                    else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+                    else if (plat.find("sdm670") != std::string::npos) kv = "4.9.189-perf+";
+                    content = kv + "\n";
                 } else if (type == PROC_CPUINFO) {
                     content = generateMulticoreCpuInfo(fp);
                 } else if (type == USB_SERIAL) {

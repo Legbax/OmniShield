@@ -164,9 +164,19 @@ inline std::string generatePhoneNumber(const std::string& profileName, long seed
     std::string region = getRegionForProfile(profileName);
     std::string cc = COUNTRY_CODES.count(region) ? COUNTRY_CODES.at(region) : "+44";
 
+    // Bug-SIM-08: USA strictly 10 digits
+    int targetLen;
+    if (region == "usa") {
+        targetLen = 10;
+    } else {
+        targetLen = 8 + rng.nextInt(3);
+    }
+
+    // Ensure first digit is between 2 and 9
     std::string local = std::to_string(2 + rng.nextInt(8));
-    int len = 8 + rng.nextInt(3);
-    for (int i = 1; i < len; ++i) local += std::to_string(rng.nextInt(10));
+
+    // Fill the rest
+    for (int i = 1; i < targetLen; ++i) local += std::to_string(rng.nextInt(10));
     return cc + local;
 }
 
