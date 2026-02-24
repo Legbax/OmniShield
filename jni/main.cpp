@@ -24,6 +24,9 @@
 #include <linux/if_packet.h>
 #include <sys/socket.h>
 #include <errno.h>
+#include <vulkan/vulkan.h>
+#include <sys/sysinfo.h>
+#include <dirent.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -47,7 +50,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -80,6 +83,10 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 
+// Phase 4 Originals (v11.9.9)
+static int (*orig_sysinfo)(struct sysinfo *info);
+static struct dirent* (*orig_readdir)(DIR *dirp);
+
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
@@ -95,6 +102,11 @@ typedef unsigned int GLenum;
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
+
+// Vulkan & Sensors
+static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
+static const char* (*orig_Sensor_getName)(void* sensor);
+static const char* (*orig_Sensor_getVendor)(void* sensor);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
@@ -475,6 +487,7 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.build.version.preview_sdk")       dynamic_buffer = fp.buildVersionPreviewSdk;
         else if (k == "ro.build.type")                      dynamic_buffer = fp.type;
         else if (k == "ro.build.version.release")           dynamic_buffer = fp.release;
+        else if (k == "ro.build.version.min_supported_target_sdk") dynamic_buffer = "23"; // Forzado para API 30 (Android 11)
         else if (k == "ro.vendor.build.fingerprint")        dynamic_buffer = fp.vendorFingerprint;
         else if (k == "ro.bootloader" || k == "ro.boot.bootloader") dynamic_buffer = fp.bootloader;
         else if (k == "ro.zygote")                          dynamic_buffer = fp.zygote;
@@ -506,6 +519,24 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.soc.model") {
             // ro.soc.model = el chip model del perfil (hardwareChipname)
             dynamic_buffer = fp.hardwareChipname;
+        }
+        // --- Intercepción HAL (Cámara, Vulkan, Audio y DRM/Keystore) ---
+        else if (k == "ro.hardware.camera" ||
+                 k == "ro.hardware.vulkan" ||
+                 k == "ro.hardware.keystore" ||
+                 k == "ro.hardware.audio"  ||
+                 k == "ro.hardware.egl") {
+            // Forzamos al sistema a reportar el hardware emulado en lugar de la placa base física
+            dynamic_buffer = fp.boardPlatform;
+        }
+        else if (k == "ro.mediatek.version.release" ||
+                 k == "ro.mediatek.platform") {
+            // Si una app (o el DRM) busca explícitamente firmas MTK en las properties, las vaciamos
+            // a menos que estemos emulando un MediaTek
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                dynamic_buffer = "";
+            }
         }
 
         if (!dynamic_buffer.empty()) {
@@ -559,6 +590,15 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
         else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
+        else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
+        else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
+        else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
+        else if (strstr(pathname, "/sys/class/graphics/fb0/virtual_size")) type = SYS_FB0_SIZE;
+        else if (strstr(pathname, "/proc/asound/cards")) type = PROC_ASOUND;
+        else if (strstr(pathname, "/proc/bus/input/devices")) type = PROC_INPUT;
+        else if (strstr(pathname, "/sys/class/thermal/") && strstr(pathname, "type")) type = SYS_THERMAL;
+        // Bloqueo directo de KSU/Batería MTK
+        else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
         if (type != NONE) {
             std::string content;
@@ -636,8 +676,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         double uptime = 0, idle = 0;
                         if (sscanf(tmpBuf, "%lf %lf", &uptime, &idle) >= 1) {
                              uptime += 259200 + (g_masterSeed % 1036800);
-                             // Idle time as a coherent fraction (e.g. 80%) of uptime to avoid math anomalies
-                             idle = uptime * 0.80;
+                             // Simular una carga de CPU dinámica (75% - 85%) para evitar firmas de virtualización perfectas
+                             double jitter_factor = 0.75 + ((double)(g_masterSeed % 1000) / 10000.0);
+                             idle = uptime * jitter_factor;
                              std::stringstream ss;
                              ss << std::fixed << std::setprecision(2) << uptime << " " << idle << "\n";
                              content = ss.str();
@@ -704,6 +745,45 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     bool isQcom = (brand == "google" || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("msmnile") != std::string::npos);
                     if (isQcom) content = "2841600\n";
                     else content = "2000000\n";
+                } else if (type == SYS_SOC_MACHINE) {
+                    content = std::string(fp.hardware) + "\n";
+                } else if (type == SYS_SOC_FAMILY) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos) content = "MediaTek\n";
+                    else if (plat.find("exynos") != std::string::npos || plat.find("s5e") != std::string::npos) content = "Samsung\n";
+                    else content = "Snapdragon\n";
+                } else if (type == SYS_SOC_ID) {
+                    content = std::string(fp.hardwareChipname) + "\n";
+                } else if (type == SYS_FB0_SIZE) {
+                    content = std::string(fp.screenWidth) + "," + std::string(fp.screenHeight) + "\n";
+                } else if (type == PROC_ASOUND) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt") != std::string::npos) {
+                        char tmpBuf[1024]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    } else if (plat.find("exynos") != std::string::npos) {
+                        content = " 0 [samsung        ]: sm-a52 - samsung\n                      samsung\n";
+                    } else {
+                        content = " 0 [sndkona        ]: snd_kona - snd_kona\n                      snd_kona\n";
+                    }
+                } else if (type == PROC_INPUT) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt") != std::string::npos) {
+                        char tmpBuf[4096]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    } else {
+                        content = "I: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"sec_touchscreen\"\nP: Phys=\nS: Sysfs=/devices/virtual/input/input1\nU: Uniq=\nH: Handlers=event1\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0\nB: ABS=260800000000000\n\nI: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\nS: Sysfs=/devices/platform/soc/soc:gpio_keys/input/input0\nU: Uniq=\nH: Handlers=event0\nB: PROP=0\nB: EV=3\nB: KEY=10000000000000 0\n\n";
+                    }
+                } else if (type == SYS_THERMAL) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if (plat.find("mt") != std::string::npos) {
+                        char tmpBuf[128]; ssize_t r;
+                        if ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    } else if (plat.find("exynos") != std::string::npos) {
+                        content = "exynos-therm\n";
+                    } else {
+                        content = "tsens_tz_sensor\n";
+                    }
                 }
             }
 
@@ -922,6 +1002,99 @@ const GLubyte* my_glGetString(GLenum name) {
 }
 
 // -----------------------------------------------------------------------------
+// Hooks: Vulkan API
+// -----------------------------------------------------------------------------
+void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
+    orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
+    if (pProperties && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string egl = toLowerStr(fp.eglDriver);
+
+        // Sobreescribir con los datos del perfil emulado
+        strncpy(pProperties->deviceName, fp.gpuRenderer, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1);
+        pProperties->deviceName[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - 1] = '\0';
+
+        if (egl == "adreno") {
+            pProperties->vendorID = 0x5143; // Qualcomm
+        } else if (egl == "mali") {
+            pProperties->vendorID = 0x13B5; // ARM
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: SensorManager (Limpieza de firmas MTK/Xiaomi)
+// -----------------------------------------------------------------------------
+const char* my_Sensor_getName(void* sensor) {
+    const char* orig_name = orig_Sensor_getName(sensor);
+    if (!orig_name) return nullptr;
+
+    static thread_local std::string name_cache;
+    name_cache = orig_name;
+
+    std::string lower_name = toLowerStr(orig_name);
+    if (lower_name.find("mtk") != std::string::npos ||
+        lower_name.find("mediatek") != std::string::npos ||
+        lower_name.find("xiaomi") != std::string::npos) {
+
+        size_t pos;
+        while ((pos = name_cache.find("MTK")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
+        while ((pos = name_cache.find("mtk")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
+        while ((pos = name_cache.find("MediaTek")) != std::string::npos) name_cache.replace(pos, 8, "AOSP");
+        while ((pos = name_cache.find("Xiaomi")) != std::string::npos) name_cache.replace(pos, 6, "AOSP");
+    }
+    return name_cache.c_str();
+}
+
+const char* my_Sensor_getVendor(void* sensor) {
+    const char* orig_vendor = orig_Sensor_getVendor(sensor);
+    if (!orig_vendor) return nullptr;
+
+    static thread_local std::string vendor_cache;
+    vendor_cache = orig_vendor;
+
+    std::string lower_vendor = toLowerStr(orig_vendor);
+    if (lower_vendor.find("mtk") != std::string::npos ||
+        lower_vendor.find("mediatek") != std::string::npos ||
+        lower_vendor.find("xiaomi") != std::string::npos) {
+        vendor_cache = "AOSP Framework"; // Vendor genérico y seguro
+    }
+    return vendor_cache.c_str();
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: sysinfo (Uptime Paradox Fix)
+// -----------------------------------------------------------------------------
+int my_sysinfo(struct sysinfo *info) {
+    int ret = orig_sysinfo(info);
+    if (ret == 0 && info != nullptr) {
+        long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
+        info->uptime += added_uptime_seconds;
+    }
+    return ret;
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: readdir (Ocultación de nodos de batería MTK)
+// -----------------------------------------------------------------------------
+struct dirent* my_readdir(DIR *dirp) {
+    struct dirent* ret;
+    while ((ret = orig_readdir(dirp)) != nullptr) {
+        std::string dname = toLowerStr(ret->d_name);
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                if (dname.find("mtk") != std::string::npos || dname.find("mt_bat") != std::string::npos) {
+                    continue; // Saltar archivos de MediaTek si no emulamos MTK
+                }
+            }
+        }
+        return ret;
+    }
+    return nullptr;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
 static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
@@ -1055,6 +1228,12 @@ public:
         DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
         DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
+        void* sysinfo_func = DobbySymbolResolver(nullptr, "sysinfo");
+        if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
+
+        void* readdir_func = DobbySymbolResolver(nullptr, "readdir");
+        if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
+
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
         if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
@@ -1075,6 +1254,21 @@ public:
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
 
+        // Vulkan
+        void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
+        if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
+
+        // Sensores (Mangled names en libandroid.so o libsensors.so)
+        // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
+        // _ZNK7android6Sensor9getVendorEv -> android::Sensor::getVendor() const
+        void* sensor_name_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor7getNameEv");
+        if (!sensor_name_func) sensor_name_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor7getNameEv");
+        if (sensor_name_func) DobbyHook(sensor_name_func, (void*)my_Sensor_getName, (void**)&orig_Sensor_getName);
+
+        void* sensor_vendor_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor9getVendorEv");
+        if (!sensor_vendor_func) sensor_vendor_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor9getVendorEv");
+        if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
+
         // Settings.Secure (Android ID)
         static const char* SETTINGS_SYMBOLS[] = {
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
@@ -1088,9 +1282,9 @@ public:
         }
         if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
 
-// Settings.Secure (getStringForUser - API 30+)
-void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
-if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+        // Settings.Secure (getStringForUser - API 30+)
+        void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
+        if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
 
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {
