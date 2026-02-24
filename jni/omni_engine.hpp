@@ -81,11 +81,13 @@ inline std::string getRegionForProfile(const std::string& profileName) {
     auto it = G_DEVICE_PROFILES.find(profileName);
     if (it != G_DEVICE_PROFILES.end()) {
         std::string p = toLower(std::string(it->second.product));
-        if (p.find("global") != std::string::npos || p.find("eea") != std::string::npos) return "europe";
-        if (p.find("india") != std::string::npos) return "india";
+        // "global" priority: must return "usa"
+        if (p.find("global") != std::string::npos) return "usa";
+        if (p.find("eea") != std::string::npos) return "europe";
+        // Removed India logic
         if (p.size() >= 3 && (p.substr(p.size()-3) == "_us" || p.substr(p.size()-4) == "_usa")) return "usa";
     }
-    return "europe";
+    return "usa"; // Safe default
 }
 
 inline std::string generateValidImei(const std::string& profileName, long seed) {

@@ -39,12 +39,18 @@ static std::map<std::string, std::string> g_config;
 static std::string g_currentProfileName = "Redmi 9";
 static long g_masterSeed = 0;
 static bool g_enableJitter = true;
+static uint64_t g_configGeneration = 0;
+
+struct CachedContent {
+    std::string content;
+    uint64_t generation;
+};
 
 // FD Tracking
 enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
-static std::map<int, std::string> g_fdContentCache; // Cache content for stable reads
+static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
 static std::mutex g_fdMutex;
 
 // Original Pointers
@@ -248,7 +254,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
     std::string features = getArmFeatures(platform);
 
     if (platform.find("mt6768") != std::string::npos) {
-        for(int i = 0; i < 8; ++i) {
+        for(int i = 0; i < fp.core_count; ++i) {
             bool isBig = (i >= 6);
             out += "processor\t: " + std::to_string(i) + "\n";
             out += "BogoMIPS\t: " + std::string(isBig ? "52.00" : "26.00") + "\n";
@@ -260,7 +266,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             out += "CPU revision\t: 4\n\n";
         }
     } else {
-        for(int i = 0; i < 8; ++i) {
+        for(int i = 0; i < fp.core_count; ++i) {
             out += "processor\t: " + std::to_string(i) + "\n";
             out += "BogoMIPS\t: 26.00\n";
             out += "Features\t: " + features + "\n";
@@ -425,7 +431,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 std::lock_guard<std::mutex> lock(g_fdMutex);
                 g_fdMap[fd] = type;
                 g_fdOffsetMap[fd] = 0;
-                g_fdContentCache[fd] = content;
+                g_fdContentCache[fd] = { content, g_configGeneration };
             }
         }
     }
@@ -446,7 +452,18 @@ ssize_t my_read(int fd, void *buf, size_t count) {
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
-            const std::string& content = g_fdContentCache[fd];
+            const CachedContent& cc = g_fdContentCache[fd];
+
+            // Anti-Regression: Check for stale data generation
+            if (cc.generation != g_configGeneration) {
+                // If generation mismatch, we treat as EOF or invalid.
+                // Or fallback to orig_read? Prompt says "invalida la lectura".
+                // Returning 0 (EOF) or -1 (Error) is safest.
+                // Assuming EOF to avoid crash.
+                return 0;
+            }
+
+            const std::string& content = cc.content;
             size_t& offset = g_fdOffsetMap[fd];
 
             if (offset >= content.size()) return 0;
