@@ -665,28 +665,47 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    // Ruta absoluta → delegar directamente a my_open (que ya tiene la lógica VFS)
     if (pathname && pathname[0] == '/') {
-        // Path absoluto: delegamos directamente a my_open (que tiene toda la lógica VFS)
         return my_open(pathname, flags, mode);
     }
-    if (pathname && dirfd == AT_FDCWD) {
-        // Path relativo desde CWD: resolver a path absoluto para VFS lookup
+
+    // Resolver dirfd a path real via /proc/self/fd/<n> (sin estado, O(1))
+    std::string basedir;
+    if (dirfd == AT_FDCWD) {
         char cwd[512] = {};
         if (getcwd(cwd, sizeof(cwd)) != nullptr) {
-            std::string full = std::string(cwd) + "/" + pathname;
-            // Verificar si el path absoluto resultante es una ruta que el VFS gestiona
-            // Si cae en una ruta sensible (/proc/*, /sys/*), lo pasamos por my_open
-            if (full.find("/proc/") != std::string::npos ||
-                full.find("/sys/")  != std::string::npos) {
-                return my_open(full.c_str(), flags, mode);
-            }
-            // También verificar isHiddenPath para root-hiding
-            if (isHiddenPath(full.c_str())) {
-                errno = ENOENT;
-                return -1;
-            }
+            basedir = cwd;
+        }
+    } else {
+        char dirpath[512] = {};
+        char fdlink[64];
+        snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", dirfd);
+        ssize_t len = orig_readlinkat(AT_FDCWD, fdlink, dirpath, sizeof(dirpath)-1);
+        if (len > 0) {
+            dirpath[len] = '\0';
+            basedir = dirpath;
         }
     }
+
+    // Si logramos resolver el directorio base, construimos la ruta absoluta
+    if (!basedir.empty() && pathname) {
+        std::string full = basedir + "/" + pathname;
+
+        // Si cae en una ruta sensible del sistema, lo interceptamos con nuestro VFS
+        if (full.find("/proc/") != std::string::npos ||
+            full.find("/sys/")  != std::string::npos) {
+            return my_open(full.c_str(), flags, mode);
+        }
+
+        // Verificación de root-hiding para evitar detección de Magisk/KernelSU
+        if (isHiddenPath(full.c_str())) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+
+    // Si no es una ruta interceptada, pasamos la llamada a la syscall original
     return orig_openat(dirfd, pathname, flags, mode);
 }
 

@@ -217,3 +217,17 @@ jitter=true
 **Prompt del usuario:** "PR11 — sincronizar kernel Google + PROC_OSRELEASE + GPU M31"
 **Nota para el siguiente agente:** Post-PR11 el sistema tiene 0 CRITICAL, 0 HIGH, 0 MEDIUM.
   Únicos pendientes son 3 LOW (L1-arp, L2-meminfo, L11-ostype) — candidatos a PR12.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR12 - openat fix)
+**Resumen de cambios:** v11.9.4 — openat() dirfd resolution security fix.
+- **openat() hardening:** Implementada resolución de  mediante  cuando no es . Esto cierra el vector de bypass donde se usa  sobre un directorio y luego  con ese descriptor. La lógica ahora es stateless y O(1).
+- **Versión:** Bump a v11.9.4.
+**Prompt del usuario:** "PR12... Fix Definitivo de openat (Cierre del Vector dirfd)... resolución de FDs sin estado (/proc/self/fd/)."
+**Nota para el siguiente agente:** El hook de openat ahora es capaz de resolver cualquier descriptor de archivo a su ruta absoluta para aplicar las reglas de VFS y ocultamiento.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR12 - openat fix)
+**Resumen de cambios:** v11.9.4 — openat() dirfd resolution security fix.
+- **openat() hardening:** Implementada resolución de `dirfd` mediante `/proc/self/fd/` cuando no es `AT_FDCWD`. Esto cierra el vector de bypass donde se usa `open()` sobre un directorio y luego `openat()` con ese descriptor. La lógica ahora es stateless y O(1).
+- **Versión:** Bump a v11.9.4.
+**Prompt del usuario:** "PR12... Fix Definitivo de openat (Cierre del Vector dirfd)... resolución de FDs sin estado (/proc/self/fd/)."
+**Nota para el siguiente agente:** El hook de openat ahora es capaz de resolver cualquier descriptor de archivo a su ruta absoluta para aplicar las reglas de VFS y ocultamiento.
