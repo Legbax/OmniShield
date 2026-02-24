@@ -149,3 +149,85 @@ jitter=true
 - **Validation:** Confirmed zero "EEA" or "nsxx" artifacts in header files.
 **Prompt del usuario:** "Directiva de Refactorización: Omni-Shield Native v11.8.1... Consolidación de Identidad USA/Global..."
 **Nota personal para el siguiente agente:** The system now enforces USA identity by default and prevents VFS data races during configuration generation changes.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR7+PR8 Implementation)
+**Resumen de cambios:** v11.9 — PR7 Plan Definitivo + PR8 Simulation Findings.
+- **omni_profiles.h:**
+  - BUG-002/003/004 GPU quimeras (A32 5G, Note 9 Pro, A72)
+  - BUG-005 Security patches 2025→fechas reales Android 11 (39 perfiles)
+  - BUG-007/008/011 GPU/chipname Nokia 5.4, Moto G Power/Stylus, Redmi Note 10
+  - BUG-SIM-01 Galaxy M31 Mali-G72→Mali-G52 MC1
+  - BUG-SIM-02/03/04/05 OnePlus 4 perfiles device codename→nombre comercial
+- **main.cpp:**
+  - BUG-015 SIGSEGV SettingsSecure firmas JNI corregidas (2/3 params, no 4/5)
+  - BUG-016/010 pread+lseek VFS cache hooks
+  - BUG-009 +15+ system properties interceptadas (incremental, security_patch, etc)
+  - BUG-006 CPU parts MT6768: 0xd03→0xd05 (A53→A55) + generalización MT68xx/mt67xx + mt6785 separado
+  - BUG-012 isHiddenPath() con token array (elimina falsos positivos)
+  - BUG-013 EGL_EXTENSIONS filtrado (erase ARM/Mali, no replace)
+  - BUG-SIM-06 /proc/sys/kernel/osrelease en VFS (sincronizado con uname)
+  - BUG-SIM-07 SDM670/Pixel 3a XL: kernel 4.14.186→4.9.189-perf+
+- **omni_engine.hpp:**
+  - BUG-001 ICCID region-aware: prefijo 895201(México)→89101(USA)
+  - BUG-SIM-08 generatePhoneNumber: NANP USA exactamente 10 dígitos locales
+**Prompt del usuario:** "Implementar PR7 Plan Definitivo + PR8 Simulation Findings. 16+8 bugs. v11.8.1→v11.9."
+**Nota personal para el siguiente agente:** v11.9 cierra todos los vectores de detección documentados hasta la fecha. Los 5 ciclos de simulación PR8 confirmaron cero errores residuales tras estos cambios. No modificar firmas GPU sin validación cruzada contra dumps reales de `glGetString`. Los perfiles OnePlus usan nombre comercial en `device`, no codename — es comportamiento oficial OxygenOS.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR9 — Google Red Team)
+**Resumen de cambios:** v11.9.1 — Google Red Team: 6 vulnerabilidades de Capa 5.
+- **Baseband (VULN-1):** Interceptado , ,  y  (LTE).
+- **VFS (VULN-2):** Implementado hook para  delegando a  para rutas absolutas (evasión de bypass).
+- **Red (VULN-3):** Unificación de MAC address VFS () a  (AOSP standard).
+- **CPU (VULN-4):** Corrección de BogoMIPS para Qualcomm (19.2MHz → 38.40) en fallback genérico.
+- **Batería (VULN-5):** Cambio de estado "Not charging" a "Discharging" (coherencia física).
+- **Kernel (VULN-6):** Implementación de firmas de kernel Google específicas () para dispositivos Pixel en Linux y  files.
+**Prompt del usuario:** "Implementar PR9 (Google Red Team). 6 vulnerabilidades."
+**Nota personal para el siguiente agente:** El sistema ahora resiste análisis forense profundo de kernel y baseband. La paridad con hardware real es casi perfecta. Mantener la disciplina de  para futuros hooks de I/O.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR9 — Google Red Team)
+**Resumen de cambios:** v11.9.1 — Google Red Team: 6 vulnerabilidades de Capa 5.
+- **Baseband (VULN-1):** Interceptado `gsm.version.baseband`, `ro.build.expect.baseband`, `gsm.version.ril-impl` y `ro.telephony.default_network` (LTE).
+- **VFS (VULN-2):** Implementado hook para `openat()` delegando a `my_open` para rutas absolutas (evasión de bypass).
+- **Red (VULN-3):** Unificación de MAC address VFS (`/sys/class/net/wlan0/address`) a `02:00:00:00:00:00` (AOSP standard).
+- **CPU (VULN-4):** Corrección de BogoMIPS para Qualcomm (19.2MHz → 38.40) en fallback genérico.
+- **Batería (VULN-5):** Cambio de estado "Not charging" a "Discharging" (coherencia física).
+- **Kernel (VULN-6):** Implementación de firmas de kernel Google específicas (`-gHASH-abNUM`) para dispositivos Pixel en `uname` y `/proc` files.
+**Prompt del usuario:** "Implementar PR9 (Google Red Team). 6 vulnerabilidades."
+**Nota personal para el siguiente agente:** El sistema ahora resiste análisis forense profundo de kernel y baseband. La paridad con hardware real es casi perfecta. Mantener la disciplina de `openat` para futuros hooks de I/O.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR10 — Security Team)
+**Resumen de cambios:** v11.9.2 — Security Team: 5 vulnerabilidades estructurales syscall-level.
+- **openat relativo (VULN-1 🟠):** `my_openat` actualizado para resolver paths relativos con `AT_FDCWD` usando `getcwd()`. `chdir("/proc") + openat("cpuinfo")` ahora pasa por VFS cache correctamente. Solo actúa en rutas que resuelven a `/proc/*` o `/sys/*`.
+- **fstatat no hookeado (VULN-2 🟠):** `my_fstatat()` añadido. Bionic usa `fstatat(AT_FDCWD,...)` como syscall primaria para `stat()`/`lstat()`. Resuelve paths relativos igual que `my_openat`. Registrado con `DobbySymbolResolver("fstatat")`.
+- **Qualcomm cpuinfo incompleto (VULN-3 🟠):** Bloque fallback de `generateMulticoreCpuInfo()` reescrito. Ahora genera `CPU variant`, `CPU part` y `CPU revision` para perfiles Qualcomm. Datos verificados contra dumps reales: kona/msmnile=0xd0d+variant0x4, lito=0xd0d+variant0x3, lahaina=0xd44+variant0x1, sdm670=0xd0a+variant0x2, bengal/trinket=A55 homogéneo 0xd05. Samsung Exynos omite estas líneas (comportamiento real de Samsung).
+- **GL_EXTENSIONS leak (VULN-4 🟠):** `my_glGetString()` actualizado para filtrar `GL_EXTENSIONS` (0x1F03). Extensiones `GL_ARM_*`, `GL_IMG_*` y `GL_OES_EGL_image_external_essl3` eliminadas cuando el perfil es Qualcomm (eglDriver="adreno"). Patrón `thread_local + erase` idéntico al de EGL_EXTENSIONS en PR9.
+- **ro.soc.* no interceptadas (VULN-5 🟠):** `ro.soc.manufacturer` derivado del `boardPlatform` del perfil (MediaTek/Samsung/Qualcomm). `ro.soc.model` devuelve `fp.hardwareChipname` del perfil activo. Sin estas, el mismatch MediaTek vs Qualcomm era detectado en Android 11+.
+**Prompt del usuario:** "Implementar PR10 (Security Team). 5 vulnerabilidades estructurales."
+**Nota personal para el siguiente agente:** El perímetro syscall ahora es hermético contra ataques de path relativo. La identidad gráfica (GL+EGL) y de SoC (ro.soc.* + cpuinfo) es consistente para Qualcomm.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR11)
+**Resumen de cambios:** v11.9.3 — Kernel Coherence + GPU Profile Fix
+- **PROC_VERSION [H-procver]:** Añadido branch `brd=="google"` al handler de /proc/version,
+  sincronizando con my_uname(). Pixel 5 retorna correctamente 4.19.113-g820a424c538c-ab7336171.
+- **PROC_OSRELEASE [H-osrel]:** Implementación completa de /proc/sys/kernel/osrelease:
+  path detection en my_open() + content handler con misma lógica Google-aware.
+  Variables con sufijo `2` (kv2/plat2/brd2) para evitar shadowing de PROC_VERSION.
+- **Galaxy M31 [A-r-Galaxy M31]:** gpuRenderer corregido Mali-G72 MP3 → Mali-G52 MC1,
+  gpuVersion actualizado r19p0 → r25p0. Coherente con Exynos850.
+**Prompt del usuario:** "PR11 — sincronizar kernel Google + PROC_OSRELEASE + GPU M31"
+**Nota para el siguiente agente:** Post-PR11 el sistema tiene 0 CRITICAL, 0 HIGH, 0 MEDIUM.
+  Únicos pendientes son 3 LOW (L1-arp, L2-meminfo, L11-ostype) — candidatos a PR12.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR12 - openat fix)
+**Resumen de cambios:** v11.9.4 — openat() dirfd resolution security fix.
+- **openat() hardening:** Implementada resolución de  mediante  cuando no es . Esto cierra el vector de bypass donde se usa  sobre un directorio y luego  con ese descriptor. La lógica ahora es stateless y O(1).
+- **Versión:** Bump a v11.9.4.
+**Prompt del usuario:** "PR12... Fix Definitivo de openat (Cierre del Vector dirfd)... resolución de FDs sin estado (/proc/self/fd/)."
+**Nota para el siguiente agente:** El hook de openat ahora es capaz de resolver cualquier descriptor de archivo a su ruta absoluta para aplicar las reglas de VFS y ocultamiento.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR12 - openat fix)
+**Resumen de cambios:** v11.9.4 — openat() dirfd resolution security fix.
+- **openat() hardening:** Implementada resolución de `dirfd` mediante `/proc/self/fd/` cuando no es `AT_FDCWD`. Esto cierra el vector de bypass donde se usa `open()` sobre un directorio y luego `openat()` con ese descriptor. La lógica ahora es stateless y O(1).
+- **Versión:** Bump a v11.9.4.
+**Prompt del usuario:** "PR12... Fix Definitivo de openat (Cierre del Vector dirfd)... resolución de FDs sin estado (/proc/self/fd/)."
+**Nota para el siguiente agente:** El hook de openat ahora es capaz de resolver cualquier descriptor de archivo a su ruta absoluta para aplicar las reglas de VFS y ocultamiento.

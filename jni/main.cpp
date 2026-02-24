@@ -47,7 +47,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -56,10 +56,16 @@ static std::mutex g_fdMutex;
 // Original Pointers
 static int (*orig_system_property_get)(const char *key, char *value);
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
+static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
 static int (*orig_close)(int fd);
+static off_t (*orig_lseek)(int fd, off_t offset, int whence);
+static off64_t (*orig_lseek64)(int fd, off64_t offset, int whence);
+static ssize_t (*orig_pread)(int fd, void* buf, size_t count, off_t offset);
+static ssize_t (*orig_pread64)(int fd, void* buf, size_t count, off64_t offset);
 static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
+static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static FILE* (*orig_fopen)(const char*, const char*);
 
 // Phase 2 Originals
@@ -90,8 +96,8 @@ typedef unsigned int GLenum;
 static const GLubyte* (*orig_glGetString)(GLenum name);
 
 // Settings.Secure
-static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jobject, jobject, jstring);
-static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jobject, jobject, jstring, jint);
+static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jstring, jint);
 
 // Helper
 inline std::string toLowerStr(const char* s) {
@@ -143,16 +149,18 @@ bool shouldHide(const char* key) {
 
 static inline bool isHiddenPath(const char* path) {
     if (!path || path[0] == '\0') return false;
-    // Obfuscated checks for "omnishield" and "vortex"
-    bool h1 = false, h2 = false;
-    // "om" + "ni" + "shi" + "eld"
-    if (strstr(path, "om") && strstr(path, "ni") && strstr(path, "shi") && strstr(path, "eld")) h1 = true;
-    // "vor" + "tex"
-    if (strstr(path, "vor") && strstr(path, "tex")) h2 = true;
 
-    return strcasestr(path, "magisk") || strcasestr(path, "kernelsu") ||
-           strcasestr(path, "susfs") || strcasestr(path, "omni_data") ||
-           strcasestr(path, "android_cache_data") || strcasestr(path, "tombstones") || h1 || h2;
+    static const char* HIDDEN_TOKENS[] = {
+        "omnishield", "omni_data", "vortex",
+        "magisk", "kernelsu", "susfs",
+        "android_cache_data", "tombstones",
+        nullptr
+    };
+
+    for (int i = 0; HIDDEN_TOKENS[i] != nullptr; ++i) {
+        if (strcasestr(path, HIDDEN_TOKENS[i])) return true;
+    }
+    return false;
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -163,15 +171,60 @@ int my_lstat(const char* pathname, struct stat* statbuf) {
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_lstat(pathname, statbuf);
 }
+
+int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    // Resolver path absoluto si es relativo con AT_FDCWD
+    if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
+        char cwd[512] = {};
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            std::string full = std::string(cwd) + "/" + pathname;
+            if (isHiddenPath(full.c_str())) { errno = ENOENT; return -1; }
+        }
+    } else if (isHiddenPath(pathname)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_fstatat(dirfd, pathname, statbuf, flags);
+}
 FILE* my_fopen(const char* pathname, const char* mode) {
     if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
     return orig_fopen(pathname, mode);
 }
 
 // 1. EGL Spoofing
+#define EGL_EXTENSIONS_ENUM 0x3055
+
 const char* my_eglQueryString(void* display, int name) {
-    if (name == EGL_VENDOR && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        return G_DEVICE_PROFILES.at(g_currentProfileName).gpuVendor;
+    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+
+        if (name == EGL_VENDOR) return fp.gpuVendor;
+
+        if (name == EGL_EXTENSIONS_ENUM) {
+            const char* orig_ext = orig_eglQueryString(display, name);
+            if (!orig_ext) return orig_ext;
+
+            std::string egl = toLowerStr(fp.eglDriver);
+            if (egl == "adreno") {
+                static thread_local std::string ext_cache;
+                ext_cache = orig_ext;
+
+                // Erase ARM/Mali extensions — NO replace (crear EGL_QCOM_* falsos es más detectable)
+                static const char* ARM_EXTS[] = {"EGL_ARM_", "EGL_MALI_", "EGL_IMG_", nullptr};
+                for (int i = 0; ARM_EXTS[i]; ++i) {
+                    size_t pos;
+                    while ((pos = ext_cache.find(ARM_EXTS[i])) != std::string::npos) {
+                        size_t end = ext_cache.find(' ', pos);
+                        if (end == std::string::npos) ext_cache.erase(pos);
+                        else ext_cache.erase(pos, end - pos + 1);
+                    }
+                }
+                while (ext_cache.find("  ") != std::string::npos)
+                    ext_cache.replace(ext_cache.find("  "), 2, " ");
+
+                return ext_cache.c_str();
+            }
+        }
     }
     return orig_eglQueryString(display, name);
 }
@@ -198,10 +251,29 @@ int my_uname(struct utsname *buf) {
         if (g_currentProfileName == "Redmi 9") {
              kv = "4.14.186-perf+";
         } else if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
-            else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
-            else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+            const auto& kfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            std::string plat = toLowerStr(kfp.boardPlatform);
+            std::string brd  = toLowerStr(kfp.brand);
+
+            if (brd == "google") {
+                // Google compila sus propios kernels con hashes de commit específicos
+                if (plat.find("lito") != std::string::npos)
+                    kv = "4.19.113-g820a424c538c-ab7336171";        // Pixel 5, 4a 5G
+                else if (plat.find("trinket") != std::string::npos)
+                    kv = "4.14.255-g67c58a7c42a0-ab7336171";        // Pixel 4a
+                else if (plat.find("sdm670") != std::string::npos)
+                    kv = "4.9.189-g5d098cef6d96-ab6174032";         // Pixel 3a XL
+                else
+                    kv = "4.19.113-g820a424c538c-ab7336171";        // fallback Google
+            } else if (plat.find("mt6") != std::string::npos) {
+                kv = "4.14.141-perf+";
+            } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
+                kv = "4.19.157-perf+";
+            } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
+                kv = "4.19.113-perf+";
+            } else if (plat.find("sdm670") != std::string::npos) {
+                kv = "4.9.189-perf+";
+            }
         }
 
         strcpy(buf->release, kv.c_str());
@@ -253,25 +325,86 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
     std::string platform = toLowerStr(fp.boardPlatform);
     std::string features = getArmFeatures(platform);
 
-    if (platform.find("mt6768") != std::string::npos) {
+    if (platform.find("mt6768") != std::string::npos ||
+        platform.find("mt6769") != std::string::npos ||
+        platform.find("mt6833") != std::string::npos ||
+        platform.find("mt6853") != std::string::npos) {
+        // Familia A55+A75/A76 big.LITTLE
+        int bigCoreStart = fp.core_count - 2;
         for(int i = 0; i < fp.core_count; ++i) {
-            bool isBig = (i >= 6);
+            bool isBig = (i >= bigCoreStart);
             out += "processor\t: " + std::to_string(i) + "\n";
             out += "BogoMIPS\t: " + std::string(isBig ? "52.00" : "26.00") + "\n";
             out += "Features\t: " + features + "\n";
             out += "CPU implementer\t: 0x41\n";
             out += "CPU architecture: 8\n";
             out += "CPU variant\t: 0x0\n";
-            out += "CPU part\t: " + std::string(isBig ? "0xd0a" : "0xd03") + "\n";
-            out += "CPU revision\t: 4\n\n";
+            out += "CPU part\t: " + std::string(isBig ? "0xd0a" : "0xd05") + "\n";
+            out += "CPU revision\t: " + std::string(isBig ? "2" : "1") + "\n\n";
         }
-    } else {
+    } else if (platform.find("mt6785") != std::string::npos) {
+        // Helio G95: 8x Cortex-A55 homogéneo (NO tiene A75)
         for(int i = 0; i < fp.core_count; ++i) {
             out += "processor\t: " + std::to_string(i) + "\n";
             out += "BogoMIPS\t: 26.00\n";
             out += "Features\t: " + features + "\n";
             out += "CPU implementer\t: 0x41\n";
-            out += "CPU architecture: 8\n\n";
+            out += "CPU architecture: 8\n";
+            out += "CPU variant\t: 0x0\n";
+            out += "CPU part\t: 0xd05\n";
+            out += "CPU revision\t: 1\n\n";
+        }
+    } else {
+        // Fallback: Qualcomm big.LITTLE A77/A78+A55 vs Exynos/otros (A55 homogeneous)
+        std::string brandLower = toLowerStr(fp.brand);
+        bool isQualcomm = (brandLower == "google") ||
+            (platform.find("msmnile") != std::string::npos) ||
+            (platform.find("kona")    != std::string::npos) ||
+            (platform.find("lahaina") != std::string::npos) ||
+            (platform.find("atoll")   != std::string::npos) ||
+            (platform.find("lito")    != std::string::npos) ||
+            (platform.find("bengal")  != std::string::npos) ||
+            (platform.find("holi")    != std::string::npos) ||
+            (platform.find("trinket") != std::string::npos) ||
+            (platform.find("sdm670")  != std::string::npos);
+        std::string bogomips = isQualcomm ? "38.40" : "26.00";
+
+        // Qualcomm: big.LITTLE topology o A55 homogéneo según familia
+        // bengal y trinket = A55 homogéneo. Resto = big(A77/A78) + LITTLE(A55)
+        bool isHomogeneous = (platform.find("bengal")  != std::string::npos) ||
+                             (platform.find("trinket") != std::string::npos);
+
+        // Parámetros del núcleo big según plataforma Qualcomm
+        const char* bigPart    = "0xd0d";  // Cortex-A77 (default)
+        const char* bigVariant = "0x1";
+        const char* bigRev     = "0";
+        if (platform.find("kona") != std::string::npos ||
+            platform.find("msmnile") != std::string::npos) {
+            bigPart = "0xd0d"; bigVariant = "0x4"; bigRev = "0";
+        } else if (platform.find("lahaina") != std::string::npos) {
+            bigPart = "0xd44"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A78
+        } else if (platform.find("lito") != std::string::npos) {
+            bigPart = "0xd0d"; bigVariant = "0x3"; bigRev = "0";
+        } else if (platform.find("sdm670") != std::string::npos) {
+            bigPart = "0xd0a"; bigVariant = "0x2"; bigRev = "1"; // Cortex-A75
+        }
+
+        int bigCoreStart = isHomogeneous ? fp.core_count : fp.core_count - 2;
+
+        for(int i = 0; i < fp.core_count; ++i) {
+            bool isBig = isQualcomm && !isHomogeneous && (i >= bigCoreStart);
+            out += "processor\t: " + std::to_string(i) + "\n";
+            out += "BogoMIPS\t: " + bogomips + "\n";
+            out += "Features\t: " + features + "\n";
+            out += "CPU implementer\t: 0x41\n";
+            out += "CPU architecture: 8\n";
+            if (isQualcomm) {
+                // ARM64 Qualcomm: incluir variant, part y revision (obligatorios)
+                out += "CPU variant\t: " + std::string(isBig ? bigVariant : "0x0") + "\n";
+                out += "CPU part\t: "    + std::string(isBig ? bigPart    : "0xd05") + "\n";
+                out += "CPU revision\t: " + std::string(isBig ? bigRev   : "5") + "\n";
+            }
+            out += "\n";
         }
     }
     out += "Hardware\t: " + std::string(fp.hardware) + "\n";
@@ -330,6 +463,49 @@ int my_system_property_get(const char *key, char *value) {
         } else if (k == "ro.ril.miui.imei1") {
             dynamic_buffer = omni::engine::generateValidImei(g_currentProfileName, g_masterSeed + 1);
         }
+        else if (k == "ro.build.version.incremental")       dynamic_buffer = fp.incremental;
+        else if (k == "ro.build.version.security_patch")    dynamic_buffer = fp.securityPatch;
+        else if (k == "ro.build.description")               dynamic_buffer = fp.buildDescription;
+        else if (k == "ro.build.flavor")                    dynamic_buffer = fp.buildFlavor;
+        else if (k == "ro.build.host")                      dynamic_buffer = fp.buildHost;
+        else if (k == "ro.build.user")                      dynamic_buffer = fp.buildUser;
+        else if (k == "ro.build.date.utc")                  dynamic_buffer = fp.buildDateUtc;
+        else if (k == "ro.build.version.codename")          dynamic_buffer = fp.buildVersionCodename;
+        else if (k == "ro.build.version.preview_sdk")       dynamic_buffer = fp.buildVersionPreviewSdk;
+        else if (k == "ro.build.type")                      dynamic_buffer = fp.type;
+        else if (k == "ro.build.version.release")           dynamic_buffer = fp.release;
+        else if (k == "ro.vendor.build.fingerprint")        dynamic_buffer = fp.vendorFingerprint;
+        else if (k == "ro.bootloader" || k == "ro.boot.bootloader") dynamic_buffer = fp.bootloader;
+        else if (k == "ro.zygote")                          dynamic_buffer = fp.zygote;
+        else if (k == "ro.product.system.model" ||
+                 k == "ro.product.vendor.model" ||
+                 k == "ro.product.odm.model")               dynamic_buffer = fp.model;
+        else if (k == "ro.product.first_api_level") {
+            int release_api = 0;
+            try { release_api = std::stoi(fp.release); } catch (...) {}
+            dynamic_buffer = (release_api >= 11) ? "30" : "29";
+        }
+        else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
+        else if (k == "gsm.version.baseband")               dynamic_buffer = fp.radioVersion;
+        else if (k == "ro.build.expect.baseband")            dynamic_buffer = fp.radioVersion;
+        else if (k == "gsm.version.ril-impl")
+            dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
+        else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
+        else if (k == "ro.soc.manufacturer") {
+            // Derivar el fabricante del SoC del boardPlatform del perfil activo
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos)
+                dynamic_buffer = "MediaTek";
+            else if (plat.find("exynos") != std::string::npos ||
+                     plat.find("s5e")    != std::string::npos)
+                dynamic_buffer = "Samsung";
+            else
+                dynamic_buffer = "Qualcomm";   // kona, lito, atoll, bengal, etc.
+        }
+        else if (k == "ro.soc.model") {
+            // ro.soc.model = el chip model del perfil (hardwareChipname)
+            dynamic_buffer = fp.hardwareChipname;
+        }
 
         if (!dynamic_buffer.empty()) {
             int len = dynamic_buffer.length();
@@ -359,7 +535,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/power_supply/battery/capacity")) type = BATTERY_CAPACITY;
         else if (strstr(pathname, "/sys/class/power_supply/battery/status")) type = BATTERY_STATUS;
         else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
+        else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
+        else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
 
         if (type != NONE) {
             std::string content;
@@ -368,10 +546,17 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 
                 if (type == PROC_VERSION) {
                     std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string brd  = toLowerStr(fp.brand);
                     std::string kv = "4.14.186-perf+";
-                    if (plat.find("mt6") != std::string::npos) kv = "4.14.141-perf+";
-                    else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) kv = "4.19.157-perf+";
-                    else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) kv = "4.19.113-perf+";
+                    if (brd == "google") {
+                        if (plat.find("lito")    != std::string::npos) kv = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat.find("trinket") != std::string::npos) kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("sdm670")  != std::string::npos) kv = "4.9.189-g5d098cef6d96-ab6174032";
+                        else kv = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
+                    else if (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos) kv="4.19.157-perf+";
+                    else if (plat.find("atoll")!=std::string::npos||plat.find("lito")!=std::string::npos) kv="4.19.113-perf+";
+                    else if (plat.find("sdm670")!=std::string::npos) kv="4.9.189-perf+";
 
                     long dateUtc = 0;
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
@@ -386,7 +571,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == USB_SERIAL) {
                     content = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch) + "\n";
                 } else if (type == WIFI_MAC) {
-                    content = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 50) + "\n";
+                    // Android 10+ AOSP privacy: todas las apps sin root ven 02:00:00:00:00:00
+                    // getifaddrs ya devuelve esto. El VFS DEBE ser coherente.
+                    content = "02:00:00:00:00:00\n";
                 } else if (type == BATTERY_TEMP) {
                     content = omni::engine::generateBatteryTemp(g_masterSeed) + "\n";
                 } else if (type == BATTERY_VOLT) {
@@ -394,7 +581,32 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == BATTERY_CAPACITY) {
                     content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
                 } else if (type == BATTERY_STATUS) {
-                    content = "Not charging\n";
+                    content = "Discharging\n";
+                } else if (type == PROC_OSRELEASE) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string brd  = toLowerStr(fp.brand);
+                    std::string kv = "4.14.186-perf+";
+                    if (brd == "google") {
+                        if (plat.find("lito") != std::string::npos)
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat.find("trinket") != std::string::npos)
+                            kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("sdm670") != std::string::npos)
+                            kv = "4.9.189-g5d098cef6d96-ab6174032";
+                        else
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat.find("mt6") != std::string::npos) {
+                        kv = "4.14.141-perf+";
+                    } else if (plat.find("kona") != std::string::npos ||
+                               plat.find("lahaina") != std::string::npos) {
+                        kv = "4.19.157-perf+";
+                    } else if (plat.find("atoll") != std::string::npos ||
+                               plat.find("lito") != std::string::npos) {
+                        kv = "4.19.113-perf+";
+                    } else if (plat.find("sdm670") != std::string::npos) {
+                        kv = "4.9.189-perf+";
+                    }
+                    content = kv + "\n";
                 } else if (type == PROC_UPTIME) {
                     char tmpBuf[256];
                     ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
@@ -424,6 +636,20 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     while (std::getline(iss, line)) {
                         if (!isHiddenPath(line.c_str())) content += line + "\n";
                     }
+                } else if (type == PROC_OSRELEASE) {
+                    std::string plat2 = toLowerStr(fp.boardPlatform);
+                    std::string brd2  = toLowerStr(fp.brand);
+                    std::string kv2 = "4.14.186-perf+";
+                    if (brd2 == "google") {
+                        if (plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat2.find("trinket") != std::string::npos) kv2 = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-g5d098cef6d96-ab6174032";
+                        else kv2 = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat2.find("mt6")    != std::string::npos) kv2 = "4.14.141-perf+";
+                    else if (plat2.find("kona")    != std::string::npos || plat2.find("lahaina") != std::string::npos) kv2 = "4.19.157-perf+";
+                    else if (plat2.find("atoll")   != std::string::npos || plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-perf+";
+                    else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-perf+";
+                    content = kv2 + "\n";
                 }
             }
 
@@ -436,6 +662,51 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         }
     }
     return fd;
+}
+
+int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    // Ruta absoluta → delegar directamente a my_open (que ya tiene la lógica VFS)
+    if (pathname && pathname[0] == '/') {
+        return my_open(pathname, flags, mode);
+    }
+
+    // Resolver dirfd a path real via /proc/self/fd/<n> (sin estado, O(1))
+    std::string basedir;
+    if (dirfd == AT_FDCWD) {
+        char cwd[512] = {};
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            basedir = cwd;
+        }
+    } else {
+        char dirpath[512] = {};
+        char fdlink[64];
+        snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", dirfd);
+        ssize_t len = orig_readlinkat(AT_FDCWD, fdlink, dirpath, sizeof(dirpath)-1);
+        if (len > 0) {
+            dirpath[len] = '\0';
+            basedir = dirpath;
+        }
+    }
+
+    // Si logramos resolver el directorio base, construimos la ruta absoluta
+    if (!basedir.empty() && pathname) {
+        std::string full = basedir + "/" + pathname;
+
+        // Si cae en una ruta sensible del sistema, lo interceptamos con nuestro VFS
+        if (full.find("/proc/") != std::string::npos ||
+            full.find("/sys/")  != std::string::npos) {
+            return my_open(full.c_str(), flags, mode);
+        }
+
+        // Verificación de root-hiding para evitar detección de Magisk/KernelSU
+        if (isHiddenPath(full.c_str())) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+
+    // Si no es una ruta interceptada, pasamos la llamada a la syscall original
+    return orig_openat(dirfd, pathname, flags, mode);
 }
 
 int my_close(int fd) {
@@ -479,6 +750,50 @@ ssize_t my_read(int fd, void *buf, size_t count) {
     return orig_read(fd, buf, count);
 }
 
+off_t my_lseek(int fd, off_t offset, int whence) {
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        if (g_fdContentCache.count(fd)) {
+            size_t size = g_fdContentCache[fd].content.size();
+            size_t& pos = g_fdOffsetMap[fd];
+            if (whence == SEEK_SET)
+                pos = std::min((size_t)std::max((off_t)0, offset), size);
+            else if (whence == SEEK_CUR)
+                pos = std::min((size_t)std::max((off_t)0, (off_t)pos + offset), size);
+            else if (whence == SEEK_END)
+                pos = size;
+            return (off_t)pos;
+        }
+    }
+    return orig_lseek(fd, offset, whence);
+}
+
+off64_t my_lseek64(int fd, off64_t offset, int whence) {
+    return (off64_t)my_lseek(fd, (off_t)offset, whence);
+}
+
+ssize_t my_pread(int fd, void* buf, size_t count, off_t offset) {
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        if (g_fdContentCache.count(fd)) {
+            const CachedContent& cc = g_fdContentCache[fd];
+            if (cc.generation != g_configGeneration) return 0;
+            const std::string& content = cc.content;
+            if ((size_t)offset >= content.size()) return 0;
+            size_t available = content.size() - (size_t)offset;
+            size_t toRead = std::min(count, available);
+            memcpy(buf, content.c_str() + offset, toRead);
+            // IMPORTANTE: pread NO modifica g_fdOffsetMap (semántica correcta pread vs read)
+            return (ssize_t)toRead;
+        }
+    }
+    return orig_pread(fd, buf, count, offset);
+}
+
+ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
+    return my_pread(fd, buf, count, (off_t)offset);
+}
+
 // -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
@@ -492,12 +807,46 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 // -----------------------------------------------------------------------------
 // Hooks: GPU
 // -----------------------------------------------------------------------------
+#define GL_EXTENSIONS 0x1F03
+
 const GLubyte* my_glGetString(GLenum name) {
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        if (name == GL_VENDOR) return (const GLubyte*)fp.gpuVendor;
+        if (name == GL_VENDOR)   return (const GLubyte*)fp.gpuVendor;
         if (name == GL_RENDERER) return (const GLubyte*)fp.gpuRenderer;
-        if (name == GL_VERSION) return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
+        if (name == GL_VERSION)  return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
+
+        if (name == GL_EXTENSIONS) {
+            const GLubyte* orig_ext = orig_glGetString(name);
+            if (!orig_ext) return orig_ext;
+
+            std::string egl = toLowerStr(fp.eglDriver);
+            if (egl == "adreno") {
+                // Perfil Qualcomm: eliminar extensiones ARM/Mali de las GL extensions
+                // (mismo principio que EGL_EXTENSIONS — erase, no replace)
+                static thread_local std::string gl_ext_cache;
+                gl_ext_cache = reinterpret_cast<const char*>(orig_ext);
+
+                static const char* ARM_GL_EXTS[] = {
+                    "GL_ARM_", "GL_IMG_", "GL_OES_EGL_image_external_essl3",
+                    nullptr
+                };
+                for (int i = 0; ARM_GL_EXTS[i]; ++i) {
+                    size_t pos;
+                    while ((pos = gl_ext_cache.find(ARM_GL_EXTS[i])) != std::string::npos) {
+                        // GL_EXTENSIONS usa espacios como separadores
+                        size_t end = gl_ext_cache.find(' ', pos);
+                        if (end == std::string::npos) gl_ext_cache.erase(pos);
+                        else gl_ext_cache.erase(pos, end - pos + 1);
+                    }
+                }
+                // Limpiar espacios dobles resultantes del erase
+                while (gl_ext_cache.find("  ") != std::string::npos)
+                    gl_ext_cache.replace(gl_ext_cache.find("  "), 2, " ");
+
+                return reinterpret_cast<const GLubyte*>(gl_ext_cache.c_str());
+            }
+        }
     }
     return orig_glGetString(name);
 }
@@ -505,21 +854,29 @@ const GLubyte* my_glGetString(GLenum name) {
 // -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
-static jstring my_SettingsSecure_getString(JNIEnv* env, jobject thiz, jobject resolver, jstring name) {
+static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
+    if (!name) return nullptr;
     const char* key = env->GetStringUTFChars(name, nullptr);
+    if (!key) return nullptr;
+
     jstring result = nullptr;
     if (strcmp(key, "android_id") == 0) {
-        result = env->NewStringUTF(omni::engine::generateRandomId(16, g_masterSeed).c_str());
+        result = env->NewStringUTF(
+            omni::engine::generateRandomId(16, g_masterSeed).c_str()
+        );
     } else if (strcmp(key, "gsf_id") == 0) {
-        result = env->NewStringUTF(omni::engine::generateRandomId(16, g_masterSeed + 1).c_str());
+        result = env->NewStringUTF(
+            omni::engine::generateRandomId(16, g_masterSeed + 1).c_str()
+        );
     }
     env->ReleaseStringUTFChars(name, key);
+
     if (result) return result;
-    return orig_SettingsSecure_getString(env, thiz, resolver, name);
+    return orig_SettingsSecure_getString(env, name);
 }
 
-static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jobject thiz, jobject resolver, jstring name, jint userHandle) {
-    return my_SettingsSecure_getString(env, thiz, resolver, name);
+static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
+    return my_SettingsSecure_getString(env, name);
 }
 
 // -----------------------------------------------------------------------------
@@ -556,11 +913,26 @@ public:
         void* open_func = DobbySymbolResolver(nullptr, "open");
         if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
 
+        void* openat_func = DobbySymbolResolver(nullptr, "openat");
+        if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
+
         void* read_func = DobbySymbolResolver(nullptr, "read");
         if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
 
         void* close_func = DobbySymbolResolver(nullptr, "close");
         if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
+
+        void* lseek_func = DobbySymbolResolver(nullptr, "lseek");
+        if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
+
+        void* lseek64_func = DobbySymbolResolver(nullptr, "lseek64");
+        if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
+
+        void* pread_func = DobbySymbolResolver(nullptr, "pread");
+        if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
+
+        void* pread64_func = DobbySymbolResolver(nullptr, "pread64");
+        if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
 
         void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
@@ -572,6 +944,8 @@ public:
         DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
         DobbyHook((void*)stat, (void*)my_stat, (void**)&orig_stat);
         DobbyHook((void*)lstat, (void*)my_lstat, (void**)&orig_lstat);
+        void* fstatat_func = DobbySymbolResolver(nullptr, "fstatat");
+        if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
         DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
         DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
 

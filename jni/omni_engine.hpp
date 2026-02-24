@@ -119,8 +119,17 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
 
 // ICCID: Estándar ITU-T E.118 (89...)
 inline std::string generateValidIccid(const std::string& profileName, long seed) {
-    Random rng(seed); std::string iccid = "895201";
-    for(int i=0; i<12; ++i) iccid += std::to_string(rng.nextInt(10));
+    static const std::map<std::string, std::string> ICCID_PREFIX = {
+        {"usa",    "89101"},   // Country code 1 (USA/Canada)
+        {"europe", "89440"},   // Country code 44 (UK base)
+        {"latam",  "89520"},   // Country code 52 (México/LATAM)
+    };
+    Random rng(seed);
+    std::string region = getRegionForProfile(profileName);
+    std::string prefix = ICCID_PREFIX.count(region) ? ICCID_PREFIX.at(region) : "89101";
+    std::string iccid = prefix;
+    int remaining = 18 - (int)prefix.size();  // base 18 + 1 check digit = 19 total (ITU-T E.118)
+    for(int i = 0; i < remaining; ++i) iccid += std::to_string(rng.nextInt(10));
     return iccid + std::to_string(luhnChecksum(iccid));
 }
 
@@ -140,16 +149,18 @@ inline std::string generateValidImsi(const std::string& profileName, long seed) 
 }
 
 inline std::string generatePhoneNumber(const std::string& profileName, long seed) {
-    static const std::map<std::string, std::string> COUNTRY_CODES = {
-        {"europe", "+44"}, {"india", "+91"}, {"latam", "+55"}, {"usa", "+1"}
-    };
-    Random rng(seed + 777);
-    std::string region = getRegionForProfile(profileName);
-    std::string cc = COUNTRY_CODES.count(region) ? COUNTRY_CODES.at(region) : "+44";
+    static const std::map<std::string,std::string> CC={{"europe","+44"},{"latam","+55"},{"usa","+1"}};
+    Random rng(seed+777);
+    std::string region=getRegionForProfile(profileName);
+    std::string cc=CC.count(region)?CC.at(region):"+1";
 
+    // NANP (USA): exactamente 10 dígitos locales (3 area + 7 subscriber)
+    // UK/LATAM: longitud variable 9-11
+    int targetLen = (region == "usa") ? 10 : 8 + rng.nextInt(3);
+
+    // Primer dígito 2-9 (NANP: nunca 0 ni 1 en área code)
     std::string local = std::to_string(2 + rng.nextInt(8));
-    int len = 8 + rng.nextInt(3);
-    for (int i = 1; i < len; ++i) local += std::to_string(rng.nextInt(10));
+    for(int i = 1; i < targetLen; ++i) local += std::to_string(rng.nextInt(10));
     return cc + local;
 }
 
