@@ -462,3 +462,27 @@ el código actual son errores de documentación — el código (Mali-G72 MP3 par
 - **FIX-14 (generate_profiles.py):** Añadido guard `os.path.exists` para `DeviceData.kt.txt`. El script requiere archivo fuente externo y debe fallar explícitamente si no existe.
 **Prompt del usuario:** "PR29+PR30 Audit Fix Consolidado. 14 bugs en 5 archivos. Versión objetivo v12.9.10."
 **Nota personal para el siguiente agente:** El sistema ha alcanzado coherencia total en radioVersion y DPI para la flota Samsung/Nokia/Motorola. PLMN USA ahora soporta MNC de 3 dígitos. La versión v12.9.10 es el nuevo baseline estable.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR32 — The Void Seal)
+**Resumen de cambios:** v12.9.12 — Sellado Definitivo (13 fixes en 4 archivos).
+Fuente: auditoría Claude (DPI) + Gemini Red Team (9 hallazgos).
+
+- FIX-01/02: Versión v12.9.10→v12.9.12 (module.prop + build.yml).
+- FIX-03 (omni_profiles.h): POCO F3 DPI 386→394 (6.67" corregido).
+- FIX-04 (omni_profiles.h): Nokia 5.4 DPI 404→409 (diagonal 6.39" oficial Nokia).
+- FIX-05 (omni_profiles.h): Mi 11 DPI 404→395 (MIUI FHD+ firmware density).
+- FIX-06 (main.cpp): PROC_OSRELEASE duplicado eliminado. Bloque kv2/plat2/brd2 era código muerto nunca ejecutado (shadowed por bloque kv). Binario reducido.
+- FIX-07 (main.cpp): ABI vendor/odm expandido. Añadidas ro.vendor.product.cpu.abilist* y ro.odm.product.cpu.abilist. Coherencia entre particiones restaurada.
+- FIX-08 (main.cpp): Virtualización SYS_BLOCK_SIZE. /sys/block/sda/size ahora coherente con chip de almacenamiento declarado. Tamaño escalado según ram_gb del perfil.
+- FIX-09 (main.cpp): /proc/net/tcp y /proc/net/udp virtualizados. Tablas vacías: sin IPs locales ni puertos de servicios reales expuestos.
+- FIX-10 (main.cpp): ril.serialnumber interceptado para Samsung. Genera serial determinista con seed+7, distinto de ro.serialno pero coherente.
+- FIX-11 (main.cpp): ro.boot.bootdevice interceptado. Branch: MTK→"bootdevice", Exynos→"soc/11120000.ufs", Qualcomm→"soc/1d84000.ufshc".
+- FIX-12 (main.cpp): PROC_MEMINFO reserva de kernel dinámica. 5 niveles escalados por ram_gb (150/200/250/400/512 MB) vs. valor fijo 150 MB anterior.
+- FIX-13 (generate_profiles.py): Regex expandido para capturar campos enteros coreCount/ramGb del Kotlin de entrada (antes ignorados → default 8/4).
+
+**NOTA para el siguiente agente:**
+- Moto G Stylus 2021 (nairo/holi) conserva DPI "386" — CORRECTO (6.8").
+- Nokia 8.3 5G (BVUB_00WW/lito) conserva DPI "386" — CORRECTO (6.81").
+- PROC_OSRELEASE ahora tiene exactamente 1 handler (kv/plat/brd). Si ves dos, es una regresión.
+- El bloque kv2/plat2/brd2 fue eliminado intencionalmente en PR32 — no restaurar.
+- Finding 8 (Gemini Widevine) fue descartado: ya cubierto por Phantom Signal PR.

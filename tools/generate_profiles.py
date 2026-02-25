@@ -23,6 +23,14 @@ def parse_profiles(content):
         field_pattern = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
         fields = dict(field_pattern.findall(body))
 
+        # PR32: Extracción de campos enteros (coreCount/ramGb) que no están entre comillas en Kotlin
+        core_count_match = re.search(r'coreCount\s*=\s*(\d+)', body)
+        ram_gb_match     = re.search(r'ramGb\s*=\s*(\d+)', body)
+        if core_count_match:
+            fields["core_count"] = core_count_match.group(1)
+        if ram_gb_match:
+            fields["ram_gb"] = ram_gb_match.group(1)
+
         if fields:
             profiles.append((name, fields))
         else:
@@ -73,7 +81,8 @@ def generate_header(input_file, output_file):
                 val = val.replace('"', '\\"')
                 f.write(f'        "{val}",\n')
             for field in int_fields:
-                val = fields.get(field, "8" if field == "core_count" else "6")
+                default_val = "8" if field == "core_count" else "6"
+                val = fields.get(field, default_val)
                 f.write(f'        {val},\n')
             f.write("    } },\n")
 

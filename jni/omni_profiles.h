@@ -122,7 +122,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.HI.3.3.c1-00076-SM8350_GEN_PACK-1", "V12.5.6.0.RKBMIXM", "2021-10-01", "11", "lahaina", "adreno", "196610", "SM8350", "zygote64_32",
         "Xiaomi/venus_global/venus:11/RKQ1.200826.002/V12.5.6.0.RKBMIXM:user/release-keys", "RKQ1.200826.002",
         "venus_global-user 11 RKQ1.200826.002 V12.5.6.0.RKBMIXM release-keys", "venus_global-user", "pangu-build-component-system-182133", "builder",
-        "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 660", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8
+        "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 660", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "395", 8, 8
     } },
     { "Redmi 10X 4G", {
         "Xiaomi", "Redmi", "M2004J7AC", "merlin", "merlin", "mt6769", "merlin", "V12.5.3.0.QJJCNXM",
@@ -138,7 +138,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "V12.5.5.0.RKHMIXM", "2021-09-01", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
         "POCO/alioth_global/alioth:11/RKQ1.200826.002/V12.5.5.0.RKHMIXM:user/release-keys", "RKQ1.200826.002",
         "alioth_global-user 11 RKQ1.200826.002 V12.5.5.0.RKHMIXM release-keys", "alioth_global-user", "c3-miui-ota-bd88", "builder",
-        "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 8
+        "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 8
     } },
     { "Galaxy A52", {
         "samsung", "samsung", "SM-A525F", "a52x", "a52xsqz", "qcom", "atoll", "A525FXXU4AUH1",
@@ -330,7 +330,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00055-SM6115_GEN_PACK-1", "00WW_2_440", "2021-06-01", "11", "bengal", "adreno", "196610", "SM6115", "zygote64_32",
         "Nokia/CAV_00WW/nokia_5.4:11/RKQ1.200928.002/00WW_2_440:user/release-keys", "RKQ1.200928.002",
         "CAV_00WW-user 11 RKQ1.200928.002 00WW_2_440 release-keys", "CAV_00WW-user", "hmd-build-02", "hmd",
-        "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 4
+        "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "409", 8, 4
     } },
     { "Realme 8 Pro", {
         "realme", "realme", "RMX3091", "RMX3091", "RMX3091", "qcom", "atoll", "1636363205855",
