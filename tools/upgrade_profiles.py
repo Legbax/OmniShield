@@ -13,7 +13,19 @@ def upgrade_profiles(input_file, output_file):
         "Redmi 9": 6.53, "POCO X3 Pro": 6.67, "POCO X3 NFC": 6.67, "Mi 10T": 6.67,
         "Redmi Note 10 Pro": 6.67, "Mi 11": 6.81, "Redmi Note 10": 6.43,
         "Galaxy A52": 6.5, "Galaxy A21s": 6.5, "Galaxy A31": 6.4, "Galaxy A12": 6.5,
-        "Moto Edge Plus": 6.7, "Moto Edge": 6.7, "OnePlus 8T": 6.55, "ASUS ZenFone 7": 6.67
+        "Moto Edge Plus": 6.7, "Moto Edge": 6.7, "OnePlus 8T": 6.55, "ASUS ZenFone 7": 6.67,
+        # PR33: Diagonales faltantes que causaban fallback a default 6.5" incorrecto
+        "POCO F3": 6.67,            # SM8250 kona — 1080×2400 → math=394 DPI ✅
+        "Nokia 5.4": 6.39,          # SM6115 bengal — 1080×2400 → math=411, override→409
+        "Moto G Power 2021": 6.5,   # SM6115 bengal — 1080×2400 → math=404 ✅ (explícito)
+    }
+
+    # PR33: Valores canónicos que difieren del cálculo matemático puro.
+    # Se aplican antes de calculate_dpi() y nunca deben eliminarse.
+    # Fuentes: firmware dumps verificados / especificaciones oficiales de fabricante.
+    dpi_overrides = {
+        "Mi 11":    "395",   # Xiaomi MIUI ro.sf.lcd_density FHD+ (math 6.81" = 386)
+        "Nokia 5.4": "409",  # Nokia spec oficial 409 ppi (math 6.39" = 411)
     }
 
     block_pattern = re.compile(r'\{\s*"([^"]+)",\s*\{(.*?)\}\s*\},', re.DOTALL)
@@ -48,7 +60,8 @@ def upgrade_profiles(input_file, output_file):
             height = 2340
 
         diag = diagonals.get(name, 6.5)
-        density = calculate_dpi(width, height, diag)
+        # PR33: Aplicar override si existe; si no, calcular matemáticamente
+        density = dpi_overrides.get(name) or calculate_dpi(width, height, diag)
 
         gpu_vendor = "Qualcomm"
         gpu_renderer = "Adreno (TM) 618"

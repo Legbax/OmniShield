@@ -290,7 +290,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00055-SM6115_GEN_PACK-1", "2b4fae", "2021-05-01", "11", "bengal", "adreno", "196610", "SM6115", "zygote64_32",
         "motorola/borneo/borneo:11/RRQ31.Q3-47-22/2b4fae:user/release-keys", "RRQ31.Q3-47-22",
         "borneo-user 11 RRQ31.Q3-47-22 2b4fae release-keys", "borneo-user", "buildbot-motoauto06.mcd.mot.com", "hudsoncm",
-        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 4
+        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 4
     } },
     { "Moto G Stylus 2021", {
         "motorola", "motorola", "moto g stylus (2021) 5G", "nairo", "nairo_retail", "qcom", "holi", "1.0.0.0",

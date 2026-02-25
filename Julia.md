@@ -486,3 +486,28 @@ Fuente: auditoría Claude (DPI) + Gemini Red Team (9 hallazgos).
 - PROC_OSRELEASE ahora tiene exactamente 1 handler (kv/plat/brd). Si ves dos, es una regresión.
 - El bloque kv2/plat2/brd2 fue eliminado intencionalmente en PR32 — no restaurar.
 - Finding 8 (Gemini Widevine) fue descartado: ya cubierto por Phantom Signal PR.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR33 — Precision Seal)
+**Resumen de cambios:** v12.9.13 — 3 correcciones residuales post-PR32 (5 modificaciones en 5 archivos).
+
+- **FIX-01/02 (module.prop + build.yml):** Versión bump v12.9.12 → v12.9.13.
+- **FIX-03 (omni_profiles.h):** Moto G Power 2021 (borneo/bengal) screenDensity: 386 → 404.
+  Pantalla 6.5" 1080×2400 → 404.9 ppi ≈ 404. Error de arrastre identificado en auditoría PR31
+  pero accidentalmente omitido del PR32. ADVERTENCIA: Moto G Stylus 2021 (nairo/holi) conserva
+  DPI 386 — correcto para pantalla 6.8".
+- **FIX-04 (main.cpp):** ro.boot.bootdevice: añadido branch eMMC para bengal/holi/trinket →
+  "soc/4744000.sdhci". SM6115 (Snapdragon 662) y SM4350 (Snapdragon 480) usan eMMC 5.1, no UFS.
+  El fallback Qualcomm UFS "soc/1d84000.ufshc" (PR32) era incorrecto para estos 3 dispositivos:
+  Moto G Power 2021, Nokia 5.4, Moto G Stylus 2021.
+- **FIX-05 (upgrade_profiles.py):** Añadidas 3 entradas al dict de diagonales (POCO F3 6.67",
+  Nokia 5.4 6.39", Moto G Power 2021 6.5" explícito). Añadido dict dpi_overrides con Mi 11 (395)
+  y Nokia 5.4 (409) para proteger valores canónicos que difieren del cálculo matemático puro.
+  Sin este fix, una ejecución de upgrade_profiles.py revertía silenciosamente los DPIs corregidos
+  en PR32.
+
+**Nota para el siguiente agente:**
+- Moto G Stylus 2021 (nairo/holi): DPI 386 = CORRECTO (pantalla 6.8") — no modificar.
+- Nokia 8.3 5G (BVUB_00WW/lito): DPI 386 = CORRECTO (pantalla 6.81") — no modificar.
+- dpi_overrides en upgrade_profiles.py es permanente — no eliminar aunque parezca redundante.
+- El fallback Qualcomm UFS (soc/1d84000.ufshc) es correcto para: kona, lahaina, lito, atoll,
+  msmnile, sdm670, sm6150, sm6350, sm7325. Solo bengal/holi/trinket son eMMC en el catálogo.

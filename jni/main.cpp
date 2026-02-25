@@ -632,9 +632,13 @@ int my_system_property_get(const char *key, char *value) {
                 dynamic_buffer = "bootdevice";                // MediaTek: path genérico MTK
             } else if (plat.find("exynos") != std::string::npos ||
                        plat.find("s5e")    != std::string::npos) {
-                dynamic_buffer = "soc/11120000.ufs";          // Samsung Exynos UFS genérico
+                dynamic_buffer = "soc/11120000.ufs";          // Samsung Exynos: UFS 2.1
+            } else if (plat.find("bengal")  != std::string::npos ||
+                       plat.find("holi")    != std::string::npos ||
+                       plat.find("trinket") != std::string::npos) {
+                dynamic_buffer = "soc/4744000.sdhci";             // PR33: SM6115/SM4350 = eMMC 5.1
             } else {
-                dynamic_buffer = "soc/1d84000.ufshc";         // Qualcomm UFS genérico (SM7150/SM8250/etc.)
+                dynamic_buffer = "soc/1d84000.ufshc";             // Qualcomm UFS (kona/lahaina/lito/msmnile/etc.)
             }
         }
         else if (k == "ro.boot.flash.locked")         dynamic_buffer = "1";
