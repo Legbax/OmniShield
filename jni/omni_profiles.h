@@ -146,7 +146,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A525FXXU4AUH1", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
         "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "RP1A.200720.012",
         "a52xsqz-user 11 RP1A.200720.012 A525FXXU4AUH1 release-keys", "a52xsqz-user", "SWDD7390", "dpi", "1627776000", "REL", "0",
-        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 6
+        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 6
     } },
     { "Galaxy A72", {
         "samsung", "samsung", "SM-A725F", "a72", "a72sqz", "qcom", "atoll", "A725FXXU3AUH2",
@@ -154,7 +154,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A725FXXU3AUH2", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
         "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "RP1A.200720.012",
         "a72sqz-user 11 RP1A.200720.012 A725FXXU3AUH2 release-keys", "a72sqz-user", "SWDD7391", "dpi", "1627776000", "REL", "0",
-        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8
+        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "393", 8, 8
     } },
     { "Galaxy A32 5G", {
         "samsung", "samsung", "SM-A326B", "a32x", "a32xsqz", "mt6853", "mt6853", "A326BXXU4AUH1",
@@ -182,7 +182,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     } },
     { "Galaxy M31", {
         "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "m31", "M315FXXU4CUG1",
-        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "",
+        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "M315FXXU4CUG1",
         "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "S5E9611", "zygote64_32",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012",
         "m31sqz-user 11 RP1A.200720.012 M315FXXU4CUG1 release-keys", "m31sqz-user", "21R3NF12", "dpi", "1636934400", "REL", "0",

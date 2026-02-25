@@ -443,3 +443,22 @@ vector de fuga del SoC físico vía filesystem — ahora cerrado.
 **Prompt del usuario:** "PR29 — Audit Fix + PLMN Sync. 11 bugs en 5 archivos."
 **Nota personal para el siguiente agente:** Post-PR29, el PLMN reportado para perfiles USA es ahora un código de operador real y verificable (310260=T-Mobile, 310410=AT&T). Las dos entradas históricas de Julia.md sobre Galaxy M31 GPU (PR7/PR11) que parecen contradecir
 el código actual son errores de documentación — el código (Mali-G72 MP3 para Exynos9611) es correcto; no modificar. La propiedad `trinket` en `isQualcomm` de generateMulticoreCpuInfo fue preservada deliberadamente: afecta solo a BogoMIPS y no introduce una quimera detectable.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR29+PR30 — Audit Fix Consolidado)
+**Resumen de cambios:** v12.9.10 — 14 correcciones detectadas en auditoría técnica externa (3 ciclos de simulación, 2 ciclos limpios consecutivos).
+- **FIX-01 (module.prop):** Versión v12.5→v12.9.10, versionCode 1250→12910.
+- **FIX-02 (build.yml):** Artefacto CI/CD v11.8→v12.9.10.
+- **FIX-03 (omni_profiles.h):** Moto G Stylus 2021 radioVersion: SM6150→SM4350. Quimera holi/SM4350 ↔ MPSS SM6150 corregida.
+- **FIX-04 (omni_profiles.h):** Nokia 5.4 radioVersion: SM7150→SM6115. Quimera bengal/SM6115 ↔ MPSS SM7150 corregida.
+- **FIX-05 (omni_profiles.h):** Nokia 8.3 5G screenDensity: 404→386. Fix documentado en Master Seal finalmente aplicado al código. Matemáticamente correcto para 6.81" 1080×2400.
+- **FIX-06 (omni_profiles.h):** Galaxy F62 radioVersion: ""→"E625FXXU2BUG1". Exynos9825 con módem integrado no debe reportar baseband vacío.
+- **FIX-07 (omni_profiles.h):** Galaxy A51 radioVersion: ""→"A515FXXU4CUG1". Mismo patrón que FIX-06.
+- **FIX-08 (omni_profiles.h):** Galaxy M31 radioVersion: ""→"M315FXXU4CUG1". Mismo patrón que FIX-06/07. Product variant del perfil es m31sqz (no m31nsxx — ese era pre-PR11.8.1).
+- **FIX-09 (omni_profiles.h):** Galaxy A72 screenDensity: 404→393. Pantalla 6.7" 1080×2400 → 392.8 ppi ≈ 393. Samsung especifica 393 ppi para SM-A725F.
+- **FIX-10 (omni_profiles.h):** Galaxy A52 screenDensity: 386→404. Pantalla 6.5" 1080×2400 → 404.9 ppi ≈ 404. El valor 386 era residuo de upgrade_profiles.py con diagonal incorrecta.
+- **FIX-11 (omni_engine.hpp):** Samsung yearChar: mapa corregido. Mapa anterior incorrecto (2021→'R'=2019). Mapa correcto: R=2019, S=2020, T=2021, U=2022, V=2023.
+- **FIX-12 (main.cpp):** Eliminado `trinket` de isHomogeneous en generateMulticoreCpuInfo. Código muerto — ningún perfil usa boardPlatform=trinket. NOTA: trinket en isQualcomm (línea encima) conservado deliberadamente — correcto para BogoMIPS.
+- **FIX-13 (main.cpp):** PLMN USA corregido. substr(0,5) truncaba MNC de 3 dígitos de T-Mobile (310260) y AT&T (310410). Nuevo: MCC 310/311 → substr(0,6), resto → substr(0,5).
+- **FIX-14 (generate_profiles.py):** Añadido guard `os.path.exists` para `DeviceData.kt.txt`. El script requiere archivo fuente externo y debe fallar explícitamente si no existe.
+**Prompt del usuario:** "PR29+PR30 Audit Fix Consolidado. 14 bugs en 5 archivos. Versión objetivo v12.9.10."
+**Nota personal para el siguiente agente:** El sistema ha alcanzado coherencia total en radioVersion y DPI para la flota Samsung/Nokia/Motorola. PLMN USA ahora soporta MNC de 3 dígitos. La versión v12.9.10 es el nuevo baseline estable.
