@@ -175,14 +175,15 @@ cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::string egl = toLowerStr(fp.eglDriver);
 
+        // En my_clGetDeviceInfo, añadir constantes y lógica de driver:
+        #define CL_DEVICE_VERSION 0x102F
+        #define CL_DRIVER_VERSION 0x102D
+
         if (egl == "adreno") {
-            if (param_name == CL_DEVICE_VENDOR) {
-                strncpy((char*)param_value, "Qualcomm", param_value_size);
-            } else if (param_name == CL_DEVICE_NAME) {
-                strncpy((char*)param_value, fp.gpuRenderer, param_value_size);
-            } else if (param_name == CL_DEVICE_VERSION || param_name == CL_DRIVER_VERSION) {
+            if (param_name == CL_DEVICE_VENDOR) strncpy((char*)param_value, "Qualcomm", param_value_size);
+            else if (param_name == CL_DEVICE_NAME) strncpy((char*)param_value, fp.gpuRenderer, param_value_size);
+            else if (param_name == CL_DEVICE_VERSION || param_name == CL_DRIVER_VERSION)
                 strncpy((char*)param_value, "OpenCL 2.0 QUALCOMM build", param_value_size);
-            }
         }
     }
     return ret;
@@ -532,9 +533,9 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (release_api >= 11) ? "30" : "29";
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
-        else if (k == "gsm.version.baseband")               dynamic_buffer = fp.radioVersion;
-        else if (k == "ro.build.expect.baseband")            dynamic_buffer = fp.radioVersion;
-        else if (k == "ro.baseband")                        dynamic_buffer = fp.radioVersion;
+        else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
+            dynamic_buffer = fp.radioVersion;
+        }
         else if (k == "gsm.version.ril-impl")
             dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
@@ -820,6 +821,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     } else {
                         content = "tsens_tz_sensor\n";
                     }
+                // Manejo de btime para coherencia con Uptime
                 } else if (type == PROC_STAT) {
                     char tmpBuf[8192];
                     ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
@@ -830,7 +832,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         orig_clock_gettime(CLOCK_BOOTTIME, &ts_real);
                         long offset_segundos = 259200 + (g_masterSeed % 1036800);
                         long uptime_falso = ts_real.tv_sec + offset_segundos;
-                        long btime_falso = time(NULL) - uptime_falso;
+                        long btime_falso = (long)time(NULL) - uptime_falso;
 
                         size_t pos = statData.find("btime ");
                         if (pos != std::string::npos) {
@@ -840,8 +842,12 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         }
                         content = statData;
                     }
+
+                // Identidad de Almacenamiento
                 } else if (type == SYS_BLOCK_MODEL) {
                     content = (toLowerStr(fp.brand) == "samsung") ? "KLUDG4UHDB-B2D1\n" : "SAMSUNG_UFS\n";
+
+                // Evasión de Gobernadores Propietarios (MTK/Exynos)
                 } else if (type == SYS_CPU_GOVERNORS) {
                     content = "performance powersave schedutil\n";
                 }

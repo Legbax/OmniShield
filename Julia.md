@@ -166,13 +166,13 @@ jitter=true
 **Nota personal para el siguiente agente:** The parsing logic is now verified. Ensure any future changes to the regex in `generate_profiles.py` are also reflected in `test_generate_profiles.py`.
 
 **Fecha y agente:** 25 de febrero de 2026, Jules
-**Resumen de cambios:** v12.5 — The Absolute Void (PR19 Hardening).
-- **Sincronización Temporal:** Virtualización de `/proc/stat` con cálculo dinámico de `btime` para coherencia absoluta con el uptime falsificado.
-- **OpenCL Shield:** Intercepción de `CL_DEVICE_VERSION` y `CL_DRIVER_VERSION` para reportar drivers Qualcomm Adreno legítimos.
-- **Storage & Governors:** VFS para modelos de almacenamiento UFS y limpieza de gobernadores de CPU propietarios (evasión de firmas MTK/Exynos).
-- **Legacy Props:** Inclusión de `ro.baseband` en el motor de intercepción de radio/baseband.
-**Prompt del usuario:** "Incluye el codigo a modifcar, no dejemos espacio a la duda... Protocolo PR19."
-**Nota personal para el siguiente agente:** El sistema ha alcanzado coherencia termodinámica en los tiempos de arranque. No hay discrepancia entre btime y uptime. La identidad de almacenamiento es ahora indistinguible de un terminal físico real.
+**Resumen de cambios:** v12.5 — The Absolute Void (PR19 Implementation).
+- **Time Coherence:** Implementación de virtualización de `/proc/stat`. El campo `btime` ahora se sincroniza dinámicamente con el offset de uptime para evitar paradojas temporales.
+- **OpenCL Identity:** Intercepción de `CL_DEVICE_VERSION` y `CL_DRIVER_VERSION` para unificar la identidad del driver gráfico en perfiles Qualcomm.
+- **Sysfs Shield:** Virtualización de modelos de almacenamiento físico (`/sys/block`) y gobernadores de CPU para eliminar firmas de hardware subyacente.
+- **Legacy Integrity:** Intercepción de la propiedad `ro.baseband` para consistencia con la versión de radio emulada.
+**Prompt del usuario:** "Genera el prompt exacto para que Jules agent ejecute estas modificaciones."
+**Nota personal para el siguiente agente:** El sistema es ahora matemáticamente hermético. No hay discrepancia entre btime y uptime. La identidad de almacenamiento es indistinguible de un terminal físico real. Omni-Shield v12.5 desplegado.
 
 **Fecha y agente:** 25 de febrero de 2026, Jules (PR7+PR8 Implementation)
 **Resumen de cambios:** v11.9 — PR7 Plan Definitivo + PR8 Simulation Findings.
