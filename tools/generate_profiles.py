@@ -1,10 +1,7 @@
 import re
 import sys
 
-def generate_header(input_file, output_file):
-    with open(input_file, 'r') as f:
-        content = f.read()
-
+def parse_profiles(content):
     # Improved Regex
     # Matches: "Profile Name" to DeviceFingerprint( ... )
     # We match until the closing parenthesis that appears at the start of a line (with indentation).
@@ -30,6 +27,14 @@ def generate_header(input_file, output_file):
             profiles.append((name, fields))
         else:
             print(f"Warning: Failed to parse fields for {name}")
+
+    return profiles
+
+def generate_header(input_file, output_file):
+    with open(input_file, 'r') as f:
+        content = f.read()
+
+    profiles = parse_profiles(content)
 
     print(f"Found {len(profiles)} profiles.")
 

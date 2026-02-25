@@ -158,6 +158,22 @@ jitter=true
 **Prompt del usuario:** "Directiva de Refactorización: Omni-Shield Native v11.8.1... Consolidación de Identidad USA/Global..."
 **Nota personal para el siguiente agente:** The system now enforces USA identity by default and prevents VFS data races during configuration generation changes.
 
+**Fecha y agente:** 25 de febrero de 2026, Jules (Testing Improvement)
+**Resumen de cambios:** Implementation of unit tests for profile parsing logic.
+- **tools/generate_profiles.py:** Extracted `parse_profiles` function to improve testability.
+- **tools/test_generate_profiles.py:** Created new test suite using `unittest` to cover various parsing scenarios (standard, parentheses in name, multiline, empty body, malformed input).
+**Prompt del usuario:** "Add tests for profile parsing regex"
+**Nota personal para el siguiente agente:** The parsing logic is now verified. Ensure any future changes to the regex in `generate_profiles.py` are also reflected in `test_generate_profiles.py`.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules
+**Resumen de cambios:** v12.5 — The Absolute Void (PR19 Hardening).
+- **Sincronización Temporal:** Virtualización de `/proc/stat` con cálculo dinámico de `btime` para coherencia absoluta con el uptime falsificado.
+- **OpenCL Shield:** Intercepción de `CL_DEVICE_VERSION` y `CL_DRIVER_VERSION` para reportar drivers Qualcomm Adreno legítimos.
+- **Storage & Governors:** VFS para modelos de almacenamiento UFS y limpieza de gobernadores de CPU propietarios (evasión de firmas MTK/Exynos).
+- **Legacy Props:** Inclusión de `ro.baseband` en el motor de intercepción de radio/baseband.
+**Prompt del usuario:** "Incluye el codigo a modifcar, no dejemos espacio a la duda... Protocolo PR19."
+**Nota personal para el siguiente agente:** El sistema ha alcanzado coherencia termodinámica en los tiempos de arranque. No hay discrepancia entre btime y uptime. La identidad de almacenamiento es ahora indistinguible de un terminal físico real.
+
 **Fecha y agente:** 25 de febrero de 2026, Jules (PR7+PR8 Implementation)
 **Resumen de cambios:** v11.9 — PR7 Plan Definitivo + PR8 Simulation Findings.
 - **omni_profiles.h:**
