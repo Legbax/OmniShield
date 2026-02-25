@@ -304,3 +304,15 @@ jitter=true
 - **Operator Sync:** Falsificación dinámica de `gsm.sim.operator.numeric` y `iso-country`. El MCC/MNC ahora se extrae matemáticamente del IMSI emulado, logrando una sincronización total entre la SIM virtual y la región del sistema.
 **Prompt del usuario:** "Genera el prompt para la aplicación de la versión 12.11 (Phantom Signal)... explicito e incluir el código a reemplazar."
 **Nota personal para el siguiente agente:** Los vectores de fuga pasiva han sido eliminados. La tarjeta SIM, el Bluetooth y el DRM ahora operan en completa resonancia matemática con la identidad del dispositivo emulado.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR20 — Namespace Shield)
+**Resumen de cambios:** v12.6 — Namespace Shield & VFS Net.
+- **Namespace Leak Fix:** Hook de namespaces secundarios `ro.product.system.*`, `ro.product.vendor.*`, `ro.product.odm.*`.
+- **CPU ABI Shield:** Intercepción de `ro.product.cpu.abilist`, `abilist64` y `abilist32`.
+- **Build Characteristics:** Hook de `ro.build.characteristics` con lógica brand-aware (samsung→"phone", google→"nosdcard", resto→"default").
+- **Crypto Shield:** Hook de `ro.crypto.state`→"encrypted" y `ro.crypto.type`→"file".
+- **Locale Sync:** Hook de `ro.product.locale` y `persist.sys.locale` sincronizados con `getRegionForProfile()`.
+- **VFS /proc/net:** Virtualización de `/proc/net/arp` y `/proc/net/dev`.
+- **Profile Fix:** `hardwareChipname` del Galaxy F62 corregido de "exynos9825" a "Exynos9825".
+**Prompt del usuario:** "PR20 Namespace Shield & VFS Net — parchear fugas de namespaces secundarios, CPU ABI, build characteristics, crypto state, locale y virtualizar /proc/net/arp + /proc/net/dev. Fix chipname Galaxy F62."
+**Nota para el siguiente agente:** Los namespaces system/vendor/odm son ahora herméticos. El vector de fuga de fabricante real (Xiaomi) en perfiles Samsung/Nokia/Motorola está cerrado.
