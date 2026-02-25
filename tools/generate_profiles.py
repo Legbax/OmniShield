@@ -53,7 +53,7 @@ def generate_header(input_file, output_file):
             "buildFlavor", "buildHost", "buildUser", "buildDateUtc",
             "buildVersionCodename", "buildVersionPreviewSdk", "gpuVendor",
             "gpuRenderer", "gpuVersion", "screenWidth", "screenHeight",
-            "screenDensity", "firstApiLevel"
+            "screenDensity"
         ]
 
         for field in ordered_fields:
