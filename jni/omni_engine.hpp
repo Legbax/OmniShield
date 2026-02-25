@@ -200,7 +200,7 @@ inline std::string generateRandomSerial(const std::string& brandIn, long seed, c
 
         int year = 2021;
         if (securityPatch.size() >= 4) try { year = std::stoi(securityPatch.substr(0, 4)); } catch (...) {}
-        char yearChar = (year == 2020) ? 'T' : (year == 2022) ? 'S' : (year == 2023) ? 'W' : 'R';
+        char yearChar = (year == 2019) ? 'R' : (year == 2020) ? 'S' : (year == 2021) ? 'T' : (year == 2022) ? 'U' : (year == 2023) ? 'V' : 'T';
 
         std::string monthChars = "123456789ABC";
         char month = monthChars[rng.nextInt(monthChars.length())];

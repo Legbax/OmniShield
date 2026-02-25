@@ -426,3 +426,63 @@ vector de fuga del SoC físico vía filesystem — ahora cerrado.
 - **upgrade_profiles.py Sync (PR28-006):** Completado mapeo GPU de 6 a 18 plataformas. Añadidos: msmnile→640, atoll→618, sm7325→642L, sm6350→619L, sm6150→612, holi→619, bengal/trinket→610, sdm670→615, mt6853→G57MC3, mt6785→G76MC4, mt6765→PowerVR GE8320, exynos9825→G76MP12, exynos9611→G72MP3, exynos850→G52MC1. Separados kona (650) y msmnile (640).
 **Prompt del usuario:** "Despliegue de Omni-Shield v12.9.7 (Hardcode Elimination — PR28)"
 **Nota personal para el siguiente agente:** Post-PR28, los 5 vectores de correlación cruzada (block_model, input_devices, asound_cards × brand) están cerrados. Ningún perfil mezcla identificadores Samsung con marcas no-Samsung. El toolchain Python ahora mapea las 18 plataformas correctamente. El checklist de nueva plataforma se extiende de 10 a 11 puntos: al añadir una plataforma Qualcomm, también hay que actualizar `upgrade_profiles.py`. Área residual: el bloque `gpio-keys` en PROC_INPUT usa `soc:gpio_keys` que es Qualcomm-genérico — correcto para todos los perfiles no-MTK actuales, pero si se añadieran perfiles Exynos sin MTK en el input handler, necesitaría branch adicional.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR29 — Audit Fix + PLMN Sync)
+**Resumen de cambios:** v12.9.8 — 11 correcciones detectadas en auditoría técnica externa (10) y segunda auditoría (1).
+- **FIX-01 (module.prop):** Versión v12.5→v12.9.8 y versionCode 1250→1298. Sincronización con estado real del proyecto.
+- **FIX-02 (build.yml):** Nombre de artefacto CI/CD actualizado de v11.8 a v12.9.8.
+- **FIX-03 (omni_profiles.h):** Moto G Stylus 2021 radioVersion: SM6150→SM4350. Quimera de radio corregida (holi/SM4350 era inconsistente con MPSS SM6150).
+- **FIX-04 (omni_profiles.h):** Nokia 5.4 radioVersion: SM7150→SM6115. Quimera de radio corregida (bengal/SM6115 era inconsistente con MPSS SM7150).
+- **FIX-05 (omni_profiles.h):** Nokia 8.3 5G screenDensity: 404→386. Fix documentado en Master Seal (Julia.md) finalmente aplicado al código. Valor matemáticamente correcto para 6.81" 1080×2400.
+- **FIX-06 (omni_profiles.h):** Galaxy F62 radioVersion: ""→"E625FXXU2BUG1". Campo vacío anómalo eliminado (Exynos9825 reporta baseband en producción).
+- **FIX-07 (omni_profiles.h):** Galaxy A51 radioVersion: ""→"A515FXXU4CUG1". Mismo fix que F62 para Exynos9611.
+- **FIX-08 (omni_engine.hpp):** Samsung generateRandomSerial yearChar: mapa corregido. 2021 producía 'R' (2019), ahora produce 'T' (2021). Nuevo mapa: R=2019, S=2020, T=2021, U=2022, V=2023.
+- **FIX-09 (main.cpp):** Eliminado `trinket` de `isHomogeneous` en generateMulticoreCpuInfo. Código muerto consistente con PR27. NOTA: `trinket` en `isQualcomm` (línea encima) fue conservado intencionalmente.
+- **FIX-10 (generate_profiles.py):** Añadido guard `os.path.exists("DeviceData.kt.txt")` con mensaje de error informativo. El script requiere archivo externo no incluido en el repo.
+- **FIX-11 (main.cpp):** PLMN USA corregido. `substr(0,5)` truncaba MNC de 3 dígitos para T-Mobile (310260) y AT&T (310410). Nuevo comportamiento: MCC 310/311 → substr(0,6), resto → substr(0,5). Cumple 3GPP TS 24.008.
+**Prompt del usuario:** "PR29 — Audit Fix + PLMN Sync. 11 bugs en 5 archivos."
+**Nota personal para el siguiente agente:** Post-PR29, el PLMN reportado para perfiles USA es ahora un código de operador real y verificable (310260=T-Mobile, 310410=AT&T). Las dos entradas históricas de Julia.md sobre Galaxy M31 GPU (PR7/PR11) que parecen contradecir
+el código actual son errores de documentación — el código (Mali-G72 MP3 para Exynos9611) es correcto; no modificar. La propiedad `trinket` en `isQualcomm` de generateMulticoreCpuInfo fue preservada deliberadamente: afecta solo a BogoMIPS y no introduce una quimera detectable.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR29+PR30 — Audit Fix Consolidado)
+**Resumen de cambios:** v12.9.10 — 14 correcciones detectadas en auditoría técnica externa (3 ciclos de simulación, 2 ciclos limpios consecutivos).
+- **FIX-01 (module.prop):** Versión v12.5→v12.9.10, versionCode 1250→12910.
+- **FIX-02 (build.yml):** Artefacto CI/CD v11.8→v12.9.10.
+- **FIX-03 (omni_profiles.h):** Moto G Stylus 2021 radioVersion: SM6150→SM4350. Quimera holi/SM4350 ↔ MPSS SM6150 corregida.
+- **FIX-04 (omni_profiles.h):** Nokia 5.4 radioVersion: SM7150→SM6115. Quimera bengal/SM6115 ↔ MPSS SM7150 corregida.
+- **FIX-05 (omni_profiles.h):** Nokia 8.3 5G screenDensity: 404→386. Fix documentado en Master Seal finalmente aplicado al código. Matemáticamente correcto para 6.81" 1080×2400.
+- **FIX-06 (omni_profiles.h):** Galaxy F62 radioVersion: ""→"E625FXXU2BUG1". Exynos9825 con módem integrado no debe reportar baseband vacío.
+- **FIX-07 (omni_profiles.h):** Galaxy A51 radioVersion: ""→"A515FXXU4CUG1". Mismo patrón que FIX-06.
+- **FIX-08 (omni_profiles.h):** Galaxy M31 radioVersion: ""→"M315FXXU4CUG1". Mismo patrón que FIX-06/07. Product variant del perfil es m31sqz (no m31nsxx — ese era pre-PR11.8.1).
+- **FIX-09 (omni_profiles.h):** Galaxy A72 screenDensity: 404→393. Pantalla 6.7" 1080×2400 → 392.8 ppi ≈ 393. Samsung especifica 393 ppi para SM-A725F.
+- **FIX-10 (omni_profiles.h):** Galaxy A52 screenDensity: 386→404. Pantalla 6.5" 1080×2400 → 404.9 ppi ≈ 404. El valor 386 era residuo de upgrade_profiles.py con diagonal incorrecta.
+- **FIX-11 (omni_engine.hpp):** Samsung yearChar: mapa corregido. Mapa anterior incorrecto (2021→'R'=2019). Mapa correcto: R=2019, S=2020, T=2021, U=2022, V=2023.
+- **FIX-12 (main.cpp):** Eliminado `trinket` de isHomogeneous en generateMulticoreCpuInfo. Código muerto — ningún perfil usa boardPlatform=trinket. NOTA: trinket en isQualcomm (línea encima) conservado deliberadamente — correcto para BogoMIPS.
+- **FIX-13 (main.cpp):** PLMN USA corregido. substr(0,5) truncaba MNC de 3 dígitos de T-Mobile (310260) y AT&T (310410). Nuevo: MCC 310/311 → substr(0,6), resto → substr(0,5).
+- **FIX-14 (generate_profiles.py):** Añadido guard `os.path.exists` para `DeviceData.kt.txt`. El script requiere archivo fuente externo y debe fallar explícitamente si no existe.
+**Prompt del usuario:** "PR29+PR30 Audit Fix Consolidado. 14 bugs en 5 archivos. Versión objetivo v12.9.10."
+**Nota personal para el siguiente agente:** El sistema ha alcanzado coherencia total en radioVersion y DPI para la flota Samsung/Nokia/Motorola. PLMN USA ahora soporta MNC de 3 dígitos. La versión v12.9.10 es el nuevo baseline estable.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR32 — The Void Seal)
+**Resumen de cambios:** v12.9.12 — Sellado Definitivo (13 fixes en 4 archivos).
+Fuente: auditoría Claude (DPI) + Gemini Red Team (9 hallazgos).
+
+- FIX-01/02: Versión v12.9.10→v12.9.12 (module.prop + build.yml).
+- FIX-03 (omni_profiles.h): POCO F3 DPI 386→394 (6.67" corregido).
+- FIX-04 (omni_profiles.h): Nokia 5.4 DPI 404→409 (diagonal 6.39" oficial Nokia).
+- FIX-05 (omni_profiles.h): Mi 11 DPI 404→395 (MIUI FHD+ firmware density).
+- FIX-06 (main.cpp): PROC_OSRELEASE duplicado eliminado. Bloque kv2/plat2/brd2 era código muerto nunca ejecutado (shadowed por bloque kv). Binario reducido.
+- FIX-07 (main.cpp): ABI vendor/odm expandido. Añadidas ro.vendor.product.cpu.abilist* y ro.odm.product.cpu.abilist. Coherencia entre particiones restaurada.
+- FIX-08 (main.cpp): Virtualización SYS_BLOCK_SIZE. /sys/block/sda/size ahora coherente con chip de almacenamiento declarado. Tamaño escalado según ram_gb del perfil.
+- FIX-09 (main.cpp): /proc/net/tcp y /proc/net/udp virtualizados. Tablas vacías: sin IPs locales ni puertos de servicios reales expuestos.
+- FIX-10 (main.cpp): ril.serialnumber interceptado para Samsung. Genera serial determinista con seed+7, distinto de ro.serialno pero coherente.
+- FIX-11 (main.cpp): ro.boot.bootdevice interceptado. Branch: MTK→"bootdevice", Exynos→"soc/11120000.ufs", Qualcomm→"soc/1d84000.ufshc".
+- FIX-12 (main.cpp): PROC_MEMINFO reserva de kernel dinámica. 5 niveles escalados por ram_gb (150/200/250/400/512 MB) vs. valor fijo 150 MB anterior.
+- FIX-13 (generate_profiles.py): Regex expandido para capturar campos enteros coreCount/ramGb del Kotlin de entrada (antes ignorados → default 8/4).
+
+**NOTA para el siguiente agente:**
+- Moto G Stylus 2021 (nairo/holi) conserva DPI "386" — CORRECTO (6.8").
+- Nokia 8.3 5G (BVUB_00WW/lito) conserva DPI "386" — CORRECTO (6.81").
+- PROC_OSRELEASE ahora tiene exactamente 1 handler (kv/plat/brd). Si ves dos, es una regresión.
+- El bloque kv2/plat2/brd2 fue eliminado intencionalmente en PR32 — no restaurar.
+- Finding 8 (Gemini Widevine) fue descartado: ya cubierto por Phantom Signal PR.

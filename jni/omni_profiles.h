@@ -122,7 +122,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.HI.3.3.c1-00076-SM8350_GEN_PACK-1", "V12.5.6.0.RKBMIXM", "2021-10-01", "11", "lahaina", "adreno", "196610", "SM8350", "zygote64_32",
         "Xiaomi/venus_global/venus:11/RKQ1.200826.002/V12.5.6.0.RKBMIXM:user/release-keys", "RKQ1.200826.002",
         "venus_global-user 11 RKQ1.200826.002 V12.5.6.0.RKBMIXM release-keys", "venus_global-user", "pangu-build-component-system-182133", "builder",
-        "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 660", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8
+        "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 660", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "395", 8, 8
     } },
     { "Redmi 10X 4G", {
         "Xiaomi", "Redmi", "M2004J7AC", "merlin", "merlin", "mt6769", "merlin", "V12.5.3.0.QJJCNXM",
@@ -138,7 +138,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "V12.5.5.0.RKHMIXM", "2021-09-01", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
         "POCO/alioth_global/alioth:11/RKQ1.200826.002/V12.5.5.0.RKHMIXM:user/release-keys", "RKQ1.200826.002",
         "alioth_global-user 11 RKQ1.200826.002 V12.5.5.0.RKHMIXM release-keys", "alioth_global-user", "c3-miui-ota-bd88", "builder",
-        "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 8
+        "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 8
     } },
     { "Galaxy A52", {
         "samsung", "samsung", "SM-A525F", "a52x", "a52xsqz", "qcom", "atoll", "A525FXXU4AUH1",
@@ -146,7 +146,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A525FXXU4AUH1", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
         "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "RP1A.200720.012",
         "a52xsqz-user 11 RP1A.200720.012 A525FXXU4AUH1 release-keys", "a52xsqz-user", "SWDD7390", "dpi", "1627776000", "REL", "0",
-        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 6
+        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 6
     } },
     { "Galaxy A72", {
         "samsung", "samsung", "SM-A725F", "a72", "a72sqz", "qcom", "atoll", "A725FXXU3AUH2",
@@ -154,7 +154,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A725FXXU3AUH2", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
         "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "RP1A.200720.012",
         "a72sqz-user 11 RP1A.200720.012 A725FXXU3AUH2 release-keys", "a72sqz-user", "SWDD7391", "dpi", "1627776000", "REL", "0",
-        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8
+        "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "393", 8, 8
     } },
     { "Galaxy A32 5G", {
         "samsung", "samsung", "SM-A326B", "a32x", "a32xsqz", "mt6853", "mt6853", "A326BXXU4AUH1",
@@ -174,7 +174,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     } },
     { "Galaxy A51", {
         "samsung", "samsung", "SM-A515F", "a51", "a51sqz", "exynos9611", "exynos9611", "A515FXXU4CUG1",
-        "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "",
+        "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "A515FXXU4CUG1",
         "A515FXXU4CUG1", "2021-07-01", "11", "exynos9611", "mali", "196610", "Exynos9611", "zygote64_32",
         "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012",
         "a51sqz-user 11 RP1A.200720.012 A515FXXU4CUG1 release-keys", "a51sqz-user", "21R3NF12", "dpi", "1625097600", "REL", "0",
@@ -182,7 +182,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     } },
     { "Galaxy M31", {
         "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "m31", "M315FXXU4CUG1",
-        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "",
+        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "M315FXXU4CUG1",
         "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "S5E9611", "zygote64_32",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012",
         "m31sqz-user 11 RP1A.200720.012 M315FXXU4CUG1 release-keys", "m31sqz-user", "21R3NF12", "dpi", "1636934400", "REL", "0",
@@ -214,7 +214,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     } },
     { "Galaxy F62", {
         "samsung", "samsung", "SM-E625F", "e1q", "e1qsqz", "exynos9825", "exynos9825", "E625FXXU2BUG1",
-        "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "",
+        "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "E625FXXU2BUG1",
         "E625FXXU2BUG1", "2021-07-01", "11", "exynos9825", "mali", "196610", "Exynos9825", "zygote64_32",
         "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012",
         "e1qsqz-user 11 RP1A.200720.012 E625FXXU2BUG1 release-keys", "e1qsqz-user", "SWDD5830", "dpi", "1625097600", "REL", "0",
@@ -295,7 +295,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     { "Moto G Stylus 2021", {
         "motorola", "motorola", "moto g stylus (2021) 5G", "nairo", "nairo_retail", "qcom", "holi", "1.0.0.0",
         "motorola/nairo_retail/nairo:11/RPNS31.Q1-45-20/1.0.0.0:user/release-keys", "RPNS31.Q1-45-20", "release-keys", "user",
-        "MPSS.AT.4.0-00055-SM6150_GEN_PACK-1", "1.0.0.0", "2021-05-01", "11", "holi", "adreno", "196610", "SM4350", "zygote64_32",
+        "MPSS.AT.4.0-00055-SM4350_GEN_PACK-1", "1.0.0.0", "2021-05-01", "11", "holi", "adreno", "196610", "SM4350", "zygote64_32",
         "motorola/nairo_retail/nairo:11/RPNS31.Q1-45-20/1.0.0.0:user/release-keys", "RPNS31.Q1-45-20",
         "nairo_retail-user 11 RPNS31.Q1-45-20 1.0.0.0 release-keys", "nairo_retail-user", "moto-build-prod-02", "moto",
         "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 619", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 4
@@ -322,15 +322,15 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1", "00WW_3_510", "2021-08-01", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
         "Nokia/BVUB_00WW/nokia_8.3_5g:11/RKQ1.200928.002/00WW_3_510:user/release-keys", "RKQ1.200928.002",
         "BVUB_00WW-user 11 RKQ1.200928.002 00WW_3_510 release-keys", "BVUB_00WW-user", "hmd-build-01", "hmd",
-        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 6
+        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 6
     } },
     { "Nokia 5.4", {
         "HMD Global", "Nokia", "Nokia 5.4", "nokia_5.4", "CAV_00WW", "qcom", "bengal", "00WW_2_440",
         "Nokia/CAV_00WW/nokia_5.4:11/RKQ1.200928.002/00WW_2_440:user/release-keys", "RKQ1.200928.002", "release-keys", "user",
-        "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "00WW_2_440", "2021-06-01", "11", "bengal", "adreno", "196610", "SM6115", "zygote64_32",
+        "MPSS.AT.4.0-00055-SM6115_GEN_PACK-1", "00WW_2_440", "2021-06-01", "11", "bengal", "adreno", "196610", "SM6115", "zygote64_32",
         "Nokia/CAV_00WW/nokia_5.4:11/RKQ1.200928.002/00WW_2_440:user/release-keys", "RKQ1.200928.002",
         "CAV_00WW-user 11 RKQ1.200928.002 00WW_2_440 release-keys", "CAV_00WW-user", "hmd-build-02", "hmd",
-        "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 4
+        "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "409", 8, 4
     } },
     { "Realme 8 Pro", {
         "realme", "realme", "RMX3091", "RMX3091", "RMX3091", "qcom", "atoll", "1636363205855",

@@ -63,7 +63,8 @@ enum FileType {
     PROC_OSTYPE,
     PROC_DTB_MODEL,
     PROC_ETH0_MAC,
-    PROC_SELF_STATUS, SYS_CPU_TOPOLOGY, BAT_TECHNOLOGY, BAT_PRESENT
+    PROC_SELF_STATUS, SYS_CPU_TOPOLOGY, BAT_TECHNOLOGY, BAT_PRESENT,
+    SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -452,8 +453,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
 
         // Qualcomm: big.LITTLE topology o A55 homogéneo según familia
         // bengal y trinket = A55 homogéneo. Resto = big(A77/A78) + LITTLE(A55)
-        bool isHomogeneous = (platform.find("bengal")  != std::string::npos) ||
-                             (platform.find("trinket") != std::string::npos);
+        bool isHomogeneous = (platform.find("bengal") != std::string::npos);
 
         // Parámetros del núcleo big según plataforma Qualcomm
         const char* bigPart    = "0xd0d";  // Cortex-A77 (default)
@@ -531,6 +531,13 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.serialno" || k == "ro.boot.serialno") {
             dynamic_buffer = omni::engine::generateRandomSerial(fp.brand, g_masterSeed, fp.securityPatch);
         }
+        // PR32: ril.serialnumber — serial de radio propietario Samsung (delataba hardware real)
+        else if (k == "ril.serialnumber") {
+            std::string brandLower = toLowerStr(fp.brand);
+            if (brandLower == "samsung") {
+                dynamic_buffer = omni::engine::generateRandomSerial(fp.brand, g_masterSeed + 7, fp.securityPatch);
+            }
+        }
         else if (k == "ro.build.display.id") dynamic_buffer = fp.display;
         else if (k == "ro.build.tags") dynamic_buffer = fp.tags;
         else if (k == "ro.build.version.sdk") {
@@ -588,6 +595,11 @@ int my_system_property_get(const char *key, char *value) {
                  k == "ro.product.system.cpu.abilist")      dynamic_buffer = "arm64-v8a,armeabi-v7a,armeabi";
         else if (k == "ro.product.cpu.abilist64")           dynamic_buffer = "arm64-v8a";
         else if (k == "ro.product.cpu.abilist32")           dynamic_buffer = "armeabi-v7a,armeabi";
+        // PR32: Expansión ABI vendor/odm — coherencia entre particiones
+        else if (k == "ro.vendor.product.cpu.abilist")      dynamic_buffer = "arm64-v8a,armeabi-v7a,armeabi";
+        else if (k == "ro.vendor.product.cpu.abilist64")    dynamic_buffer = "arm64-v8a";
+        else if (k == "ro.vendor.product.cpu.abilist32")    dynamic_buffer = "armeabi-v7a,armeabi";
+        else if (k == "ro.odm.product.cpu.abilist")         dynamic_buffer = "arm64-v8a,armeabi-v7a,armeabi";
         // --- PR20: Build characteristics (brand-aware) ---
         else if (k == "ro.build.characteristics") {
             std::string br = toLowerStr(fp.brand);
@@ -613,6 +625,18 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
         // --- PR22: Boot Integrity & Hardware Boot (Defensa profunda TEE) ---
         else if (k == "ro.boot.verifiedbootstate")    dynamic_buffer = "green";
+        // PR32: Ruta del controlador de almacenamiento coherente con plataforma del perfil
+        else if (k == "ro.boot.bootdevice") {
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt6") != std::string::npos) {
+                dynamic_buffer = "bootdevice";                // MediaTek: path genérico MTK
+            } else if (plat.find("exynos") != std::string::npos ||
+                       plat.find("s5e")    != std::string::npos) {
+                dynamic_buffer = "soc/11120000.ufs";          // Samsung Exynos UFS genérico
+            } else {
+                dynamic_buffer = "soc/1d84000.ufshc";         // Qualcomm UFS genérico (SM7150/SM8250/etc.)
+            }
+        }
         else if (k == "ro.boot.flash.locked")         dynamic_buffer = "1";
         else if (k == "ro.boot.vbmeta.device_state")  dynamic_buffer = "locked";
         else if (k == "ro.boot.veritymode")           dynamic_buffer = "enforcing";
@@ -681,8 +705,11 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "gsm.sim.operator.numeric" || k == "gsm.operator.numeric") {
             // Extraer el MCC/MNC directamente del IMSI generado
+            // 3GPP TS 24.008: MNC de 3 dígitos (USA MCC 310/311) → PLMN de 6 chars
+            // MNC de 2 dígitos (Europa, LATAM) → PLMN de 5 chars
             std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
-            dynamic_buffer = imsi.substr(0, 5);
+            std::string mcc = imsi.substr(0, 3);
+            dynamic_buffer = (mcc == "310" || mcc == "311") ? imsi.substr(0, 6) : imsi.substr(0, 5);
         }
         else if (k == "gsm.sim.operator.iso-country" || k == "gsm.operator.iso-country") {
             // Sincronizar ISO con la región del motor
@@ -824,12 +851,18 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/thermal/") && strstr(pathname, "type")) type = SYS_THERMAL;
         else if (strstr(pathname, "/proc/stat")) type = PROC_STAT;
         else if (strstr(pathname, "/sys/block/") && (strstr(pathname, "device/model") || strstr(pathname, "device/name"))) type = SYS_BLOCK_MODEL;
+        else if (strstr(pathname, "/sys/block/") && strstr(pathname, "/size")) type = SYS_BLOCK_SIZE;
         else if (strstr(pathname, "scaling_available_governors")) type = SYS_CPU_GOVERNORS;
         else if (strstr(pathname, "/sys/class/bluetooth/hci0/address")) type = BT_MAC;
         else if (strstr(pathname, "/sys/class/bluetooth/hci0/name")) type = BT_NAME;
         // PR20: Red virtual (oculta MAC real del router y estadísticas reales)
-        else if (strcmp(pathname, "/proc/net/arp") == 0)  type = PROC_NET_ARP;
-        else if (strcmp(pathname, "/proc/net/dev") == 0)  type = PROC_NET_DEV;
+        else if (strcmp(pathname, "/proc/net/arp") == 0)   type = PROC_NET_ARP;
+        else if (strcmp(pathname, "/proc/net/dev") == 0)   type = PROC_NET_DEV;
+        // PR32: Sellado forense de sockets TCP/UDP
+        else if (strcmp(pathname, "/proc/net/tcp") == 0 ||
+                 strcmp(pathname, "/proc/net/tcp6") == 0)  type = PROC_NET_TCP;
+        else if (strcmp(pathname, "/proc/net/udp") == 0 ||
+                 strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -971,31 +1004,19 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     while (std::getline(iss, line)) {
                         if (!isHiddenPath(line.c_str())) content += line + "\n";
                     }
-                } else if (type == PROC_OSRELEASE) {
-                    std::string plat2 = toLowerStr(fp.boardPlatform);
-                    std::string brd2  = toLowerStr(fp.brand);
-                    std::string kv2 = "4.14.186-perf+";
-                    if (brd2 == "google") {
-                        if (plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat2.find("atoll") != std::string::npos) kv2 = "4.14.150-g62a62a5a93f7-ab7336171";
-                        else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-g5d098cef6d96-ab6174032";
-                        else kv2 = "4.19.113-g820a424c538c-ab7336171";
-                    } else if (plat2.find("mt6")    != std::string::npos) kv2 = "4.14.141-perf+";
-                    else if (plat2.find("kona")    != std::string::npos || plat2.find("lahaina") != std::string::npos) kv2 = "4.19.157-perf+";
-                    else if (plat2.find("atoll")   != std::string::npos || plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-perf+";
-                    else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-perf+";
-                    else if (plat2.find("bengal")!=std::string::npos||plat2.find("holi")!=std::string::npos||
-                             plat2.find("sm6350")!=std::string::npos) kv2="4.19.157-perf+";
-                    else if (plat2.find("sm7325")!=std::string::npos) kv2="5.4.61-perf+";
-                    content = kv2 + "\n";
                 } else if (type == PROC_MEMINFO) {
                     char tmpBuf[8192];
                     ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
                     if (r > 0) {
                         tmpBuf[r] = '\0';
                         std::string memData = tmpBuf;
-                        // Calcular RAM realista en kB restando reserva de kernel (~150MB)
-                        long fakeMemKb = (long)fp.ram_gb * 1048576L - 153600L;
+                        // PR32: Reserva de kernel escalada según RAM total (firma dinámica anti-forense)
+                        long kernelReserveKb = (fp.ram_gb <= 4)  ? 153600L :   // ~150 MB para 4 GB
+                                               (fp.ram_gb <= 6)  ? 204800L :   // ~200 MB para 6 GB
+                                               (fp.ram_gb <= 8)  ? 256000L :   // ~250 MB para 8 GB
+                                               (fp.ram_gb <= 12) ? 409600L :   // ~400 MB para 12 GB
+                                                                    524288L;   // ~512 MB para >12 GB
+                        long fakeMemKb = (long)fp.ram_gb * 1048576L - kernelReserveKb;
 
                         size_t pos = memData.find("MemTotal:");
                         if (pos != std::string::npos) {
@@ -1136,6 +1157,18 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     else
                         content = "H9HP52ACPMMDAR\n";          // SK Hynix genérico (mayoría Android)
 
+                // PR32: Capacidad de almacenamiento coherente con chip declarado
+                } else if (type == SYS_BLOCK_SIZE) {
+                    // Tamaño en sectores de 512 bytes. Heurística basada en RAM del perfil:
+                    // 4GB RAM → 64GB storage = 134217728 sectores
+                    // 6GB RAM → 128GB storage = 268435456 sectores
+                    // 8GB+ RAM → 128GB storage = 268435456 sectores (modelo base)
+                    // 12GB+ RAM → 256GB storage = 536870912 sectores
+                    long storageSectors;
+                    if (fp.ram_gb <= 4)       storageSectors = 134217728L;  // 64 GB
+                    else if (fp.ram_gb <= 10) storageSectors = 268435456L;  // 128 GB
+                    else                      storageSectors = 536870912L;  // 256 GB
+                    content = std::to_string(storageSectors) + "\n";
                 // Gobernadores AOSP (Elimina firmas 'mtk-cpufreq' o gobernadores propietarios)
                 } else if (type == SYS_CPU_GOVERNORS) {
                     content = "performance powersave schedutil\n";
@@ -1156,6 +1189,13 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                               "        0       0    0    0    0     0       0          0\n"
                               " wlan0:  524288    4096    0    0    0     0          0         0"
                               "   131072    1024    0    0    0     0       0          0\n";
+                // PR32: Tabla TCP virtualizada — oculta IPs locales y puertos de servicios reales
+                } else if (type == PROC_NET_TCP) {
+                    content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+                    // No se añaden entradas: tabla de sockets vacía = sin servicios locales expuestos
+                // PR32: Tabla UDP virtualizada — ídem
+                } else if (type == PROC_NET_UDP) {
+                    content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
                 // Añade esto al final de los else if del contenido VFS
                 } else if (type == SYS_CPU_TOPOLOGY) {
                     content = "0-" + std::to_string(fp.core_count - 1) + "\n";
