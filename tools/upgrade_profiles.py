@@ -18,6 +18,17 @@ def upgrade_profiles(input_file, output_file):
         "POCO F3": 6.67,            # SM8250 kona — 1080×2400 → math=394 DPI ✅
         "Nokia 5.4": 6.39,          # SM6115 bengal — 1080×2400 → math=411, override→409
         "Moto G Power 2021": 6.5,   # SM6115 bengal — 1080×2400 → math=404 ✅ (explícito)
+        # PR34: 10 diagonales adicionales completando el catálogo de 40 dispositivos
+        "Redmi Note 9 Pro": 6.67,   # SM7125 atoll — 1080×2400 → math=394 DPI ✅
+        "OnePlus Nord": 6.44,       # SM7250 lito — 1080×2400 → math=408 DPI ✅
+        "OnePlus 8": 6.55,          # SM8250 kona — 1080×2400 → math=401 DPI ✅
+        "Mi 11 Lite": 6.55,         # SM7150 atoll — 1080×2400 → math=401 DPI ✅
+        "Realme 8 Pro": 6.4,        # SM7125 atoll — 1080×2400 → math=411 DPI ✅
+        "Realme 8": 6.4,            # MT6785 — 1080×2400 → math=411 DPI ✅
+        "Realme GT Master": 6.43,   # SM7325 — 1080×2400 → math=409 DPI ✅
+        "Galaxy M31": 6.4,          # Exynos9611 — 1080×2340 → math=402, override→403
+        "Redmi 10X 4G": 6.53,       # MT6769 — 1080×2400 → math=403 DPI ✅
+        "OnePlus N10 5G": 6.49,     # SM6350 — 1080×2400 → math=405 DPI ✅
     }
 
     # PR33: Valores canónicos que difieren del cálculo matemático puro.
@@ -26,6 +37,8 @@ def upgrade_profiles(input_file, output_file):
     dpi_overrides = {
         "Mi 11":    "395",   # Xiaomi MIUI ro.sf.lcd_density FHD+ (math 6.81" = 386)
         "Nokia 5.4": "409",  # Nokia spec oficial 409 ppi (math 6.39" = 411)
+        # PR34: Override canónico para Galaxy M31 (spec Samsung 403 ppi, math 2340px = 402)
+        "Galaxy M31": "403", # Samsung SM-M315F 6.4" 1080×2340 → spec 403 ppi (math=402)
     }
 
     block_pattern = re.compile(r'\{\s*"([^"]+)",\s*\{(.*?)\}\s*\},', re.DOTALL)
@@ -56,7 +69,7 @@ def upgrade_profiles(input_file, output_file):
 
         width = 1080
         height = 2400
-        if name in ["Redmi 9", "Moto Edge Plus", "Moto Edge"]:
+        if name in ["Redmi 9", "Moto Edge Plus", "Moto Edge", "Galaxy M31"]:
             height = 2340
 
         diag = diagonals.get(name, 6.5)

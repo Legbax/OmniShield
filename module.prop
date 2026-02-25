@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.13
-versionCode=12913
+version=v12.9.14
+versionCode=12914
 author=Jules & legbax
 description=Total Invisibility (The Void). Zygisk module. PR29+PR30 — Audit Fix.

@@ -511,3 +511,32 @@ Fuente: auditoría Claude (DPI) + Gemini Red Team (9 hallazgos).
 - dpi_overrides en upgrade_profiles.py es permanente — no eliminar aunque parezca redundante.
 - El fallback Qualcomm UFS (soc/1d84000.ufshc) es correcto para: kona, lahaina, lito, atoll,
   msmnile, sdm670, sm6150, sm6350, sm7325. Solo bengal/holi/trinket son eMMC en el catálogo.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR34 — The DPI Seal II)
+**Resumen de cambios:** v12.9.14 — 10 correcciones DPI residuales + dict completo (12 modificaciones en 2 archivos).
+Origen: auditoría post-PR33 detectó que upgrade_profiles.py cubría solo 18/40 dispositivos.
+
+- **FIX-01/02 (module.prop + build.yml):** Versión bump v12.9.13 → v12.9.14.
+- **FIX-03 (omni_profiles.h):** Redmi Note 9 Pro (joyeuse/atoll) DPI 404→394. 6.67" 1080×2400.
+- **FIX-04 (omni_profiles.h):** OnePlus Nord (avicii/lito) DPI 404→408. 6.44" 1080×2400.
+- **FIX-05 (omni_profiles.h):** OnePlus 8 (instantnoodle/kona) DPI 404→401. 6.55" 1080×2400.
+- **FIX-06 (omni_profiles.h):** Mi 11 Lite (courbet/atoll) DPI 404→401. 6.55" 1080×2400.
+- **FIX-07 (omni_profiles.h):** Realme 8 Pro (RMX3091/atoll) DPI 404→411. 6.4" 1080×2400.
+- **FIX-08 (omni_profiles.h):** Realme 8 (RMX3085/mt6785) DPI 404→411. 6.4" 1080×2400.
+- **FIX-09 (omni_profiles.h):** Realme GT Master (RMX3363/sm7325) DPI 404→409. 6.43" 1080×2400.
+- **FIX-10 (omni_profiles.h):** Galaxy M31 (m31sqz/exynos9611) height 2400→2340 + DPI 404→403.
+  Pantalla FHD+ REAL del SM-M315F es 2340×1080. Samsung spec: 403 ppi.
+  ADVERTENCIA: Galaxy A51 (a51sqz) conserva height 2400 + DPI 404 — CORRECTO, NO TOCAR.
+- **FIX-11 (omni_profiles.h):** Redmi 10X 4G (merlin/mt6769) DPI 404→403. 6.53" 1080×2400.
+- **FIX-12 (omni_profiles.h):** OnePlus N10 5G (billie/sm6350) DPI 404→405. 6.49" 1080×2400.
+- **FIX-13 (upgrade_profiles.py):** Dict diagonals ampliado de 18→28 entradas. Height override
+  añade Galaxy M31 a lista 2340. dpi_overrides añade Galaxy M31→"403".
+
+**Nota para el siguiente agente:**
+- El catálogo de 40 perfiles tiene ahora DPIs matemáticamente correctos o con override canónico.
+- Perfiles protegidos sin modificar: Nokia 8.3 5G (386 ✅), Moto G Stylus 2021 (386 ✅),
+  Moto G Power 2021 (404 ✅), POCO F3 (394 ✅), Nokia 5.4 (409 ✅), Mi 11 (395 ✅).
+- Galaxy A51 (a51sqz): height 2400 + DPI 404 = CORRECTO (pantalla 6.5" FHD+ estándar).
+- Los 5 perfiles Pixel conservan sus DPIs originales (valores Google spec no generados por math).
+- upgrade_profiles.py diagonals dict: 28 entradas cubre todos los perfiles no-Pixel del catálogo.
+  Los Pixel se excluyen del dict intencionalmente — sus DPIs son especificaciones Google directas.
