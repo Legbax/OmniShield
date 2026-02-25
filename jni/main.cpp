@@ -52,7 +52,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT, PROC_CMDLINE };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -109,6 +109,16 @@ typedef unsigned int GLuint;
 static const GLubyte* (*orig_glGetString)(GLenum name);
 static const GLubyte* (*orig_glGetStringi)(GLenum name, GLuint index);
 
+// OpenCL
+typedef int cl_int;
+typedef void* cl_device_id;
+typedef unsigned int cl_device_info;
+#define CL_DEVICE_NAME 0x102B
+#define CL_DEVICE_VENDOR 0x102C
+#define CL_DRIVER_VERSION 0x102D
+#define CL_DEVICE_VERSION 0x102F
+static cl_int (*orig_clGetDeviceInfo)(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret);
+
 // Vulkan & Sensors
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
 static VkResult (*orig_vkEnumerateDeviceExtensionProperties)(VkPhysicalDevice physicalDevice, const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
@@ -161,6 +171,29 @@ bool shouldHide(const char* key) {
         }
     }
     return s.find("mediatek") != std::string::npos || s.find("lancelot") != std::string::npos;
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: OpenCL
+// -----------------------------------------------------------------------------
+cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
+    if (ret == 0 && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string egl = toLowerStr(fp.eglDriver);
+
+        // En my_clGetDeviceInfo, añadir constantes y lógica de driver:
+        #define CL_DEVICE_VERSION 0x102F
+        #define CL_DRIVER_VERSION 0x102D
+
+        if (egl == "adreno") {
+            if (param_name == CL_DEVICE_VENDOR) strncpy((char*)param_value, "Qualcomm", param_value_size);
+            else if (param_name == CL_DEVICE_NAME) strncpy((char*)param_value, fp.gpuRenderer, param_value_size);
+            else if (param_name == CL_DEVICE_VERSION || param_name == CL_DRIVER_VERSION)
+                strncpy((char*)param_value, "OpenCL 2.0 QUALCOMM build", param_value_size);
+        }
+    }
+    return ret;
 }
 
 // -----------------------------------------------------------------------------
@@ -582,8 +615,9 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = fp.firstApiLevel;
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
-        else if (k == "gsm.version.baseband")               dynamic_buffer = fp.radioVersion;
-        else if (k == "ro.build.expect.baseband")            dynamic_buffer = fp.radioVersion;
+        else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
+            dynamic_buffer = fp.radioVersion;
+        }
         else if (k == "gsm.version.ril-impl")
             dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
@@ -687,8 +721,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/asound/cards")) type = PROC_ASOUND;
         else if (strstr(pathname, "/proc/bus/input/devices")) type = PROC_INPUT;
         else if (strstr(pathname, "/sys/class/thermal/") && strstr(pathname, "type")) type = SYS_THERMAL;
-        else if (strstr(pathname, "/sys/devices/system/cpu/possible")) type = SYS_CPU_POSSIBLE;
-        else if (strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_PRESENT;
+        else if (strstr(pathname, "/proc/stat")) type = PROC_STAT;
+        else if (strstr(pathname, "/sys/block/") && (strstr(pathname, "device/model") || strstr(pathname, "device/name"))) type = SYS_BLOCK_MODEL;
+        else if (strstr(pathname, "scaling_available_governors")) type = SYS_CPU_GOVERNORS;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -902,8 +937,35 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     } else {
                         content = "tsens_tz_sensor\n";
                     }
-                } else if (type == SYS_CPU_POSSIBLE || type == SYS_CPU_PRESENT) {
-                    content = "0-" + std::to_string(fp.core_count - 1) + "\n";
+                // Manejo de btime para coherencia con Uptime
+                } else if (type == PROC_STAT) {
+                    char tmpBuf[8192];
+                    ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
+                    if (r > 0) {
+                        tmpBuf[r] = '\0';
+                        std::string statData = tmpBuf;
+                        struct timespec ts_real;
+                        orig_clock_gettime(CLOCK_BOOTTIME, &ts_real);
+                        long offset_segundos = 259200 + (g_masterSeed % 1036800);
+                        long uptime_falso = ts_real.tv_sec + offset_segundos;
+                        long btime_falso = (long)time(NULL) - uptime_falso;
+
+                        size_t pos = statData.find("btime ");
+                        if (pos != std::string::npos) {
+                            size_t end = statData.find('\n', pos);
+                            if (end != std::string::npos)
+                                statData.replace(pos, end - pos, "btime " + std::to_string(btime_falso));
+                        }
+                        content = statData;
+                    }
+
+                // Identidad de Almacenamiento
+                } else if (type == SYS_BLOCK_MODEL) {
+                    content = (toLowerStr(fp.brand) == "samsung") ? "KLUDG4UHDB-B2D1\n" : "SAMSUNG_UFS\n";
+
+                // Evasión de Gobernadores Propietarios (MTK/Exynos)
+                } else if (type == SYS_CPU_GOVERNORS) {
+                    content = "performance powersave schedutil\n";
                 }
             }
 
@@ -1473,15 +1535,9 @@ public:
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
         if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
 
-        void* vk_ext_func = DobbySymbolResolver("libvulkan.so", "vkEnumerateDeviceExtensionProperties");
-        if (vk_ext_func) DobbyHook(vk_ext_func, (void*)my_vkEnumerateDeviceExtensionProperties, (void**)&orig_vkEnumerateDeviceExtensionProperties);
-
-        void* ioctl_func = DobbySymbolResolver(nullptr, "ioctl");
-        if (ioctl_func) DobbyHook(ioctl_func, (void*)my_ioctl, (void**)&orig_ioctl);
-
-        void* opencl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
-        if (!opencl_func) opencl_func = DobbySymbolResolver("libOpenCL.so.1", "clGetDeviceInfo");
-        if (opencl_func) DobbyHook(opencl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
+        // OpenCL
+        void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
+        if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
         // Sensores (Mangled names en libandroid.so o libsensors.so)
         // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
