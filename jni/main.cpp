@@ -1043,10 +1043,16 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     if (plat.find("mt") != std::string::npos) {
                         char tmpBuf[1024]; ssize_t r;
                         while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
-                    } else if (plat.find("exynos") != std::string::npos) {
-                        content = " 0 [samsung        ]: sm-a52 - samsung\n                      samsung\n";
+                    } else if (plat.find("exynos") != std::string::npos || plat.find("s5e") != std::string::npos) {
+                        // Derivar card name del device del perfil (cada Samsung tiene card name único)
+                        std::string devName = toLowerStr(fp.device);
+                        content = " 0 [samsung        ]: " + devName + " - samsung\n"
+                                  "                      samsung\n";
                     } else {
-                        content = " 0 [sndkona        ]: snd_kona - snd_kona\n                      snd_kona\n";
+                        // Derivar card name de la plataforma Qualcomm real del perfil
+                        std::string sndName = "snd_" + plat;
+                        content = " 0 [" + sndName + "        ]: " + sndName + " - " + sndName + "\n"
+                                  "                      " + sndName + "\n";
                     }
                 } else if (type == PROC_INPUT) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -1054,7 +1060,38 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         char tmpBuf[4096]; ssize_t r;
                         while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
                     } else {
-                        content = "I: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"sec_touchscreen\"\nP: Phys=\nS: Sysfs=/devices/virtual/input/input1\nU: Uniq=\nH: Handlers=event1\nB: PROP=2\nB: EV=b\nB: KEY=400 0 0 0 0 0\nB: ABS=260800000000000\n\nI: Bus=0000 Vendor=0000 Product=0000 Version=0000\nN: Name=\"gpio-keys\"\nP: Phys=gpio-keys/input0\nS: Sysfs=/devices/platform/soc/soc:gpio_keys/input/input0\nU: Uniq=\nH: Handlers=event0\nB: PROP=0\nB: EV=3\nB: KEY=10000000000000 0\n\n";
+                        // Nombre de driver táctil coherente con la marca del perfil
+                        std::string brd = toLowerStr(fp.brand);
+                        std::string touchName = "sec_touchscreen"; // Samsung default
+                        if (brd == "google")        touchName = "fts_ts";         // Focaltech (Pixel)
+                        else if (brd == "oneplus")   touchName = "goodix_ts";      // Goodix (OnePlus)
+                        else if (brd == "motorola")  touchName = "synaptics_tcm";  // Synaptics (Moto)
+                        else if (brd == "nokia")     touchName = "NVTtouch_ts";    // Novatek (Nokia)
+                        else if (brd == "xiaomi" || brd == "redmi" || brd == "poco")
+                                                     touchName = "fts_ts";         // Focaltech (Xiaomi)
+                        else if (brd == "realme")    touchName = "goodix_ts";      // Goodix (Realme)
+                        else if (brd == "asus")      touchName = "goodix_ts";      // Goodix (ASUS)
+                        // else: samsung default sec_touchscreen
+
+                        content = "I: Bus=0000 Vendor=0000 Product=0000 Version=0000\n"
+                                  "N: Name=\"" + touchName + "\"\n"
+                                  "P: Phys=\n"
+                                  "S: Sysfs=/devices/virtual/input/input1\n"
+                                  "U: Uniq=\n"
+                                  "H: Handlers=event1\n"
+                                  "B: PROP=2\n"
+                                  "B: EV=b\n"
+                                  "B: KEY=400 0 0 0 0 0\n"
+                                  "B: ABS=260800000000000\n\n"
+                                  "I: Bus=0000 Vendor=0000 Product=0000 Version=0000\n"
+                                  "N: Name=\"gpio-keys\"\n"
+                                  "P: Phys=gpio-keys/input0\n"
+                                  "S: Sysfs=/devices/platform/soc/soc:gpio_keys/input/input0\n"
+                                  "U: Uniq=\n"
+                                  "H: Handlers=event0\n"
+                                  "B: PROP=0\n"
+                                  "B: EV=3\n"
+                                  "B: KEY=10000000000000 0\n\n";
                     }
                 } else if (type == SYS_THERMAL) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -1089,7 +1126,15 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 
                 // Identidad de Almacenamiento (Oculta hardware real de la ROM)
                 } else if (type == SYS_BLOCK_MODEL) {
-                    content = (toLowerStr(fp.brand) == "samsung") ? "KLUDG4UHDB-B2D1\n" : "SAMSUNG_UFS\n";
+                    std::string brd = toLowerStr(fp.brand);
+                    if (brd == "samsung")
+                        content = "KLUDG4UHDB-B2D1\n";        // Samsung UFS real
+                    else if (brd == "google")
+                        content = "SDINBDG4-64G\n";            // SanDisk (usado en Pixel)
+                    else if (brd == "oneplus")
+                        content = "H28S7Q302BMR\n";            // SK Hynix (usado en OnePlus)
+                    else
+                        content = "H9HP52ACPMMDAR\n";          // SK Hynix genérico (mayoría Android)
 
                 // Gobernadores AOSP (Elimina firmas 'mtk-cpufreq' o gobernadores propietarios)
                 } else if (type == SYS_CPU_GOVERNORS) {

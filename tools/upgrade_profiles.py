@@ -54,14 +54,38 @@ def upgrade_profiles(input_file, output_file):
         gpu_renderer = "Adreno (TM) 618"
         gpu_version = "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000) (Date:10/20/2020)"
 
+        # Qualcomm platforms (mapeo completo sincronizado con omni_profiles.h)
         if "lahaina" in platform: gpu_renderer = "Adreno (TM) 660"
         elif "kona" in platform: gpu_renderer = "Adreno (TM) 650"
+        elif "msmnile" in platform: gpu_renderer = "Adreno (TM) 640"
         elif "lito" in platform: gpu_renderer = "Adreno (TM) 620"
+        elif "atoll" in platform: gpu_renderer = "Adreno (TM) 618"
+        elif "sm7325" in platform: gpu_renderer = "Adreno (TM) 642L"
+        elif "sm6350" in platform: gpu_renderer = "Adreno (TM) 619L"
+        elif "sm6150" in platform: gpu_renderer = "Adreno (TM) 612"
+        elif "holi" in platform: gpu_renderer = "Adreno (TM) 619"
+        elif "bengal" in platform or "trinket" in platform: gpu_renderer = "Adreno (TM) 610"
+        elif "sdm670" in platform: gpu_renderer = "Adreno (TM) 615"
+        # IMPORTANTE: msmnile = Snapdragon 855/860 = Adreno 640 (NO 650)
+        # kona ya captura msmnile arriba por el OR, pero si un perfil tiene bp=msmnile
+        # explícitamente, el elif "kona" or "msmnile" lo cubre.
+
+        # MediaTek platforms
+        elif "mt6853" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G57 MC3"
         elif "mt6833" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G57 MC2"
+        elif "mt6785" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G76 MC4"
         elif "mt6768" in hardware or "mt6769" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G52 MC2"
+        elif "mt6765" in platform: gpu_vendor = "Imagination Technologies"; gpu_renderer = "PowerVR GE8320"
+
+        # Exynos platforms
+        elif "exynos9825" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G76 MP12"
+        elif "exynos9611" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G72 MP3"
+        elif "exynos850" in platform: gpu_vendor = "ARM"; gpu_renderer = "Mali-G52 MC1"
 
         if gpu_vendor == "ARM":
             gpu_version = "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2"
+        elif gpu_vendor == "Imagination Technologies":
+            gpu_version = "OpenGL ES 3.2 build 1.13@5776728"
 
         profiles.append((name, base_vals + [gpu_vendor, gpu_renderer, gpu_version, str(width), str(height), density]))
 
