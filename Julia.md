@@ -390,3 +390,11 @@ vector de fuga del SoC físico vía filesystem — ahora cerrado.
 - **upgrade_profiles.py Sync (PR24-005):** Sincronizado `tools/upgrade_profiles.py` con la estructura actual del struct C++ (`core_count` + `ram_gb`).
 **Prompt del usuario:** "Despliegue de Omni-Shield v12.9.3 (Frequency Coherence & Kernel Sync — PR24)"
 **Nota personal para el siguiente agente:** Las CUATRO instancias de detección Qualcomm (`my_open` VFS, `my_openat` VFS, `SYS_CPU_FREQ`, `generateMulticoreCpuInfo` fallback) están ahora sincronizadas con la misma lista de 13 plataformas. Las CUATRO ubicaciones de versión de kernel (`my_uname`, `PROC_VERSION`, y dos `PROC_OSRELEASE`) cubren ahora las 18 plataformas del catálogo. Cualquier nueva plataforma Qualcomm debe añadirse en los 8 puntos simultáneamente.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR25 — A53 Feature Fidelity)
+**Resumen de cambios:** v12.9.4 — Fidelidad de Features ARMv8 y Limpieza.
+- **A53 Features Fix (PR25-001):** Añadido `mt6765` a `getArmFeatures()` para retornar features ARMv8.0 (sin `lrcpc`/`dcpop`/`asimddp`). Galaxy A12 ahora reporta features de CPU coherentes con la microarquitectura Cortex-A53 pura.
+- **PowerVR Vulkan (PR25-002):** Añadido vendorID `0x1010` (Imagination Technologies) a `my_vkGetPhysicalDeviceProperties()` para mapear correctamente los perfiles PowerVR.
+- **Dead Code Cleanup (PR25-003):** Eliminada detección duplicada de `PROC_OSRELEASE` en la cadena FileType de `my_open()`.
+**Prompt del usuario:** "Despliegue de Omni-Shield v12.9.4 (A53 Feature Fidelity — PR25)"
+**Nota personal para el siguiente agente:** Post-PR25, los 40 perfiles pasan 472/472 checks en 14 vectores de detección con 0 CRITICAL y 0 WARN. La única área de mejora pendiente es el mapping fino de `cpuinfo_max_freq` por plataforma (actualmente binario 2841600/2000000), pero su impacto de detección es mínimo.

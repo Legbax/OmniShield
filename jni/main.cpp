@@ -380,7 +380,8 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 // -----------------------------------------------------------------------------
 
 static std::string getArmFeatures(const std::string& platform) {
-    if (platform.find("mt6768") != std::string::npos || platform.find("sdm670") != std::string::npos || platform.find("exynos850") != std::string::npos)
+    if (platform.find("mt6768") != std::string::npos || platform.find("mt6765") != std::string::npos ||
+        platform.find("sdm670") != std::string::npos || platform.find("exynos850") != std::string::npos)
         return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm";
     return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp";
 }
@@ -802,7 +803,6 @@ int my_open(const char *pathname, int flags, mode_t mode) {
             type = PROC_ETH0_MAC;
         }
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
-        else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
@@ -1371,6 +1371,8 @@ void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysica
             pProperties->vendorID = 0x5143; // Qualcomm
         } else if (egl == "mali") {
             pProperties->vendorID = 0x13B5; // ARM
+        } else if (egl == "powervr") {
+            pProperties->vendorID = 0x1010; // Imagination Technologies
         }
     }
 }
