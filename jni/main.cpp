@@ -45,6 +45,38 @@ static std::string g_currentProfileName = "Redmi 9";
 static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
+static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
+
+// PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
+static double g_cachedLat       = 0.0;
+static double g_cachedLon       = 0.0;
+static double g_cachedAlt       = 0.0;
+static bool   g_locationCached  = false;
+
+// PR38+39: Sensor chip statics — valores del perfil activo para los hooks de Sensor
+// Definidos aquí para linkage correcto (los hooks son structs locales en postAppSpecialize)
+static float  g_sensorAccelMax  = 78.4532f;   // Default LSM6DSO
+static float  g_sensorAccelRes  = 0.0023946f;
+static float  g_sensorGyroMax   = 34.906586f;
+static float  g_sensorGyroRes   = 0.001064f;
+static float  g_sensorMagMax    = 4912.0f;
+
+// PR38+39: Seed version — para detectar rotación de seed desde la UI
+static long   g_seedVersion        = 0;
+// PR38+39: Sensor presence flags — leídos del perfil activo en postAppSpecialize
+// Usados por SensorListHook para filtrar sensores ausentes en el perfil emulado
+static bool   g_sensorHasHeartRate = false;
+static bool   g_sensorHasBarometer = false;
+
+// PR38+39: Inicializar caché de GPS (llamar en postAppSpecialize tras readConfig)
+static void initLocationCache() {
+    if (!g_locationCached && !g_currentProfileName.empty() && g_masterSeed != 0) {
+        omni::engine::generateLocationForRegion(g_currentProfileName, g_masterSeed,
+                                                g_cachedLat, g_cachedLon);
+        g_cachedAlt    = omni::engine::generateAltitudeForRegion(g_currentProfileName, g_masterSeed);
+        g_locationCached = true;
+    }
+}
 
 struct CachedContent {
     std::string content;
@@ -66,7 +98,10 @@ enum FileType {
     PROC_DTB_MODEL,
     PROC_ETH0_MAC,
     PROC_SELF_STATUS, SYS_CPU_TOPOLOGY, BAT_TECHNOLOGY, BAT_PRESENT,
-    SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP
+    SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP,
+    PROC_BOOT_ID,         // /proc/sys/kernel/random/boot_id — UUID único por device
+    SYS_CPU_FREQ_AVAIL,   // scaling_available_frequencies — firma de plataforma CPU
+    PROC_SELF_CGROUP      // /proc/self/cgroup — puede revelar namespace KernelSU
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -165,9 +200,21 @@ void readConfig() {
             g_config[key] = val;
         }
     }
-    if (g_config.count("profile")) g_currentProfileName = g_config["profile"];
-    if (g_config.count("master_seed")) try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
-    if (g_config.count("jitter")) g_enableJitter = (g_config["jitter"] == "true");
+    if (g_config.count("profile"))       g_currentProfileName = g_config["profile"];
+    if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
+    if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
+    if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
+    // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
+    // Permite que el módulo invalide caches en el próximo arranque de la app
+    if (g_config.count("seed_version")) {
+        long newSeedVersion = 0;
+        try { newSeedVersion = std::stol(g_config["seed_version"]); } catch(...) {}
+        if (omni::engine::isSeedVersionChanged(newSeedVersion, g_seedVersion)) {
+            // Seed rotado: invalidar caché de GPS para forzar recálculo con nuevo seed
+            g_locationCached = false;
+            g_seedVersion    = newSeedVersion;
+        }
+    }
 }
 
 bool shouldHide(const char* key) {
@@ -510,6 +557,26 @@ ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
+// PR37: UUID v4 determinístico desde seed para boot_id
+static std::string generateBootId(long seed) {
+    long s = seed ^ 0xDEADBEEFL;
+    auto nextNibble = [&]() -> char {
+        s = s * 6364136223846793005LL + 1442695040888963407LL;
+        return "0123456789abcdef"[((s >> 33) ^ s) & 0xF];
+    };
+    std::string u;
+    u.reserve(36);
+    for (int i = 0; i < 8;  ++i) u += nextNibble(); u += '-';
+    for (int i = 0; i < 4;  ++i) u += nextNibble(); u += '-';
+    u += '4';
+    for (int i = 0; i < 3;  ++i) u += nextNibble(); u += '-';
+    s = s * 6364136223846793005LL + 1442695040888963407LL;
+    u += "89ab"[((s >> 33) ^ s) & 0x3];
+    for (int i = 0; i < 3;  ++i) u += nextNibble(); u += '-';
+    for (int i = 0; i < 12; ++i) u += nextNibble();
+    return u;
+}
+
 // -----------------------------------------------------------------------------
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
@@ -707,6 +774,17 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
+        // PR37: Network type spoofing — activo solo cuando network_type=lte en config
+        // Oculta señales de conectividad WiFi ante apps que leen system properties
+        else if (g_spoofMobileNetwork && (k == "wifi.interface" ||
+                 k == "dhcp.wlan0.ipaddress" || k == "dhcp.wlan0.dns1" ||
+                 k == "dhcp.wlan0.server"    || k == "net.wifi.ssid"   ||
+                 k == "wifi.on"              || k == "wlan.driver.status")) {
+            dynamic_buffer = "";  // Ocultar señales WiFi
+        }
+        else if (g_spoofMobileNetwork && k == "gsm.network.state") {
+            dynamic_buffer = "CONNECTED";  // Confirmar conexión celular activa
+        }
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
             dynamic_buffer = fp.radioVersion;
         }
@@ -796,6 +874,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         errno = EACCES;
         return -1;
     }
+    // PR37: Bloquear filesystems (revela overlay/erofs de Magisk/KSU)
+    if (path_str == "/proc/filesystems") {
+        errno = EACCES;
+        return -1;
+    }
     if (path_str == "/proc/iomem") {
         return orig_open("/dev/null", flags, mode);
     }
@@ -881,6 +964,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                  strcmp(pathname, "/proc/net/tcp6") == 0)  type = PROC_NET_TCP;
         else if (strcmp(pathname, "/proc/net/udp") == 0 ||
                  strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
+        // PR37: Nuevos VFS handlers
+        else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
+        else if (strcmp(pathname, "/proc/self/cgroup") == 0)               type = PROC_SELF_CGROUP;
+        else if (strstr(pathname, "scaling_available_frequencies"))         type = SYS_CPU_FREQ_AVAIL;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -1195,18 +1282,35 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == BT_NAME) {
                     content = std::string(fp.model) + "\n";
                 // PR20: Tabla ARP virtualizada (oculta MAC real del gateway)
+                // PR37: En modo LTE tabla vacía — datos móviles no exponen gateway ARP local
                 } else if (type == PROC_NET_ARP) {
-                    content = "IP address       HW type  Flags  HW address            Mask     Device\n"
-                              "192.168.1.1      0x1      0x2    00:00:00:00:00:00     *        wlan0\n";
+                    if (g_spoofMobileNetwork) {
+                        content = "IP address       HW type  Flags  HW address            Mask     Device\n";
+                    } else {
+                        content = "IP address       HW type  Flags  HW address            Mask     Device\n"
+                                  "192.168.1.1      0x1      0x2    00:00:00:00:00:00     *        wlan0\n";
+                    }
                 // PR20: Estadísticas de red virtualizadas (oculta TX/RX real)
+                // PR37: En modo LTE mostrar rmnet_data0 en lugar de wlan0
                 } else if (type == PROC_NET_DEV) {
-                    content = "Inter-|   Receive                                                |  Transmit\n"
-                              " face |bytes    packets errs drop fifo frame compressed multicast|"
-                              "bytes    packets errs drop fifo colls carrier compressed\n"
-                              "    lo:       0       0    0    0    0     0          0         0"
-                              "        0       0    0    0    0     0       0          0\n"
-                              " wlan0:  524288    4096    0    0    0     0          0         0"
-                              "   131072    1024    0    0    0     0       0          0\n";
+                    if (g_spoofMobileNetwork) {
+                        // Interfaz de datos móviles con stats LTE realistas
+                        content = "Inter-|   Receive                                                |  Transmit\n"
+                                  " face |bytes    packets errs drop fifo frame compressed multicast|"
+                                  "bytes    packets errs drop fifo colls carrier compressed\n"
+                                  "    lo:       0       0    0    0    0     0          0         0"
+                                  "        0       0    0    0    0     0       0          0\n"
+                                  "rmnet_data0:  2097152    8192    0    0    0     0          0         0"
+                                  "   524288    2048    0    0    0     0       0          0\n";
+                    } else {
+                        content = "Inter-|   Receive                                                |  Transmit\n"
+                                  " face |bytes    packets errs drop fifo frame compressed multicast|"
+                                  "bytes    packets errs drop fifo colls carrier compressed\n"
+                                  "    lo:       0       0    0    0    0     0          0         0"
+                                  "        0       0    0    0    0     0       0          0\n"
+                                  " wlan0:  524288    4096    0    0    0     0          0         0"
+                                  "   131072    1024    0    0    0     0       0          0\n";
+                    }
                 // PR32: Tabla TCP virtualizada — oculta IPs locales y puertos de servicios reales
                 } else if (type == PROC_NET_TCP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
@@ -1214,7 +1318,39 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 // PR32: Tabla UDP virtualizada — ídem
                 } else if (type == PROC_NET_UDP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
-                // Añade esto al final de los else if del contenido VFS
+
+                // PR37: boot_id — UUID determinístico desde seed (Firebase/AppsFlyer lo correlacionan)
+                } else if (type == PROC_BOOT_ID) {
+                    content = generateBootId(g_masterSeed) + "\n";
+
+                // PR37: /proc/self/cgroup — valor genérico de untrusted_app stock
+                } else if (type == PROC_SELF_CGROUP) {
+                    content = "0::/\n";
+
+                // PR37: scaling_available_frequencies — firma de plataforma CPU por SoC
+                } else if (type == SYS_CPU_FREQ_AVAIL) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if      (plat.find("lahaina")  != std::string::npos) content = "300000 576000 768000 1094400 1401600 1766400 2016000 2265600 2457600 2841600\n";
+                    else if (plat.find("kona")     != std::string::npos) content = "300000 576000 768000 1171200 1401600 1766400 1996800 2265600 2457600 2841600\n";
+                    else if (plat.find("msmnile")  != std::string::npos) content = "300000 576000 768000 1056000 1200000 1401600 1536000 1612800 2016000 2419200 2841600\n";
+                    else if (plat.find("lito")     != std::string::npos ||
+                             plat.find("atoll")    != std::string::npos) content = "300000 576000 768000 1056000 1200000 1401600 1612800 1708800 2016000 2208000 2323200 2515200\n";
+                    else if (plat.find("sm7325")   != std::string::npos) content = "300000 652800 806400 1056000 1209600 1401600 1516800 1612800 2016000 2246400 2515200 2726400\n";
+                    else if (plat.find("sm6350")   != std::string::npos) content = "300000 633600 768000 1036800 1228800 1497600 1612800 1804800\n";
+                    else if (plat.find("bengal")   != std::string::npos ||
+                             plat.find("holi")     != std::string::npos) content = "614400 864000 1056000 1248000 1401600 1497600\n";
+                    else if (plat.find("sm6150")   != std::string::npos) content = "825600 1056000 1209600 1459200 1612800 1766400 1881600 2016000 2208000\n";
+                    else if (plat.find("sdm670")   != std::string::npos) content = "825600 1056000 1209600 1612800 1804800 2073600 2208000\n";
+                    else if (plat.find("mt6785")   != std::string::npos) content = "500000 671875 1000000 1218750 1343750 1500000 1671875 1843750 2062500\n";
+                    else if (plat.find("mt6768")   != std::string::npos ||
+                             plat.find("mt6769")   != std::string::npos) content = "500000 625000 718750 828750 937500 1078750 1178750 1318750 1418750\n";
+                    else if (plat.find("mt6853")   != std::string::npos ||
+                             plat.find("mt6833")   != std::string::npos) content = "500000 718750 1000000 1218750 1343750 1500000 1671875 1843750 2062500\n";
+                    else if (plat.find("mt6765")   != std::string::npos) content = "500000 625000 750000 875000 1000000 1125000 1250000 1350000\n";
+                    else if (plat.find("mt6")      != std::string::npos) content = "500000 718750 1078750 1418750 1756250 1900000\n";
+                    else                                                  content = "300000 576000 768000 1248000 1574400 1766400\n";
+
+                // SYS_CPU_TOPOLOGY (existente, no mover)
                 } else if (type == SYS_CPU_TOPOLOGY) {
                     content = "0-" + std::to_string(fp.core_count - 1) + "\n";
                 } else if (type == BAT_TECHNOLOGY) {
@@ -1258,6 +1394,11 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
 
     std::string path_str(pathname);
     if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+        errno = EACCES;
+        return -1;
+    }
+    // PR37: Bloquear filesystems (revela overlay/erofs de Magisk/KSU)
+    if (path_str == "/proc/filesystems") {
         errno = EACCES;
         return -1;
     }
@@ -1692,6 +1833,19 @@ public:
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
+        // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
+        initLocationCache();
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            const auto& sp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            g_sensorAccelMax      = sp.accelMaxRange;
+            g_sensorAccelRes      = sp.accelResolution;
+            g_sensorGyroMax       = sp.gyroMaxRange;
+            g_sensorGyroRes       = sp.gyroResolution;
+            g_sensorMagMax        = sp.magMaxRange;
+            g_sensorHasHeartRate  = sp.hasHeartRateSensor;
+            g_sensorHasBarometer  = sp.hasBarometerSensor;
+        }
+
         // Libc Hooks (Phase 1)
         void* open_func = DobbySymbolResolver(nullptr, "open");
         if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
@@ -1756,9 +1910,12 @@ public:
 
                 jclass str_array_class = env->FindClass("java/lang/String");
 
-                jobjectArray supp_abis_arr = env->NewObjectArray(2, str_array_class, nullptr);
+                // PR37 FIX: SUPPORTED_ABIS debe tener 3 entradas (arm64-v8a, armeabi-v7a, armeabi)
+                // 2 entradas era un bug de PR36 — cualquier ARM64 real reporta las 3
+                jobjectArray supp_abis_arr = env->NewObjectArray(3, str_array_class, nullptr);
                 env->SetObjectArrayElement(supp_abis_arr, 0, abi64);
                 env->SetObjectArrayElement(supp_abis_arr, 1, abi32);
+                env->SetObjectArrayElement(supp_abis_arr, 2, abi_legacy);
 
                 jobjectArray supp_64_arr = env->NewObjectArray(1, str_array_class, nullptr);
                 env->SetObjectArrayElement(supp_64_arr, 0, abi64);
@@ -1780,6 +1937,54 @@ public:
 
                 jfieldID fid_supp_64 = env->GetStaticFieldID(build_class, "SUPPORTED_64_BIT_ABIS", "[Ljava/lang/String;");
                 if (fid_supp_64) env->SetStaticObjectField(build_class, fid_supp_64, supp_64_arr);
+
+                // PR37: Expandir sync a todos los campos Build.* inicializados por Zygote
+                // Estos campos tienen el valor del hardware FÍSICO hasta que los sobrescribimos aquí.
+                // SetStaticObjectField es indetectable — es idéntico a como Zygote los inicializó.
+                if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                    const auto& bfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+
+                    auto setStr = [&](const char* field, const char* val) {
+                        if (!val) return;
+                        jfieldID fid = env->GetStaticFieldID(build_class, field, "Ljava/lang/String;");
+                        if (fid) env->SetStaticObjectField(build_class, fid, env->NewStringUTF(val));
+                    };
+
+                    // Campos principales de Build
+                    setStr("MODEL",        bfp.model);
+                    setStr("BRAND",        bfp.brand);
+                    setStr("MANUFACTURER", bfp.manufacturer);
+                    setStr("DEVICE",       bfp.device);
+                    setStr("PRODUCT",      bfp.product);
+                    setStr("HARDWARE",     bfp.hardware);
+                    setStr("BOARD",        bfp.board);
+                    setStr("FINGERPRINT",  bfp.fingerprint);
+                    setStr("ID",           bfp.buildId);
+                    setStr("DISPLAY",      bfp.display);
+
+                    // Build.SERIAL (API 28+ requiere permiso, pero el campo estático existe)
+                    jfieldID fid_serial = env->GetStaticFieldID(build_class, "SERIAL", "Ljava/lang/String;");
+                    if (fid_serial) {
+                        std::string serial = omni::engine::generateRandomSerial(bfp.brand, g_masterSeed, bfp.securityPatch);
+                        env->SetStaticObjectField(build_class, fid_serial, env->NewStringUTF(serial.c_str()));
+                    }
+
+                    // Build.VERSION.SECURITY_PATCH — en clase anidada Build$VERSION
+                    jclass build_version_class = env->FindClass("android/os/Build$VERSION");
+                    if (build_version_class) {
+                        jfieldID fid_sp = env->GetStaticFieldID(build_version_class, "SECURITY_PATCH", "Ljava/lang/String;");
+                        if (fid_sp) env->SetStaticObjectField(build_version_class, fid_sp,
+                            env->NewStringUTF(bfp.securityPatch));
+
+                        jfieldID fid_release = env->GetStaticFieldID(build_version_class, "RELEASE", "Ljava/lang/String;");
+                        if (fid_release) env->SetStaticObjectField(build_version_class, fid_release,
+                            env->NewStringUTF(bfp.release));
+
+                        jfieldID fid_incr = env->GetStaticFieldID(build_version_class, "INCREMENTAL", "Ljava/lang/String;");
+                        if (fid_incr) env->SetStaticObjectField(build_version_class, fid_incr,
+                            env->NewStringUTF(bfp.incremental));
+                    }
+                }
             }
         }
 
@@ -1851,7 +2056,226 @@ public:
         api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
         api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
 
-        LOGD("System Integrity loaded. Profile: %s", g_currentProfileName.c_str());
+        // PR38+39: Location spoofing hooks
+        // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
+        // pero los getters son métodos Java locales sobre el Parcel deserializado).
+        // isFromMockProvider DEBE ser false — Snapchat lo verifica explícitamente.
+        // Coordenadas coherentes con región del perfil → MCC/timezone/locale alineados.
+        {
+            struct LocationHook {
+                static jdouble getLatitude(JNIEnv*, jobject)  { return g_cachedLat; }
+                static jdouble getLongitude(JNIEnv*, jobject) { return g_cachedLon; }
+                static jdouble getAltitude(JNIEnv*, jobject)  { return g_cachedAlt; }
+                static jfloat  getAccuracy(JNIEnv*, jobject) {
+                    // Precisión GPS realista: 4-12 metros (buen fix satelital)
+                    return 4.0f + (float)(g_masterSeed % 8);
+                }
+                static jfloat  getVerticalAccuracyMeters(JNIEnv*, jobject) {
+                    return 8.0f + (float)(g_masterSeed % 6);
+                }
+                static jboolean isFromMockProvider(JNIEnv*, jobject) {
+                    return JNI_FALSE;  // CRÍTICO: nunca revelar que la location es mock
+                }
+                static jfloat  getSpeed(JNIEnv*, jobject)   { return 0.0f; }
+                static jfloat  getBearing(JNIEnv*, jobject) { return 0.0f; }
+                static jlong   getTime(JNIEnv*, jobject) {
+                    struct timespec ts;
+                    clock_gettime(CLOCK_REALTIME, &ts);
+                    return (jlong)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+                }
+            };
+            JNINativeMethod locationMethods[] = {
+                {"getLatitude",               "()D", (void*)LocationHook::getLatitude},
+                {"getLongitude",              "()D", (void*)LocationHook::getLongitude},
+                {"getAltitude",               "()D", (void*)LocationHook::getAltitude},
+                {"getAccuracy",               "()F", (void*)LocationHook::getAccuracy},
+                {"getVerticalAccuracyMeters", "()F", (void*)LocationHook::getVerticalAccuracyMeters},
+                {"isFromMockProvider",        "()Z", (void*)LocationHook::isFromMockProvider},
+                {"getSpeed",                  "()F", (void*)LocationHook::getSpeed},
+                {"getBearing",                "()F", (void*)LocationHook::getBearing},
+                {"getTime",                   "()J", (void*)LocationHook::getTime},
+            };
+            api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
+        }
+
+        // PR38+39: ConnectivityManager — NetworkInfo getters
+        // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
+        // Solo activo cuando network_type=lte (g_spoofMobileNetwork=true).
+        if (g_spoofMobileNetwork) {
+            struct NetworkInfoHook {
+                static jint     getType(JNIEnv*, jobject)        { return 0; }   // TYPE_MOBILE
+                static jstring  getTypeName(JNIEnv* e, jobject)  { return e->NewStringUTF("mobile"); }
+                static jint     getSubtype(JNIEnv*, jobject)     { return 13; }  // LTE
+                static jstring  getSubtypeName(JNIEnv* e, jobject) { return e->NewStringUTF("LTE"); }
+                static jstring  getExtraInfo(JNIEnv*, jobject)   { return nullptr; } // WiFi retorna SSID; mobile = null
+                static jboolean isConnected(JNIEnv*, jobject)    { return JNI_TRUE; }
+                static jboolean isAvailable(JNIEnv*, jobject)    { return JNI_TRUE; }
+                static jboolean isRoaming(JNIEnv*, jobject)      { return JNI_FALSE; }
+            };
+            JNINativeMethod networkInfoMethods[] = {
+                {"getType",        "()I",                  (void*)NetworkInfoHook::getType},
+                {"getTypeName",    "()Ljava/lang/String;", (void*)NetworkInfoHook::getTypeName},
+                {"getSubtype",     "()I",                  (void*)NetworkInfoHook::getSubtype},
+                {"getSubtypeName", "()Ljava/lang/String;", (void*)NetworkInfoHook::getSubtypeName},
+                {"getExtraInfo",   "()Ljava/lang/String;", (void*)NetworkInfoHook::getExtraInfo},
+                {"isConnected",    "()Z",                  (void*)NetworkInfoHook::isConnected},
+                {"isAvailable",    "()Z",                  (void*)NetworkInfoHook::isAvailable},
+                {"isRoaming",      "()Z",                  (void*)NetworkInfoHook::isRoaming},
+            };
+            api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
+        }
+
+        // PR37: Network type spoofing hooks
+        // Interceptar WifiInfo para ocultar SSID/BSSID cuando g_spoofMobileNetwork=true
+        // NOTA ARQUITECTÓNICA: ConnectivityManager.getActiveNetworkInfo().getType() es Java puro
+        // y pasa por Binder (system_server). No es hookeable con hookJniNativeMethods.
+        // La cobertura aquí es: WifiInfo nativa + system properties + VFS /proc/net/dev.
+        // Cobertura completa de ConnectivityManager requeriría companion app con system perms.
+        if (g_spoofMobileNetwork) {
+            // WifiInfo — tiene métodos nativos accesibles
+            struct WifiInfoHook {
+                static jstring getSSID(JNIEnv* e, jobject) {
+                    return e->NewStringUTF("");  // Sin SSID — no hay red WiFi
+                }
+                static jstring getBSSID(JNIEnv* e, jobject) {
+                    return e->NewStringUTF("02:00:00:00:00:00");  // BSSID nulo AOSP
+                }
+                static jint getRssi(JNIEnv*, jobject) {
+                    return -127;  // Sin señal WiFi
+                }
+                static jint getNetworkId(JNIEnv*, jobject) {
+                    return -1;  // No conectado a ninguna red WiFi
+                }
+            };
+            JNINativeMethod wifiInfoMethods[] = {
+                {"getSSID",     "()Ljava/lang/String;", (void*)WifiInfoHook::getSSID},
+                {"getBSSID",    "()Ljava/lang/String;", (void*)WifiInfoHook::getBSSID},
+                {"getRssi",     "()I",                  (void*)WifiInfoHook::getRssi},
+                {"getNetworkId","()I",                  (void*)WifiInfoHook::getNetworkId},
+            };
+            api->hookJniNativeMethods(env, "android/net/wifi/WifiInfo", wifiInfoMethods, 4);
+
+            // PR38+39: WifiManager — getScanResults vacío elimina triangulación Wi-Fi
+            // BSSIDs de APs locales → triangulación geográfica exacta sin GPS activo.
+            // Lista vacía = WiFi "apagado", sin APs visibles.
+            struct WifiManagerHook {
+                static jobject getScanResults(JNIEnv* e, jobject) {
+                    jclass cls = e->FindClass("java/util/ArrayList");
+                    jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
+                    return e->NewObject(cls, ctor);
+                }
+                static jboolean isWifiEnabled(JNIEnv*, jobject)  { return JNI_FALSE; }
+                static jint     getWifiState(JNIEnv*, jobject)   { return 1; }  // WIFI_STATE_DISABLED
+                static jboolean startScan(JNIEnv*, jobject)      { return JNI_FALSE; }
+            };
+            JNINativeMethod wifiManagerMethods[] = {
+                {"getScanResults", "()Ljava/util/List;", (void*)WifiManagerHook::getScanResults},
+                {"isWifiEnabled",  "()Z",                (void*)WifiManagerHook::isWifiEnabled},
+                {"getWifiState",   "()I",                (void*)WifiManagerHook::getWifiState},
+                {"startScan",      "()Z",                (void*)WifiManagerHook::startScan},
+            };
+            api->hookJniNativeMethods(env, "android/net/wifi/WifiManager", wifiManagerMethods, 4);
+        }
+
+        // PR38+39: Sensor metadata hooks
+        // Spoofing de metadatos numéricos que identifican el chip físico.
+        // g_sensorAccelMax etc. se cargaron al inicio de postAppSpecialize.
+        // DISEÑO: getMaximumRange/getResolution discriminan por getType() del objeto
+        // para retornar el rango correcto (accel ≠ gyro ≠ mag).
+        {
+            struct SensorMetaHook {
+                static jfloat getMaximumRange(JNIEnv* e, jobject sensorObj) {
+                    jclass cls = e->GetObjectClass(sensorObj);
+                    jmethodID mid = e->GetMethodID(cls, "getType", "()I");
+                    if (!mid) return g_sensorAccelMax;
+                    switch (e->CallIntMethod(sensorObj, mid)) {
+                        case 4:  return g_sensorGyroMax;   // TYPE_GYROSCOPE
+                        case 2:  return g_sensorMagMax;    // TYPE_MAGNETIC_FIELD
+                        default: return g_sensorAccelMax;  // TYPE_ACCELEROMETER + resto
+                    }
+                }
+                static jfloat getResolution(JNIEnv* e, jobject sensorObj) {
+                    jclass cls = e->GetObjectClass(sensorObj);
+                    jmethodID mid = e->GetMethodID(cls, "getType", "()I");
+                    if (!mid) return g_sensorAccelRes;
+                    switch (e->CallIntMethod(sensorObj, mid)) {
+                        case 4:  return g_sensorGyroRes;
+                        case 2:  return 0.15f;  // Resolución magnetómetro: 0.15µT (estándar)
+                        default: return g_sensorAccelRes;
+                    }
+                }
+                static jfloat getPower(JNIEnv*, jobject) {
+                    return 0.57f;  // Consumo MEMS combinado típico: 0.57 mA
+                }
+                static jint getMinDelay(JNIEnv*, jobject) {
+                    // LSM6DSO/BMI160 → 200Hz max = 5000µs mín
+                    // BMA4xy → 100Hz max = 10000µs mín
+                    return (g_sensorAccelMax > 60.0f) ? 5000 : 10000;
+                }
+                static jint getMaxDelay(JNIEnv*, jobject)          { return 200000; }
+                static jint getVersion(JNIEnv*, jobject)           { return 1; }
+                static jint getFifoMaxEventCount(JNIEnv*, jobject) {
+                    // LSM6DSO: 3072 samples; BMI160: 1024; BMA4xy: 256
+                    if (g_sensorAccelMax > 100.0f) return 1024;   // BMI160
+                    if (g_sensorAccelMax > 60.0f)  return 3072;   // LSM6DSO
+                    return 256;                                     // BMA4xy/BMA253
+                }
+                static jint getFifoReservedEventCount(JNIEnv*, jobject) { return 0; }
+            };
+            JNINativeMethod sensorMethods[] = {
+                {"getMaximumRange",          "()F", (void*)SensorMetaHook::getMaximumRange},
+                {"getResolution",            "()F", (void*)SensorMetaHook::getResolution},
+                {"getPower",                 "()F", (void*)SensorMetaHook::getPower},
+                {"getMinDelay",              "()I", (void*)SensorMetaHook::getMinDelay},
+                {"getMaxDelay",              "()I", (void*)SensorMetaHook::getMaxDelay},
+                {"getVersion",               "()I", (void*)SensorMetaHook::getVersion},
+                {"getFifoMaxEventCount",     "()I", (void*)SensorMetaHook::getFifoMaxEventCount},
+                {"getFifoReservedEventCount","()I", (void*)SensorMetaHook::getFifoReservedEventCount},
+            };
+            api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
+        }
+
+        // PR38+39: SensorManager.getSensorList(int type) filter
+        // TYPE_HEART_RATE=21, TYPE_PRESSURE=6.
+        // Cuando el perfil activo no tiene ese sensor, retornar lista vacía
+        // para que la app no vea un sensor que el modelo declarado no tendría.
+        // COBERTURA: solo los 2 tipos más diferenciadores entre modelos.
+        // No se añaden sensores virtuales (coste > beneficio para este PR).
+        {
+            struct SensorListHook {
+                static jobject getSensorList(JNIEnv* e, jobject, jint type) {
+                    // TYPE_HEART_RATE=21: solo Galaxy S20 FE lo tiene en el catálogo
+                    if (type == 21 && !g_sensorHasHeartRate) {
+                        jclass cls = e->FindClass("java/util/ArrayList");
+                        if (cls) {
+                            jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
+                            if (ctor) return e->NewObject(cls, ctor);
+                        }
+                    }
+                    // TYPE_PRESSURE=6: barómetro — ausente en varios modelos mid-range
+                    if (type == 6 && !g_sensorHasBarometer) {
+                        jclass cls = e->FindClass("java/util/ArrayList");
+                        if (cls) {
+                            jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
+                            if (ctor) return e->NewObject(cls, ctor);
+                        }
+                    }
+                    // Para cualquier otro tipo: retornar nullptr = llamada no interceptada,
+                    // hookJniNativeMethods llama al original automáticamente
+                    return nullptr;
+                }
+            };
+            JNINativeMethod sensorListMethods[] = {
+                {"getSensorList", "(I)Ljava/util/List;", (void*)SensorListHook::getSensorList},
+            };
+            api->hookJniNativeMethods(env, "android/hardware/SensorManager",
+                                      sensorListMethods, 1);
+        }
+
+        LOGD("System Integrity loaded. Profile: %s | LTE: %s | GPS: %.4f,%.4f",
+             g_currentProfileName.c_str(),
+             g_spoofMobileNetwork ? "ON" : "OFF",
+             g_cachedLat, g_cachedLon);
     }
     void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}

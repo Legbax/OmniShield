@@ -279,5 +279,46 @@ inline std::string generateTls12CipherSuites(long seed) {
 
 inline const char* getGlVersionForProfile(const DeviceFingerprint& fp) { return fp.gpuVersion; }
 
+// PR38+39: GPS — coordenadas determinísticas coherentes con región del perfil.
+// Genera lat/lon dentro del rango geográfico correcto (ciudad representativa ± ~2km).
+// Usando el mismo g_masterSeed garantiza coherencia entre sesiones sin cambiar identidad.
+inline void generateLocationForRegion(const std::string& profileName, long seed,
+                                       double& outLat, double& outLon) {
+    Random rng(seed + 9999LL);
+    std::string region = getRegionForProfile(profileName);
+
+    double baseLat, baseLon;
+    // Ciudades base coherentes con MCC/timezone/locale del perfil
+    if      (region == "europe") { baseLat = 51.5074;  baseLon = -0.1278;  }  // Londres
+    else if (region == "latam")  { baseLat = -23.5505; baseLon = -46.6333; }  // São Paulo
+    else if (region == "india")  { baseLat = 19.0760;  baseLon = 72.8777;  }  // Mumbai
+    else                         { baseLat = 40.7128;  baseLon = -74.0060; }  // Nueva York
+
+    // Jitter determinístico ±0.02° (≈ 2km de radio) — simula posición específica
+    double jitterLat = (rng.nextInt(4000) - 2000) / 100000.0;
+    double jitterLon = (rng.nextInt(4000) - 2000) / 100000.0;
+    outLat = baseLat + jitterLat;
+    outLon = baseLon + jitterLon;
+}
+
+// PR38+39: Altitud determinística realista por región (metros sobre nivel del mar)
+inline double generateAltitudeForRegion(const std::string& profileName, long seed) {
+    Random rng(seed + 8888LL);
+    std::string region = getRegionForProfile(profileName);
+    if (region == "latam")  return 760.0 + (rng.nextInt(40));  // São Paulo ~760-800m
+    if (region == "europe") return 5.0   + (rng.nextInt(20));  // Londres ~5-25m
+    if (region == "india")  return 8.0   + (rng.nextInt(25));  // Mumbai ~8-33m
+    return 10.0 + (rng.nextInt(25));                           // NYC ~10-35m
+}
+
+// PR38+39: Seed version tracking — permite detectar rotación de seed desde la UI.
+// La UI companion escribe seed_version=N en el config cuando rota el master_seed.
+// El módulo compara el seed_version almacenado vs el del config para invalidar
+// caches derivadas del seed anterior (location, serial, android_id, etc.).
+// El seed_version=0 (default) significa "sin rotación configurada".
+inline bool isSeedVersionChanged(long currentSeedVersion, long storedSeedVersion) {
+    return currentSeedVersion != 0 && currentSeedVersion != storedSeedVersion;
+}
+
 } // namespace engine
 } // namespace omni
