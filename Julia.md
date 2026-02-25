@@ -63,6 +63,28 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR38+39 — Sensor, Location & Network Complete)
+**Resumen de cambios:** v12.9.18 — Sensor Metadata, GPS Coherence, Network Complete, Seed Rotation Support.
+- **Sensor Metadata (CRÍTICO):** Hook de 8 métodos numéricos de `android/hardware/Sensor`: `getMaximumRange`, `getResolution`, `getPower`, `getMinDelay`, `getMaxDelay`, `getVersion`, `getFifoMaxEventCount`, `getFifoReservedEventCount`. Los valores se derivan de una tabla canónica de chips por SoC (LSM6DSO/BMI160/BMA4xy/BMA253 según plataforma). `getMaximumRange` y `getResolution` discriminan por `getType()` del objeto para retornar accel/gyro/mag correctamente.
+- **DeviceFingerprint ampliado:** 8 nuevos campos en el struct: 5 floats de sensor (`accelMaxRange`, `accelResolution`, `gyroMaxRange`, `gyroResolution`, `magMaxRange`) + 3 bools de presencia (`hasHeartRateSensor`, `hasBarometerSensor`, `hasFingerprintWakeupSensor`). Los 40 perfiles actualizados.
+- **GPS Location Spoofing (CRÍTICO):** Hook de 9 métodos de `android/location/Location`. `isFromMockProvider` siempre false. Coordenadas determinísticas desde `g_masterSeed`, coherentes con región (NYC/Londres/São Paulo/Mumbai según MCC del perfil). `generateLocationForRegion()` + `generateAltitudeForRegion()` en `omni_engine.hpp`.
+- **Sensor list filter (MEDIO):** Hook de `SensorManager.getSensorList(int)` retornando lista vacía para `TYPE_HEART_RATE=21` y `TYPE_PRESSURE=6` cuando el perfil activo no los tiene. Elimina la discrepancia entre sensores del Redmi 9 físico y los del modelo declarado.
+- **ConnectivityManager completo (MEDIO):** 8 métodos de `android/net/NetworkInfo` hookeados cuando `network_type=lte`: `getType=TYPE_MOBILE`, `getSubtype=LTE(13)`, `getExtraInfo=null`, `isConnected/isAvailable=true`, `isRoaming=false`.
+- **WifiManager.getScanResults() (MEDIO):** Lista vacía + `isWifiEnabled=false` + `startScan=false` en modo LTE. Elimina vector de triangulación Wi-Fi.
+- **Seed version rotation (BAJO):** Campo `seed_version` en `.identity.cfg`. Cuando la UI incrementa este campo, el módulo invalida la caché de GPS en el próximo reinicio de app. Soporte base para rotación periódica de identidad.
+**Prompt del usuario:** "Combina el PR38 y el PR39 en un único PR."
+**Nota personal para el siguiente agente:** La función `SensorMetaHook::getMaximumRange()` es la única del codebase que llama de vuelta a un método Java del objeto original dentro de un hook — necesita `GetObjectClass` + `GetMethodID("getType")` + `CallIntMethod`. Si esto genera re-entradas problemáticas en el futuro, la alternativa es usar un mapa global `fd→sensor_type` pre-cacheado en `SensorManager.registerListener()`. Por ahora el diseño actual es correcto para Android 11. Los globals `g_sensorHasHeartRate` y `g_sensorHasBarometer` son los únicos puntos donde un hook lee estado del perfil via global bool en lugar de acceder a `G_DEVICE_PROFILES` directamente — esto es intencional para evitar overhead en el hot path de `getSensorList`.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR37 — Identity Seal Complete)
+**Resumen de cambios:** v12.9.17 — Identity Seal Complete (Boot ID, Cgroups, SSAID, LTE Spoofing).
+- **Identity Vectors:** Virtualización de `/proc/sys/kernel/random/boot_id` (deterministic UUID), `/proc/self/cgroup` (untrusted_app generic), y `scaling_available_frequencies` (SoC specific).
+- **Network Spoofing:** Implementación de `g_spoofMobileNetwork` para simular conexiones LTE ocultando interfaces WiFi en VFS y JNI (`WifiInfo`), y falsificando propiedades de estado de red.
+- **JNI Hardening:** Sincronización expandida de `android.os.Build` para cubrir campos inicializados por Zygote, y corrección de `SUPPORTED_ABIS` para incluir `armeabi`.
+- **Forensic Shield:** Bloqueo de `/proc/filesystems` para ocultar firmas de overlayfs/erofs.
+- **Persistence:** Inyección de SSAID vía `service.sh` para persistir la identidad del dispositivo en apps objetivo.
+**Prompt del usuario:** "Misión: Despliegue de OmniShield v12.9.17 (PR37 — Identity Seal Complete)..."
+**Nota personal para el siguiente agente:** El enrutamiento VFS en `my_openat` delega a `my_open`, haciendo redundante la duplicación explícita de lógica de interceptación en `my_openat`.
+
 **Fecha y agente:** 25 de febrero de 2026, Jules (PR22 — Tracer Nullification & Deep Boot Shield)
 **Resumen de cambios:** v12.9 — Attestation & Anti-Tamper Hardening.
 - **Boot Integrity Shield (CRIT-01 & CRIT-02):** Hook de defensa en profundidad para `ro.boot.verifiedbootstate` ("green"), `flash.locked` ("1"), `vbmeta.device_state` ("locked") y `veritymode` ("enforcing"). Se interceptan también `ro.boot.hardware` y `platform` para ocultar el SoC físico real en etapas tempranas.

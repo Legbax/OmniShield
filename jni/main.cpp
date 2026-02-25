@@ -47,6 +47,37 @@ static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
 
+// PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
+static double g_cachedLat       = 0.0;
+static double g_cachedLon       = 0.0;
+static double g_cachedAlt       = 0.0;
+static bool   g_locationCached  = false;
+
+// PR38+39: Sensor chip statics — valores del perfil activo para los hooks de Sensor
+// Definidos aquí para linkage correcto (los hooks son structs locales en postAppSpecialize)
+static float  g_sensorAccelMax  = 78.4532f;   // Default LSM6DSO
+static float  g_sensorAccelRes  = 0.0023946f;
+static float  g_sensorGyroMax   = 34.906586f;
+static float  g_sensorGyroRes   = 0.001064f;
+static float  g_sensorMagMax    = 4912.0f;
+
+// PR38+39: Seed version — para detectar rotación de seed desde la UI
+static long   g_seedVersion        = 0;
+// PR38+39: Sensor presence flags — leídos del perfil activo en postAppSpecialize
+// Usados por SensorListHook para filtrar sensores ausentes en el perfil emulado
+static bool   g_sensorHasHeartRate = false;
+static bool   g_sensorHasBarometer = false;
+
+// PR38+39: Inicializar caché de GPS (llamar en postAppSpecialize tras readConfig)
+static void initLocationCache() {
+    if (!g_locationCached && !g_currentProfileName.empty() && g_masterSeed != 0) {
+        omni::engine::generateLocationForRegion(g_currentProfileName, g_masterSeed,
+                                                g_cachedLat, g_cachedLon);
+        g_cachedAlt    = omni::engine::generateAltitudeForRegion(g_currentProfileName, g_masterSeed);
+        g_locationCached = true;
+    }
+}
+
 struct CachedContent {
     std::string content;
     uint64_t generation;
@@ -173,6 +204,17 @@ void readConfig() {
     if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
     if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
     if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
+    // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
+    // Permite que el módulo invalide caches en el próximo arranque de la app
+    if (g_config.count("seed_version")) {
+        long newSeedVersion = 0;
+        try { newSeedVersion = std::stol(g_config["seed_version"]); } catch(...) {}
+        if (omni::engine::isSeedVersionChanged(newSeedVersion, g_seedVersion)) {
+            // Seed rotado: invalidar caché de GPS para forzar recálculo con nuevo seed
+            g_locationCached = false;
+            g_seedVersion    = newSeedVersion;
+        }
+    }
 }
 
 bool shouldHide(const char* key) {
@@ -1791,6 +1833,19 @@ public:
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
+        // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
+        initLocationCache();
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            const auto& sp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            g_sensorAccelMax      = sp.accelMaxRange;
+            g_sensorAccelRes      = sp.accelResolution;
+            g_sensorGyroMax       = sp.gyroMaxRange;
+            g_sensorGyroRes       = sp.gyroResolution;
+            g_sensorMagMax        = sp.magMaxRange;
+            g_sensorHasHeartRate  = sp.hasHeartRateSensor;
+            g_sensorHasBarometer  = sp.hasBarometerSensor;
+        }
+
         // Libc Hooks (Phase 1)
         void* open_func = DobbySymbolResolver(nullptr, "open");
         if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
@@ -2001,6 +2056,75 @@ public:
         api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
         api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
 
+        // PR38+39: Location spoofing hooks
+        // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
+        // pero los getters son métodos Java locales sobre el Parcel deserializado).
+        // isFromMockProvider DEBE ser false — Snapchat lo verifica explícitamente.
+        // Coordenadas coherentes con región del perfil → MCC/timezone/locale alineados.
+        {
+            struct LocationHook {
+                static jdouble getLatitude(JNIEnv*, jobject)  { return g_cachedLat; }
+                static jdouble getLongitude(JNIEnv*, jobject) { return g_cachedLon; }
+                static jdouble getAltitude(JNIEnv*, jobject)  { return g_cachedAlt; }
+                static jfloat  getAccuracy(JNIEnv*, jobject) {
+                    // Precisión GPS realista: 4-12 metros (buen fix satelital)
+                    return 4.0f + (float)(g_masterSeed % 8);
+                }
+                static jfloat  getVerticalAccuracyMeters(JNIEnv*, jobject) {
+                    return 8.0f + (float)(g_masterSeed % 6);
+                }
+                static jboolean isFromMockProvider(JNIEnv*, jobject) {
+                    return JNI_FALSE;  // CRÍTICO: nunca revelar que la location es mock
+                }
+                static jfloat  getSpeed(JNIEnv*, jobject)   { return 0.0f; }
+                static jfloat  getBearing(JNIEnv*, jobject) { return 0.0f; }
+                static jlong   getTime(JNIEnv*, jobject) {
+                    struct timespec ts;
+                    clock_gettime(CLOCK_REALTIME, &ts);
+                    return (jlong)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+                }
+            };
+            JNINativeMethod locationMethods[] = {
+                {"getLatitude",               "()D", (void*)LocationHook::getLatitude},
+                {"getLongitude",              "()D", (void*)LocationHook::getLongitude},
+                {"getAltitude",               "()D", (void*)LocationHook::getAltitude},
+                {"getAccuracy",               "()F", (void*)LocationHook::getAccuracy},
+                {"getVerticalAccuracyMeters", "()F", (void*)LocationHook::getVerticalAccuracyMeters},
+                {"isFromMockProvider",        "()Z", (void*)LocationHook::isFromMockProvider},
+                {"getSpeed",                  "()F", (void*)LocationHook::getSpeed},
+                {"getBearing",                "()F", (void*)LocationHook::getBearing},
+                {"getTime",                   "()J", (void*)LocationHook::getTime},
+            };
+            api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
+        }
+
+        // PR38+39: ConnectivityManager — NetworkInfo getters
+        // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
+        // Solo activo cuando network_type=lte (g_spoofMobileNetwork=true).
+        if (g_spoofMobileNetwork) {
+            struct NetworkInfoHook {
+                static jint     getType(JNIEnv*, jobject)        { return 0; }   // TYPE_MOBILE
+                static jstring  getTypeName(JNIEnv* e, jobject)  { return e->NewStringUTF("mobile"); }
+                static jint     getSubtype(JNIEnv*, jobject)     { return 13; }  // LTE
+                static jstring  getSubtypeName(JNIEnv* e, jobject) { return e->NewStringUTF("LTE"); }
+                static jstring  getExtraInfo(JNIEnv*, jobject)   { return nullptr; } // WiFi retorna SSID; mobile = null
+                static jboolean isConnected(JNIEnv*, jobject)    { return JNI_TRUE; }
+                static jboolean isAvailable(JNIEnv*, jobject)    { return JNI_TRUE; }
+                static jboolean isRoaming(JNIEnv*, jobject)      { return JNI_FALSE; }
+            };
+            JNINativeMethod networkInfoMethods[] = {
+                {"getType",        "()I",                  (void*)NetworkInfoHook::getType},
+                {"getTypeName",    "()Ljava/lang/String;", (void*)NetworkInfoHook::getTypeName},
+                {"getSubtype",     "()I",                  (void*)NetworkInfoHook::getSubtype},
+                {"getSubtypeName", "()Ljava/lang/String;", (void*)NetworkInfoHook::getSubtypeName},
+                {"getExtraInfo",   "()Ljava/lang/String;", (void*)NetworkInfoHook::getExtraInfo},
+                {"isConnected",    "()Z",                  (void*)NetworkInfoHook::isConnected},
+                {"isAvailable",    "()Z",                  (void*)NetworkInfoHook::isAvailable},
+                {"isRoaming",      "()Z",                  (void*)NetworkInfoHook::isRoaming},
+            };
+            api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
+        }
+
         // PR37: Network type spoofing hooks
         // Interceptar WifiInfo para ocultar SSID/BSSID cuando g_spoofMobileNetwork=true
         // NOTA ARQUITECTÓNICA: ConnectivityManager.getActiveNetworkInfo().getType() es Java puro
@@ -2030,10 +2154,128 @@ public:
                 {"getNetworkId","()I",                  (void*)WifiInfoHook::getNetworkId},
             };
             api->hookJniNativeMethods(env, "android/net/wifi/WifiInfo", wifiInfoMethods, 4);
+
+            // PR38+39: WifiManager — getScanResults vacío elimina triangulación Wi-Fi
+            // BSSIDs de APs locales → triangulación geográfica exacta sin GPS activo.
+            // Lista vacía = WiFi "apagado", sin APs visibles.
+            struct WifiManagerHook {
+                static jobject getScanResults(JNIEnv* e, jobject) {
+                    jclass cls = e->FindClass("java/util/ArrayList");
+                    jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
+                    return e->NewObject(cls, ctor);
+                }
+                static jboolean isWifiEnabled(JNIEnv*, jobject)  { return JNI_FALSE; }
+                static jint     getWifiState(JNIEnv*, jobject)   { return 1; }  // WIFI_STATE_DISABLED
+                static jboolean startScan(JNIEnv*, jobject)      { return JNI_FALSE; }
+            };
+            JNINativeMethod wifiManagerMethods[] = {
+                {"getScanResults", "()Ljava/util/List;", (void*)WifiManagerHook::getScanResults},
+                {"isWifiEnabled",  "()Z",                (void*)WifiManagerHook::isWifiEnabled},
+                {"getWifiState",   "()I",                (void*)WifiManagerHook::getWifiState},
+                {"startScan",      "()Z",                (void*)WifiManagerHook::startScan},
+            };
+            api->hookJniNativeMethods(env, "android/net/wifi/WifiManager", wifiManagerMethods, 4);
         }
 
-        LOGD("System Integrity loaded. Profile: %s | LTE_mode: %s",
-             g_currentProfileName.c_str(), g_spoofMobileNetwork ? "ON" : "OFF");
+        // PR38+39: Sensor metadata hooks
+        // Spoofing de metadatos numéricos que identifican el chip físico.
+        // g_sensorAccelMax etc. se cargaron al inicio de postAppSpecialize.
+        // DISEÑO: getMaximumRange/getResolution discriminan por getType() del objeto
+        // para retornar el rango correcto (accel ≠ gyro ≠ mag).
+        {
+            struct SensorMetaHook {
+                static jfloat getMaximumRange(JNIEnv* e, jobject sensorObj) {
+                    jclass cls = e->GetObjectClass(sensorObj);
+                    jmethodID mid = e->GetMethodID(cls, "getType", "()I");
+                    if (!mid) return g_sensorAccelMax;
+                    switch (e->CallIntMethod(sensorObj, mid)) {
+                        case 4:  return g_sensorGyroMax;   // TYPE_GYROSCOPE
+                        case 2:  return g_sensorMagMax;    // TYPE_MAGNETIC_FIELD
+                        default: return g_sensorAccelMax;  // TYPE_ACCELEROMETER + resto
+                    }
+                }
+                static jfloat getResolution(JNIEnv* e, jobject sensorObj) {
+                    jclass cls = e->GetObjectClass(sensorObj);
+                    jmethodID mid = e->GetMethodID(cls, "getType", "()I");
+                    if (!mid) return g_sensorAccelRes;
+                    switch (e->CallIntMethod(sensorObj, mid)) {
+                        case 4:  return g_sensorGyroRes;
+                        case 2:  return 0.15f;  // Resolución magnetómetro: 0.15µT (estándar)
+                        default: return g_sensorAccelRes;
+                    }
+                }
+                static jfloat getPower(JNIEnv*, jobject) {
+                    return 0.57f;  // Consumo MEMS combinado típico: 0.57 mA
+                }
+                static jint getMinDelay(JNIEnv*, jobject) {
+                    // LSM6DSO/BMI160 → 200Hz max = 5000µs mín
+                    // BMA4xy → 100Hz max = 10000µs mín
+                    return (g_sensorAccelMax > 60.0f) ? 5000 : 10000;
+                }
+                static jint getMaxDelay(JNIEnv*, jobject)          { return 200000; }
+                static jint getVersion(JNIEnv*, jobject)           { return 1; }
+                static jint getFifoMaxEventCount(JNIEnv*, jobject) {
+                    // LSM6DSO: 3072 samples; BMI160: 1024; BMA4xy: 256
+                    if (g_sensorAccelMax > 100.0f) return 1024;   // BMI160
+                    if (g_sensorAccelMax > 60.0f)  return 3072;   // LSM6DSO
+                    return 256;                                     // BMA4xy/BMA253
+                }
+                static jint getFifoReservedEventCount(JNIEnv*, jobject) { return 0; }
+            };
+            JNINativeMethod sensorMethods[] = {
+                {"getMaximumRange",          "()F", (void*)SensorMetaHook::getMaximumRange},
+                {"getResolution",            "()F", (void*)SensorMetaHook::getResolution},
+                {"getPower",                 "()F", (void*)SensorMetaHook::getPower},
+                {"getMinDelay",              "()I", (void*)SensorMetaHook::getMinDelay},
+                {"getMaxDelay",              "()I", (void*)SensorMetaHook::getMaxDelay},
+                {"getVersion",               "()I", (void*)SensorMetaHook::getVersion},
+                {"getFifoMaxEventCount",     "()I", (void*)SensorMetaHook::getFifoMaxEventCount},
+                {"getFifoReservedEventCount","()I", (void*)SensorMetaHook::getFifoReservedEventCount},
+            };
+            api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
+        }
+
+        // PR38+39: SensorManager.getSensorList(int type) filter
+        // TYPE_HEART_RATE=21, TYPE_PRESSURE=6.
+        // Cuando el perfil activo no tiene ese sensor, retornar lista vacía
+        // para que la app no vea un sensor que el modelo declarado no tendría.
+        // COBERTURA: solo los 2 tipos más diferenciadores entre modelos.
+        // No se añaden sensores virtuales (coste > beneficio para este PR).
+        {
+            struct SensorListHook {
+                static jobject getSensorList(JNIEnv* e, jobject, jint type) {
+                    // TYPE_HEART_RATE=21: solo Galaxy S20 FE lo tiene en el catálogo
+                    if (type == 21 && !g_sensorHasHeartRate) {
+                        jclass cls = e->FindClass("java/util/ArrayList");
+                        if (cls) {
+                            jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
+                            if (ctor) return e->NewObject(cls, ctor);
+                        }
+                    }
+                    // TYPE_PRESSURE=6: barómetro — ausente en varios modelos mid-range
+                    if (type == 6 && !g_sensorHasBarometer) {
+                        jclass cls = e->FindClass("java/util/ArrayList");
+                        if (cls) {
+                            jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
+                            if (ctor) return e->NewObject(cls, ctor);
+                        }
+                    }
+                    // Para cualquier otro tipo: retornar nullptr = llamada no interceptada,
+                    // hookJniNativeMethods llama al original automáticamente
+                    return nullptr;
+                }
+            };
+            JNINativeMethod sensorListMethods[] = {
+                {"getSensorList", "(I)Ljava/util/List;", (void*)SensorListHook::getSensorList},
+            };
+            api->hookJniNativeMethods(env, "android/hardware/SensorManager",
+                                      sensorListMethods, 1);
+        }
+
+        LOGD("System Integrity loaded. Profile: %s | LTE: %s | GPS: %.4f,%.4f",
+             g_currentProfileName.c_str(),
+             g_spoofMobileNetwork ? "ON" : "OFF",
+             g_cachedLat, g_cachedLon);
     }
     void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
