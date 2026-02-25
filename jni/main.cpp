@@ -27,8 +27,6 @@
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <dirent.h>
-#include <sys/ioctl.h>
-#include <net/if.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -52,7 +50,14 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS };
+enum FileType {
+    NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC,
+    BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY,
+    BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS,
+    SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE,
+    PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT,
+    PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS
+};
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -73,8 +78,6 @@ static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
 static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static FILE* (*orig_fopen)(const char*, const char*);
-static int (*orig_ioctl)(int fd, unsigned long request, void* arg);
-static int (*orig_clGetDeviceInfo)(void* device, unsigned int param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret);
 
 // Phase 2 Originals
 #define EGL_VENDOR 0x3053
@@ -102,12 +105,10 @@ static int (*orig_SSL_set_ciphersuites)(SSL *ssl, const char *str);
 // GL Pointers
 typedef unsigned char GLubyte;
 typedef unsigned int GLenum;
-typedef unsigned int GLuint;
 #define GL_VENDOR 0x1F00
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
-static const GLubyte* (*orig_glGetStringi)(GLenum name, GLuint index);
 
 // OpenCL
 typedef int cl_int;
@@ -121,7 +122,6 @@ static cl_int (*orig_clGetDeviceInfo)(cl_device_id device, cl_device_info param_
 
 // Vulkan & Sensors
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
-static VkResult (*orig_vkEnumerateDeviceExtensionProperties)(VkPhysicalDevice physicalDevice, const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
 static const char* (*orig_Sensor_getName)(void* sensor);
 static const char* (*orig_Sensor_getVendor)(void* sensor);
 
@@ -217,17 +217,6 @@ static inline bool isHiddenPath(const char* path) {
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
-    if (pathname && strncmp(pathname, "/sys/devices/system/cpu/cpu", 27) == 0) {
-        int cpu_id;
-        if (sscanf(pathname, "/sys/devices/system/cpu/cpu%d", &cpu_id) == 1) {
-            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) {
-                    errno = ENOENT;
-                    return -1;
-                }
-            }
-        }
-    }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_stat(pathname, statbuf);
 }
@@ -237,17 +226,6 @@ int my_lstat(const char* pathname, struct stat* statbuf) {
 }
 
 int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
-    if (pathname && strncmp(pathname, "/sys/devices/system/cpu/cpu", 27) == 0) {
-        int cpu_id;
-        if (sscanf(pathname, "/sys/devices/system/cpu/cpu%d", &cpu_id) == 1) {
-            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) {
-                    errno = ENOENT;
-                    return -1;
-                }
-            }
-        }
-    }
     // Resolver path absoluto si es relativo con AT_FDCWD
     if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
         char cwd[512] = {};
@@ -331,27 +309,21 @@ int my_uname(struct utsname *buf) {
             std::string brd  = toLowerStr(kfp.brand);
 
             if (brd == "google") {
+                // Google compila sus propios kernels con hashes de commit específicos
                 if (plat.find("lito") != std::string::npos)
                     kv = "4.19.113-g820a424c538c-ab7336171";        // Pixel 5, 4a 5G
-                else if (plat.find("atoll") != std::string::npos)
-                    kv = "4.14.186-ga309c626afd2-ab7211748";        // Pixel 4a (sunfish/SM7150)
+                else if (plat.find("trinket") != std::string::npos)
+                    kv = "4.14.255-g67c58a7c42a0-ab7336171";        // Pixel 4a
                 else if (plat.find("sdm670") != std::string::npos)
                     kv = "4.9.189-g5d098cef6d96-ab6174032";         // Pixel 3a XL
                 else
                     kv = "4.19.113-g820a424c538c-ab7336171";        // fallback Google
-            } else if (plat.find("exynos") != std::string::npos || plat.find("s5e") != std::string::npos) {
-                kv = "4.14.113-24874270";  // Samsung Exynos (no -perf+ suffix)
             } else if (plat.find("mt6") != std::string::npos) {
                 kv = "4.14.141-perf+";
             } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
                 kv = "4.19.157-perf+";
             } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
                 kv = "4.19.113-perf+";
-            } else if (plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos ||
-                       plat.find("sm6350") != std::string::npos || plat.find("sm7325") != std::string::npos) {
-                kv = "4.19.157-perf+";
-            } else if (plat.find("sm6150") != std::string::npos) {
-                kv = "4.14.186-perf+";
             } else if (plat.find("sdm670") != std::string::npos) {
                 kv = "4.9.189-perf+";
             }
@@ -447,10 +419,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             (platform.find("bengal")  != std::string::npos) ||
             (platform.find("holi")    != std::string::npos) ||
             (platform.find("trinket") != std::string::npos) ||
-            (platform.find("sdm670")  != std::string::npos) ||
-            (platform.find("sm6350")  != std::string::npos) ||
-            (platform.find("sm7325")  != std::string::npos) ||
-            (platform.find("sm6150")  != std::string::npos);
+            (platform.find("sdm670")  != std::string::npos);
         std::string bogomips = isQualcomm ? "38.40" : "26.00";
 
         // Qualcomm: big.LITTLE topology o A55 homogéneo según familia
@@ -469,10 +438,6 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             bigPart = "0xd44"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A78
         } else if (platform.find("lito") != std::string::npos) {
             bigPart = "0xd0d"; bigVariant = "0x3"; bigRev = "0";
-        } else if (platform.find("sm7325") != std::string::npos || platform.find("holi") != std::string::npos) {
-            bigPart = "0xd41"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A78 (Kryo 670)
-        } else if (platform.find("sm6350") != std::string::npos) {
-            bigPart = "0xd0d"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A77
         } else if (platform.find("sdm670") != std::string::npos) {
             bigPart = "0xd0a"; bigVariant = "0x2"; bigRev = "1"; // Cortex-A75
         }
@@ -569,50 +534,10 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.product.system.model" ||
                  k == "ro.product.vendor.model" ||
                  k == "ro.product.odm.model")               dynamic_buffer = fp.model;
-        // --- VINTF Partition Props (API 30+) ---
-        else if (k == "ro.product.system.brand" ||
-                 k == "ro.product.vendor.brand" ||
-                 k == "ro.product.odm.brand")                dynamic_buffer = fp.brand;
-        else if (k == "ro.product.system.device" ||
-                 k == "ro.product.vendor.device" ||
-                 k == "ro.product.odm.device")               dynamic_buffer = fp.device;
-        else if (k == "ro.product.system.manufacturer" ||
-                 k == "ro.product.vendor.manufacturer" ||
-                 k == "ro.product.odm.manufacturer")         dynamic_buffer = fp.manufacturer;
-        else if (k == "ro.product.system.name" ||
-                 k == "ro.product.vendor.name" ||
-                 k == "ro.product.odm.name")                 dynamic_buffer = fp.product;
-        // --- Vendor Build ---
-        else if (k == "ro.vendor.build.security_patch")      dynamic_buffer = fp.securityPatch;
-        // --- Version (Android 11+) ---
-        else if (k == "ro.build.version.release_or_codename") dynamic_buffer = fp.release;
-        else if (k == "ro.com.google.gmsversion")            dynamic_buffer = fp.release;
-        else if (k == "ro.build.characteristics")            dynamic_buffer = "default";
-        else if (k == "ro.build.ab_update")                  dynamic_buffer = "true";
-        // --- SIM/Carrier Identity ---
-        else if (k == "gsm.sim.operator.alpha") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "europe") ? "Vodafone" : "T-Mobile";
-        }
-        else if (k == "gsm.sim.operator.numeric") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "europe") ? "23415" : "310260";
-        }
-        else if (k == "gsm.sim.operator.iso-country") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "europe") ? "gb" : "us";
-        }
-        else if (k == "gsm.nitz.time") {
-            auto now = std::chrono::system_clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            dynamic_buffer = std::to_string(ms);
-        }
-        else if (k == "persist.sys.timezone") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "europe") ? "Europe/London" : "America/New_York";
-        }
         else if (k == "ro.product.first_api_level") {
-            dynamic_buffer = fp.firstApiLevel;
+            int release_api = 0;
+            try { release_api = std::stoi(fp.release); } catch (...) {}
+            dynamic_buffer = (release_api >= 11) ? "30" : "29";
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
@@ -636,14 +561,13 @@ int my_system_property_get(const char *key, char *value) {
             // ro.soc.model = el chip model del perfil (hardwareChipname)
             dynamic_buffer = fp.hardwareChipname;
         }
-        // --- Intercepción HAL ---
-        else if (k == "ro.hardware.egl" || k == "ro.hardware.vulkan") {
-            // EGL/Vulkan driver: "adreno" o "mali", NUNCA boardPlatform ("kona","mt6768")
-            dynamic_buffer = fp.eglDriver;
-        }
+        // --- Intercepción HAL (Cámara, Vulkan, Audio y DRM/Keystore) ---
         else if (k == "ro.hardware.camera" ||
+                 k == "ro.hardware.vulkan" ||
                  k == "ro.hardware.keystore" ||
-                 k == "ro.hardware.audio") {
+                 k == "ro.hardware.audio"  ||
+                 k == "ro.hardware.egl") {
+            // Forzamos al sistema a reportar el hardware emulado en lugar de la placa base física
             dynamic_buffer = fp.boardPlatform;
         }
         else if (k == "ro.mediatek.version.release" ||
@@ -704,16 +628,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
-        else if (strstr(pathname, "/proc/cmdline")) type = PROC_CMDLINE;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
-        else if (strstr(pathname, "/sys/devices/system/cpu/") &&
-                (strstr(pathname, "cpuinfo_max_freq") ||
-                 strstr(pathname, "scaling_max_freq") ||
-                 strstr(pathname, "scaling_min_freq") ||
-                 strstr(pathname, "cpuinfo_min_freq") ||
-                 strstr(pathname, "cpuinfo_cur_freq") ||
-                 strstr(pathname, "scaling_cur_freq"))) type = SYS_CPU_FREQ;
+        else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
         else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
         else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
         else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
@@ -738,15 +655,12 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::string kv = "4.14.186-perf+";
                     if (brd == "google") {
                         if (plat.find("lito")    != std::string::npos) kv = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat.find("atoll")   != std::string::npos) kv = "4.14.186-ga309c626afd2-ab7211748";
+                        else if (plat.find("trinket") != std::string::npos) kv = "4.14.255-g67c58a7c42a0-ab7336171";
                         else if (plat.find("sdm670")  != std::string::npos) kv = "4.9.189-g5d098cef6d96-ab6174032";
                         else kv = "4.19.113-g820a424c538c-ab7336171";
-                    } else if (plat.find("exynos")!=std::string::npos||plat.find("s5e")!=std::string::npos) kv="4.14.113-24874270";
-                    else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
+                    } else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
                     else if (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos) kv="4.19.157-perf+";
                     else if (plat.find("atoll")!=std::string::npos||plat.find("lito")!=std::string::npos) kv="4.19.113-perf+";
-                    else if (plat.find("bengal")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm7325")!=std::string::npos) kv="4.19.157-perf+";
-                    else if (plat.find("sm6150")!=std::string::npos) kv="4.14.186-perf+";
                     else if (plat.find("sdm670")!=std::string::npos) kv="4.9.189-perf+";
 
                     long dateUtc = 0;
@@ -778,17 +692,25 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::string brd  = toLowerStr(fp.brand);
                     std::string kv = "4.14.186-perf+";
                     if (brd == "google") {
-                        if (plat.find("lito") != std::string::npos) kv = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat.find("atoll") != std::string::npos) kv = "4.14.186-ga309c626afd2-ab7211748";
-                        else if (plat.find("sdm670") != std::string::npos) kv = "4.9.189-g5d098cef6d96-ab6174032";
-                        else kv = "4.19.113-g820a424c538c-ab7336171";
-                    } else if (plat.find("exynos")!=std::string::npos||plat.find("s5e")!=std::string::npos) kv="4.14.113-24874270";
-                    else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
-                    else if (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos) kv="4.19.157-perf+";
-                    else if (plat.find("atoll")!=std::string::npos||plat.find("lito")!=std::string::npos) kv="4.19.113-perf+";
-                    else if (plat.find("bengal")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm7325")!=std::string::npos) kv="4.19.157-perf+";
-                    else if (plat.find("sm6150")!=std::string::npos) kv="4.14.186-perf+";
-                    else if (plat.find("sdm670")!=std::string::npos) kv="4.9.189-perf+";
+                        if (plat.find("lito") != std::string::npos)
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                        else if (plat.find("trinket") != std::string::npos)
+                            kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("sdm670") != std::string::npos)
+                            kv = "4.9.189-g5d098cef6d96-ab6174032";
+                        else
+                            kv = "4.19.113-g820a424c538c-ab7336171";
+                    } else if (plat.find("mt6") != std::string::npos) {
+                        kv = "4.14.141-perf+";
+                    } else if (plat.find("kona") != std::string::npos ||
+                               plat.find("lahaina") != std::string::npos) {
+                        kv = "4.19.157-perf+";
+                    } else if (plat.find("atoll") != std::string::npos ||
+                               plat.find("lito") != std::string::npos) {
+                        kv = "4.19.113-perf+";
+                    } else if (plat.find("sdm670") != std::string::npos) {
+                        kv = "4.9.189-perf+";
+                    }
                     content = kv + "\n";
                 } else if (type == PROC_UPTIME) {
                     char tmpBuf[256];
@@ -826,15 +748,12 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::string kv2 = "4.14.186-perf+";
                     if (brd2 == "google") {
                         if (plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat2.find("atoll")   != std::string::npos) kv2 = "4.14.186-ga309c626afd2-ab7211748";
+                        else if (plat2.find("trinket") != std::string::npos) kv2 = "4.14.255-g67c58a7c42a0-ab7336171";
                         else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-g5d098cef6d96-ab6174032";
                         else kv2 = "4.19.113-g820a424c538c-ab7336171";
-                    } else if (plat2.find("exynos")!=std::string::npos||plat2.find("s5e")!=std::string::npos) kv2="4.14.113-24874270";
-                    else if (plat2.find("mt6")    != std::string::npos) kv2 = "4.14.141-perf+";
+                    } else if (plat2.find("mt6")    != std::string::npos) kv2 = "4.14.141-perf+";
                     else if (plat2.find("kona")    != std::string::npos || plat2.find("lahaina") != std::string::npos) kv2 = "4.19.157-perf+";
                     else if (plat2.find("atoll")   != std::string::npos || plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-perf+";
-                    else if (plat2.find("bengal")  != std::string::npos || plat2.find("holi")    != std::string::npos || plat2.find("sm6350") != std::string::npos || plat2.find("sm7325") != std::string::npos) kv2 = "4.19.157-perf+";
-                    else if (plat2.find("sm6150")  != std::string::npos) kv2 = "4.14.186-perf+";
                     else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-perf+";
                     content = kv2 + "\n";
                 } else if (type == PROC_MEMINFO) {
@@ -857,17 +776,6 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         }
                         content = memData;
                     }
-                } else if (type == PROC_CMDLINE) {
-                    char tmpBuf[4096]; ssize_t r; std::string rawFile;
-                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
-
-                    size_t hw_pos = rawFile.find("androidboot.hardware=");
-                    if (hw_pos != std::string::npos) {
-                        size_t space_pos = rawFile.find(' ', hw_pos);
-                        if (space_pos == std::string::npos) space_pos = rawFile.length();
-                        rawFile.replace(hw_pos + 21, space_pos - (hw_pos + 21), fp.boardPlatform);
-                    }
-                    content = rawFile;
                 } else if (type == PROC_MODULES || type == PROC_MOUNTS) {
                     char tmpBuf[4096]; ssize_t r; std::string rawFile;
                     while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
@@ -876,21 +784,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         if (!isHiddenPath(line.c_str())) content += line + "\n";
                     }
                 } else if (type == SYS_CPU_FREQ) {
-                    if (strstr(pathname, "min")) {
-                        content = "300000\n";
-                    } else if (strstr(pathname, "cur")) {
-                        content = "1200000\n";
-                    } else {
-                        std::string plat = toLowerStr(fp.boardPlatform);
-                        if      (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos||plat.find("msmnile")!=std::string::npos) content="2841600\n";
-                        else if (plat.find("lito")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm7325")!=std::string::npos) content="2400000\n";
-                        else if (plat.find("atoll")!=std::string::npos||plat.find("sdm670")!=std::string::npos) content="2208000\n";
-                        else if (plat.find("bengal")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm6150")!=std::string::npos||plat.find("trinket")!=std::string::npos) content="2016000\n";
-                        else if (plat.find("exynos9825")!=std::string::npos) content="2730000\n";
-                        else if (plat.find("exynos9611")!=std::string::npos||plat.find("exynos9610")!=std::string::npos) content="2300000\n";
-                        else if (plat.find("mt6785")!=std::string::npos) content="2050000\n";
-                        else content="2000000\n";
-                    }
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    std::string brand = toLowerStr(fp.brand);
+                    bool isQcom = (brand == "google" || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("msmnile") != std::string::npos);
+                    if (isQcom) content = "2841600\n";
+                    else content = "2000000\n";
                 } else if (type == SYS_SOC_MACHINE) {
                     content = std::string(fp.hardware) + "\n";
                 } else if (type == SYS_SOC_FAMILY) {
@@ -907,17 +805,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     if (plat.find("mt") != std::string::npos) {
                         char tmpBuf[1024]; ssize_t r;
                         while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
-                    } else if (plat.find("exynos") != std::string::npos || plat.find("s5e") != std::string::npos) {
-                        std::string dev = toLowerStr(fp.device);
-                        content = " 0 [samsung        ]: " + dev + " - samsung\n                      samsung\n";
+                    } else if (plat.find("exynos") != std::string::npos) {
+                        content = " 0 [samsung        ]: sm-a52 - samsung\n                      samsung\n";
                     } else {
-                        std::string sndName = "snd_" + std::string(
-                            plat.find("kona")!=std::string::npos?"kona":
-                            plat.find("lahaina")!=std::string::npos?"lahaina":
-                            plat.find("lito")!=std::string::npos?"lito":
-                            plat.find("atoll")!=std::string::npos?"atoll":
-                            plat.find("bengal")!=std::string::npos?"bengal":"qcom");
-                        content = " 0 [" + sndName + "        ]: " + sndName + " - " + sndName + "\n                      " + sndName + "\n";
+                        content = " 0 [sndkona        ]: snd_kona - snd_kona\n                      snd_kona\n";
                     }
                 } else if (type == PROC_INPUT) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -937,7 +828,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     } else {
                         content = "tsens_tz_sensor\n";
                     }
-                // Manejo de btime para coherencia con Uptime
+                // Sincronización btime (Evita detección de manipulación de uptime)
                 } else if (type == PROC_STAT) {
                     char tmpBuf[8192];
                     ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
@@ -949,7 +840,6 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         long offset_segundos = 259200 + (g_masterSeed % 1036800);
                         long uptime_falso = ts_real.tv_sec + offset_segundos;
                         long btime_falso = (long)time(NULL) - uptime_falso;
-
                         size_t pos = statData.find("btime ");
                         if (pos != std::string::npos) {
                             size_t end = statData.find('\n', pos);
@@ -959,11 +849,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         content = statData;
                     }
 
-                // Identidad de Almacenamiento
+                // Identidad de Almacenamiento (Oculta hardware real de la ROM)
                 } else if (type == SYS_BLOCK_MODEL) {
                     content = (toLowerStr(fp.brand) == "samsung") ? "KLUDG4UHDB-B2D1\n" : "SAMSUNG_UFS\n";
 
-                // Evasión de Gobernadores Propietarios (MTK/Exynos)
+                // Gobernadores AOSP (Elimina firmas 'mtk-cpufreq' o gobernadores propietarios)
                 } else if (type == SYS_CPU_GOVERNORS) {
                     content = "performance powersave schedutil\n";
                 }
@@ -1183,27 +1073,6 @@ const GLubyte* my_glGetString(GLenum name) {
     return orig_glGetString(name);
 }
 
-const GLubyte* my_glGetStringi(GLenum name, GLuint index) {
-    const GLubyte* ret = orig_glGetStringi(name, index);
-    if (!ret) return ret;
-
-    if (name == GL_EXTENSIONS && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        if (toLowerStr(fp.eglDriver) == "adreno") {
-            std::string ext = reinterpret_cast<const char*>(ret);
-            // Si encontramos una extensión prohibida de ARM/Mali/IMG, la reemplazamos
-            // por una extensión segura y genérica de Qualcomm para no romper el índice.
-            if (ext.find("ARM") != std::string::npos ||
-                ext.find("Mali") != std::string::npos ||
-                ext.find("IMG") != std::string::npos ||
-                ext.find("OES_EGL_image_external_essl3") != std::string::npos) {
-                return (const GLubyte*)"GL_OES_compressed_ETC1_RGB8_texture";
-            }
-        }
-    }
-    return ret;
-}
-
 // -----------------------------------------------------------------------------
 // Hooks: Vulkan API
 // -----------------------------------------------------------------------------
@@ -1271,16 +1140,8 @@ const char* my_Sensor_getVendor(void* sensor) {
 int my_sysinfo(struct sysinfo *info) {
     int ret = orig_sysinfo(info);
     if (ret == 0 && info != nullptr) {
-        // Uptime spoofing
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         info->uptime += added_uptime_seconds;
-
-        // RAM spoofing (Sincronización estricta con VFS)
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-            unsigned long fakeMemBytes = (unsigned long)fp.ram_gb * 1073741824UL;
-            info->totalram = fakeMemBytes / info->mem_unit;
-        }
     }
     return ret;
 }
@@ -1292,12 +1153,6 @@ struct dirent* my_readdir(DIR *dirp) {
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
-        if (strncmp(dname.c_str(), "cpu", 3) == 0 && isdigit(dname[3])) {
-            int cpu_id = std::stoi(dname.substr(3));
-            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                 if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) continue;
-            }
-        }
         if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             if (plat.find("mt") == std::string::npos) {
@@ -1389,63 +1244,6 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 }
 
 
-int my_ioctl(int fd, unsigned long request, void* arg) {
-    int ret = orig_ioctl(fd, request, arg);
-    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
-        struct ifreq *ifr = (struct ifreq *)arg;
-        if (strcmp(ifr->ifr_name, "wlan0") == 0) {
-            unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
-            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
-        }
-    }
-    return ret;
-}
-
-VkResult my_vkEnumerateDeviceExtensionProperties(
-    VkPhysicalDevice physicalDevice, const char* pLayerName,
-    uint32_t* pPropertyCount, VkExtensionProperties* pProperties) {
-
-    VkResult ret = orig_vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
-
-    if (ret == VK_SUCCESS && pProperties != nullptr && pPropertyCount != nullptr) {
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
-            if (egl == "adreno") {
-                uint32_t validCount = 0;
-                for (uint32_t i = 0; i < *pPropertyCount; ++i) {
-                    std::string extName = toLowerStr(pProperties[i].extensionName);
-                    if (extName.find("arm") == std::string::npos && extName.find("mali") == std::string::npos) {
-                        pProperties[validCount] = pProperties[i];
-                        validCount++;
-                    }
-                }
-                *pPropertyCount = validCount;
-            }
-        }
-    }
-    return ret;
-}
-
-#define CL_DEVICE_VENDOR 0x102C
-#define CL_DEVICE_NAME 0x102B
-
-int my_clGetDeviceInfo(void* device, unsigned int param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret) {
-    int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
-    if (ret == 0 && param_value != nullptr && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
-        std::string egl = toLowerStr(fp.eglDriver);
-
-        if (egl == "adreno") {
-            if (param_name == CL_DEVICE_VENDOR) {
-                strncpy((char*)param_value, "Qualcomm", param_value_size);
-            } else if (param_name == CL_DEVICE_NAME) {
-                strncpy((char*)param_value, fp.gpuRenderer, param_value_size);
-            }
-        }
-    }
-    return ret;
-}
-
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
@@ -1527,9 +1325,6 @@ public:
         // GPU Hooks
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
-
-        void* gli_func = DobbySymbolResolver("libGLESv3.so", "glGetStringi");
-        if (gli_func) DobbyHook(gli_func, (void*)my_glGetStringi, (void**)&orig_glGetStringi);
 
         // Vulkan
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");

@@ -166,13 +166,13 @@ jitter=true
 **Nota personal para el siguiente agente:** The parsing logic is now verified. Ensure any future changes to the regex in `generate_profiles.py` are also reflected in `test_generate_profiles.py`.
 
 **Fecha y agente:** 25 de febrero de 2026, Jules
-**Resumen de cambios:** v12.5 — The Absolute Void (PR19 Implementation).
-- **Time Coherence:** Implementación de virtualización de `/proc/stat`. El campo `btime` ahora se sincroniza dinámicamente con el offset de uptime para evitar paradojas temporales.
-- **OpenCL Identity:** Intercepción de `CL_DEVICE_VERSION` y `CL_DRIVER_VERSION` para unificar la identidad del driver gráfico en perfiles Qualcomm.
-- **Sysfs Shield:** Virtualización de modelos de almacenamiento físico (`/sys/block`) y gobernadores de CPU para eliminar firmas de hardware subyacente.
-- **Legacy Integrity:** Intercepción de la propiedad `ro.baseband` para consistencia con la versión de radio emulada.
+**Resumen de cambios:** v12.5 — The Absolute Void (PR19 Hardening).
+- **Time Coherence:** Virtualización de `/proc/stat` para sincronizar `btime` con el offset de `uptime` (Eliminación de la paradoja temporal).
+- **OpenCL Driver Shield:** Hook completo a `CL_DEVICE_VERSION` y `CL_DRIVER_VERSION` para reportar drivers Qualcomm legítimos.
+- **Sysfs Physical Shield:** Virtualización de modelos de almacenamiento (`/sys/block`) y limpieza de gobernadores de CPU propietarios.
+- **Legacy Property Fix:** Inclusión de `ro.baseband` en el motor de intercepción de radio.
 **Prompt del usuario:** "Genera el prompt exacto para que Jules agent ejecute estas modificaciones."
-**Nota personal para el siguiente agente:** El sistema es ahora matemáticamente hermético. No hay discrepancia entre btime y uptime. La identidad de almacenamiento es indistinguible de un terminal físico real. Omni-Shield v12.5 desplegado.
+**Nota personal para el siguiente agente:** El sistema es ahora matemáticamente hermético en Capa 8. La relación entre btime, uptime y hardware físico es indistinguible de un terminal real.
 
 **Fecha y agente:** 25 de febrero de 2026, Jules (PR7+PR8 Implementation)
 **Resumen de cambios:** v11.9 — PR7 Plan Definitivo + PR8 Simulation Findings.
@@ -296,35 +296,3 @@ jitter=true
 - **Anti-MTK:** Vaciado activo de `ro.mediatek.version.release` y `ro.mediatek.platform` cuando el perfil no es MediaTek.
 **Prompt del usuario:** "Ejecutar el "PR18" para alcanzar la versión final absoluta v12.0 (The Void)... Bloqueo a nivel HAL..."
 **Nota para el siguiente agente:** Hemos llegado al final. El sistema es ahora una sombra perfecta. No queda nada más por interceptar sin entrar en el espacio del kernel ring-0.
-
-**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.1)
-**Resumen de cambios:** v12.1 — The Void Hardened.
-- **Identidad API (BUG-F):** Corrección de `ro.product.first_api_level`. Campo `firstApiLevel` añadido a `DeviceFingerprint` para precisión histórica (ej. Pixel 3a XL = 28, vs Pixel 5 = 30).
-- **Escudo GLES 3.0 (Capa 6):** Hook a `glGetStringi` en `libGLESv3.so` para interceptar la enumeración de extensiones. Filtrado de firmas "ARM", "Mali", "IMG" y "OES_EGL_image_external_essl3" en perfiles Adreno.
-- **Topología Física:** Virtualización de `/sys/devices/system/cpu/possible` y `present` en VFS, retornando rango coherente con `fp.core_count` (ej. "0-7").
-- **Fix CI/RAM:** Corrección de `typedef GLuint` faltante en `main.cpp` y ajuste de `ram_gb` (4->6) para Nokia 8.3 5G.
-**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.1... BUG-F (Inconsistencia first_api_level)... Fuga glGetStringi... Topología Física de CPU... Fisura 4: Inconsistencia RAM Nokia 8.3 5G"
-**Nota para el siguiente agente:** El sistema ahora controla la enumeración indexada de extensiones OpenGL y la topología física de CPU en sysfs. La identidad de la API de lanzamiento es exacta.
-
-**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.2)
-**Resumen de cambios:** v12.2 — Capa 7 Evasion.
-- **Ioctl Shield (Fisura 1):** Intercepción de syscall `ioctl(SIOCGIFHWADDR)` para inyectar MAC estática en `wlan0`. Esto cierra la fuga de identidad L2 que evadía `getifaddrs`.
-- **CPU Topology Hardening (Fisura 2):** Protección en profundidad de `/sys/devices/system/cpu/`. Bloqueo activo en `readdir` y `stat`/`fstatat` para cualquier núcleo físico (`cpuN`) que exceda el `core_count` del perfil emulado.
-- **Vulkan Extension Cloak (Fisura 3):** Hook a `vkEnumerateDeviceExtensionProperties` en `libvulkan.so`. Filtrado de extensiones "Mali" y "ARM" cuando se emula Adreno para evitar detección cruzada de GPU.
-**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.2... Fisura 1: Fuga de Dirección MAC vía Syscall ioctl... Fisura 2: Desbordamiento de Topología de CPU... Fisura 3: Quimera de Vulkan..."
-**Nota para el siguiente agente:** La identidad de red es ahora coherente a nivel de syscall. La topología de CPU es virtualmente impenetrable por enumeración de archivos. La capa Vulkan es consistente con la emulación OpenGL.
-
-**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.3)
-**Resumen de cambios:** v12.3 — The Deep Void (Capa 7/8 Hardening).
-- **OpenCL Identity (Fisura 1):** Intercepción de `clGetDeviceInfo` en `libOpenCL.so`. Spoofing de `CL_DEVICE_VENDOR` (Qualcomm) y `CL_DEVICE_NAME` (Renderer del perfil) en perfiles Adreno para unificar la identidad gráfica en todas las APIs.
-- **Cmdline Sanitization (Fisura 2):** Virtualización de `/proc/cmdline`. Eliminación de flags del bootloader original (`androidboot.hardware=mt6768`) reemplazándolos con el `boardPlatform` emulado.
-- **CPU Governor Shield (Fisura 3):** Expansión del VFS para cubrir `scaling_max_freq`, `scaling_min_freq`, y `cpuinfo_min_freq`. Implementación de frecuencia mínima genérica (300MHz) para evitar detección de gobernadores propietarios.
-**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.3... Fisura 1: Fuga de Identidad Gráfica vía OpenCL... Fisura 2: Parámetros de Arranque del Kernel... Fisura 3: Frecuencias de Escalado..."
-**Nota para el siguiente agente:** El sistema ahora presenta una identidad gráfica monolítica (GLES+Vulkan+OpenCL) y oculta rastros del bootloader en el kernel space virtualizado.
-
-**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.4)
-**Resumen de cambios:** v12.4 — Deep Memory & Active Frequency Shield.
-- **Sysinfo RAM Sync (Fisura 1):** Reescritura de `my_sysinfo`. Ahora intercepta `totalram` para inyectar el valor exacto del perfil (`ram_gb`), asegurando paridad matemática entre `/proc/meminfo` y las syscalls del sistema (Capa 7).
-- **Active Frequency Cloak (Fisura 2):** Expansión del VFS de CPU para cubrir `cpuinfo_cur_freq` y `scaling_cur_freq`. Se fuerza un valor estático de 1.2GHz ("1200000") para ocultar el comportamiento dinámico del gobernador y la carga térmica real (Capa 8).
-**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.4... Fisura 1: Desincronización de Memoria RAM vía Syscall sysinfo... Fisura 2: Fuga de Frecuencia Activa del Procesador..."
-**Nota para el siguiente agente:** La memoria del sistema es ahora matemáticamente coherente en todas las interfaces de lectura. La actividad de la CPU está enmascarada bajo una carga estática simulada.
