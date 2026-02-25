@@ -28,19 +28,35 @@ fi
 # Si no hay seed definido no modificar
 [ -z "$MASTER_SEED" ] && exit 0
 
-# Derivar SSAID desde seed (mismo algoritmo que generateRandomId en omni_engine.hpp)
-# Usamos awk para aritmética de enteros compatible con sh
-derive_ssaid() {
+# Implementación Python (precisión 64-bit completa)
+derive_ssaid_python() {
     local seed="$1"
     local offset="$2"
-    local s=$((seed + offset))
-    local result=""
-    for i in $(seq 1 16); do
-        s=$(( (s * 6364136223 + 1442695041) & 0x7FFFFFFF ))
-        nibble=$(( (s >> 16) & 0xF ))
-        result="${result}$(printf '%x' $nibble)"
-    done
-    echo "$result"
+    python3 -c "
+s = ($seed + $offset)
+result = ''
+for i in range(16):
+    s = (s * 6364136223846793005 + 1442695040888963407) & 0xFFFFFFFFFFFFFFFF
+    result += '0123456789abcdef'[((s >> 33) ^ s) & 0xF]
+print(result)
+" 2>/dev/null
+}
+
+# Fallback sin python3: consistente entre reboots pero no coincide con el hook JNI.
+# El hook JNI es el canal primario; este es best-effort para el path Binder.
+derive_ssaid_fallback() {
+    local seed="$1"
+    local offset="$2"
+    printf '%016x' $(( (seed + offset * 2654435761) & 0xFFFFFFFFFFFF )) | head -c 16
+}
+
+# Wrapper principal
+derive_ssaid() {
+    if command -v python3 >/dev/null 2>&1; then
+        derive_ssaid_python "$1" "$2"
+    else
+        derive_ssaid_fallback "$1" "$2"
+    fi
 }
 
 # Apps objetivo: Snapchat primero (SSAID crítico para ban tracking)
@@ -60,18 +76,35 @@ fi
 MODIFIED=0
 for i in "${!TARGET_PACKAGES[@]}"; do
     PKG="${TARGET_PACKAGES[$i]}"
-    # Offset diferente para cada app (mismo que en omni_engine.hpp generateRandomId)
     NEW_SSAID=$(derive_ssaid "$MASTER_SEED" "$i")
 
-    # Verificar si el paquete tiene entrada en el archivo
     if grep -q "package=\"$PKG\"" "$SSAID_FILE" 2>/dev/null; then
-        # Actualizar el value= de la entrada existente del paquete
-        # Usar sed con delimitador | para evitar conflictos con /
-        sed -i "s|package=\"$PKG\"[^/]*/> |package=\"$PKG\" value=\"$NEW_SSAID\" />|g" "$SSAID_FILE" 2>/dev/null
-        MODIFIED=1
+        if command -v python3 >/dev/null 2>&1; then
+            # Python: manejo robusto del XML sin asumir orden de atributos ni single-line.
+            # FastXmlSerializer de Android no garantiza orden ni formato de línea.
+            python3 -c "
+import re
+content = open('$SSAID_FILE').read()
+pkg = '$PKG'
+new_val = '$NEW_SSAID'
+# Caso 1: package= aparece antes de value=
+p1 = r'(<setting[^>]+package=\"' + re.escape(pkg) + r'\"[^>]+value=\")[^\"]*(\")'
+# Caso 2: value= aparece antes de package=
+p2 = r'(<setting[^>]+value=\")[^\"]*(\")[^>]+package=\"' + re.escape(pkg) + r'\"'
+new_content = re.sub(p1, r'\g<1>' + new_val + r'\g<2>', content)
+if new_content == content:
+    new_content = re.sub(p2, lambda m: m.group(0).replace(
+        m.group(1) + m.group(2), m.group(1) + new_val + '\"'), content)
+open('$SSAID_FILE', 'w').write(new_content)
+" 2>/dev/null && MODIFIED=1
+        else
+            # Fallback a sed básico si python3 no está disponible.
+            # Asume formato estándar de una línea (funciona en la mayoría de dispositivos).
+            sed -i "s|package=\"$PKG\"\(.*\)value=\"[^\"]*\"|package=\"$PKG\"\1value=\"$NEW_SSAID\"|g" \
+                "$SSAID_FILE" 2>/dev/null
+            MODIFIED=1
+        fi
     fi
-    # Si el paquete no tiene entrada aún, se creará cuando instale la app
-    # y el hook JNI actuará como fallback hasta el próximo reinicio
 done
 
 # Notificar al sistema que invalide el caché de Settings si se modificó algo

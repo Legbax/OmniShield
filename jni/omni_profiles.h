@@ -41,18 +41,17 @@ struct DeviceFingerprint {
     const char* screenDensity;
     int core_count;
     int ram_gb;
-    // PR38+39: Sensor chip metadata
-    // Valores canónicos del chip físico del perfil emulado.
-    // Fuente: datasheets de Bosch/ST Micro/TDK + firmware dumps AOSP.
-    float accelMaxRange;    // m/s² (LSM6DSO ±8g=78.4532, BMA4xy ±4g=39.2266)
-    float accelResolution;  // m/s² mínimo medible
-    float gyroMaxRange;     // rad/s (±2000°/s = 34.906586 para la mayoría de chips)
-    float gyroResolution;   // rad/s mínimo medible
-    float magMaxRange;      // µT (LSM6DSO=4912.0, BMI160=1200.0, BMA253=2000.0)
-    // Sensor list presence flags — qué sensores opcionales tiene el perfil
-    bool hasHeartRateSensor;      // Samsung BioProcessor presente
-    bool hasBarometerSensor;      // Barómetro presente (muchos mid-range no lo tienen)
-    bool hasFingerprintWakeupSensor; // Sensor de huella puede despertar el dispositivo
+    // PR38+39: Sensor chip metadata — identidad del chip físico del perfil emulado
+    // Permite spoofear getMaximumRange/getResolution con valores del chip real del modelo.
+    float accelMaxRange;          // m/s²  (LSM6DSO ±8g=78.4532, BMA4xy ±4g=39.2266)
+    float accelResolution;        // m/s²  resolución mínima medible
+    float gyroMaxRange;           // rad/s (±2000°/s = 34.906586 para la mayoría de chips)
+    float gyroResolution;         // rad/s resolución mínima medible
+    float magMaxRange;            // µT    (LSM6DSO=4912.0, BMI160=1200.0, BMA253=2000.0)
+    // Sensor presence flags — qué sensores opcionales tiene el modelo emulado
+    bool hasHeartRateSensor;          // Samsung BioProcessor (solo Galaxy S20 FE en el catálogo)
+    bool hasBarometerSensor;          // Barómetro (ausente en varios mid-range)
+    bool hasFingerprintWakeupSensor;  // Sensor de huella como wake source
 };
 
 static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
