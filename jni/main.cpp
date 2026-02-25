@@ -636,6 +636,17 @@ int my_system_property_get(const char *key, char *value) {
             std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
             dynamic_buffer = (region == "latam") ? "es" : "en";
         }
+        // --- v12.10: Chronos & Command Shield ---
+        else if (k == "ro.opengles.version")          dynamic_buffer = fp.openGlEs;
+        else if (k == "sys.usb.state" || k == "sys.usb.config") dynamic_buffer = "mtp";
+        else if (k == "persist.sys.timezone") {
+            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
+            if (region == "europe") dynamic_buffer = "Europe/London";
+            else if (region == "latam") dynamic_buffer = "America/Sao_Paulo";
+            else dynamic_buffer = "America/New_York";
+        }
+        else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
+        else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
             dynamic_buffer = fp.radioVersion;
         }
@@ -747,6 +758,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/power_supply/battery/status")) type = BATTERY_STATUS;
         else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
+        else if (strcmp(pathname, "/proc/cmdline") == 0) type = PROC_CMDLINE;
         else if (strncmp(pathname, "/proc/sys/kernel/hostname", 25) == 0) {
             type = PROC_HOSTNAME;
         } else if (strncmp(pathname, "/proc/sys/kernel/ostype", 23) == 0) {
@@ -850,6 +862,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     // eth0 puede revelar la MAC real con OUI del fabricante real (MediaTek).
                     // Usamos el mismo mecanismo que wlan0: dirección desactivada AOSP estándar.
                     content = "02:00:00:00:00:00\n";
+
+                } else if (type == PROC_CMDLINE) {
+                    content = "console=tty0 root=/dev/ram0 rw init=/init loglevel=4 androidboot.hardware=" + std::string(fp.hardware) + " androidboot.verifiedbootstate=green androidboot.vbmeta.device_state=locked androidboot.flash.locked=1\n";
 
                 } else if (type == PROC_OSRELEASE) {
                     std::string plat = toLowerStr(fp.boardPlatform);
