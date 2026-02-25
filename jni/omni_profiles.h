@@ -215,7 +215,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     { "Galaxy F62", {
         "samsung", "samsung", "SM-E625F", "e1q", "e1qsqz", "exynos9825", "exynos9825", "E625FXXU2BUG1",
         "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "",
-        "E625FXXU2BUG1", "2021-07-01", "11", "exynos9825", "mali", "196610", "exynos9825", "zygote64_32",
+        "E625FXXU2BUG1", "2021-07-01", "11", "exynos9825", "mali", "196610", "Exynos9825", "zygote64_32",
         "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012",
         "e1qsqz-user 11 RP1A.200720.012 E625FXXU2BUG1 release-keys", "e1qsqz-user", "SWDD5830", "dpi", "1625097600", "REL", "0",
         "ARM", "Mali-G76 MP12", "OpenGL ES 3.2 v1.r23p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "393", 8, 6

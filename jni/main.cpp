@@ -56,7 +56,9 @@ enum FileType {
     BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS,
     SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE,
     PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT,
-    PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS
+    PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS,
+    BT_MAC, BT_NAME,
+    PROC_NET_ARP, PROC_NET_DEV
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -534,6 +536,41 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.product.system.model" ||
                  k == "ro.product.vendor.model" ||
                  k == "ro.product.odm.model")               dynamic_buffer = fp.model;
+        // --- PR20: Namespaces system/vendor/odm (Android 11 lee estos antes del raíz) ---
+        else if (k == "ro.product.system.brand"        ||
+                 k == "ro.product.vendor.brand"        ||
+                 k == "ro.product.odm.brand")               dynamic_buffer = fp.brand;
+        else if (k == "ro.product.system.manufacturer" ||
+                 k == "ro.product.vendor.manufacturer" ||
+                 k == "ro.product.odm.manufacturer")        dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.system.device"       ||
+                 k == "ro.product.vendor.device"       ||
+                 k == "ro.product.odm.device")              dynamic_buffer = fp.device;
+        else if (k == "ro.product.system.name"         ||
+                 k == "ro.product.vendor.name"         ||
+                 k == "ro.product.odm.name")               dynamic_buffer = fp.product;
+        // --- PR20: CPU ABI lists (consultadas por Play Integrity) ---
+        else if (k == "ro.product.cpu.abilist"         ||
+                 k == "ro.product.system.cpu.abilist")      dynamic_buffer = "arm64-v8a,armeabi-v7a,armeabi";
+        else if (k == "ro.product.cpu.abilist64")           dynamic_buffer = "arm64-v8a";
+        else if (k == "ro.product.cpu.abilist32")           dynamic_buffer = "armeabi-v7a,armeabi";
+        // --- PR20: Build characteristics (brand-aware) ---
+        else if (k == "ro.build.characteristics") {
+            std::string br = toLowerStr(fp.brand);
+            if (br == "samsung")      dynamic_buffer = "phone";
+            else if (br == "google")  dynamic_buffer = "nosdcard";
+            else                      dynamic_buffer = "default";
+        }
+        // --- PR20: Estado de cifrado (Android 11 espera siempre file-based encryption) ---
+        else if (k == "ro.crypto.state")                    dynamic_buffer = "encrypted";
+        else if (k == "ro.crypto.type")                     dynamic_buffer = "file";
+        // --- PR20: Locale coherente con región del perfil ---
+        else if (k == "ro.product.locale" || k == "persist.sys.locale") {
+            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
+            if (region == "europe")      dynamic_buffer = "en-GB";
+            else if (region == "latam")  dynamic_buffer = "es-US";
+            else                         dynamic_buffer = "en-US"; // usa + default
+        }
         else if (k == "ro.product.first_api_level") {
             int release_api = 0;
             try { release_api = std::stoi(fp.release); } catch (...) {}
@@ -542,6 +579,25 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
             dynamic_buffer = fp.radioVersion;
+        }
+        else if (k == "gsm.sim.operator.numeric" || k == "gsm.operator.numeric") {
+            // Extraer el MCC/MNC directamente del IMSI generado
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            dynamic_buffer = imsi.substr(0, 5);
+        }
+        else if (k == "gsm.sim.operator.iso-country" || k == "gsm.operator.iso-country") {
+            // Sincronizar ISO con la región del motor
+            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
+            if (region == "usa") dynamic_buffer = "us";
+            else if (region == "europe") dynamic_buffer = "gb";
+            else if (region == "latam") dynamic_buffer = "br";
+            else dynamic_buffer = "us";
+        }
+        else if (k == "gsm.sim.operator.alpha" || k == "gsm.operator.alpha") {
+            dynamic_buffer = "Omni Network";
+        }
+        else if (k == "ro.mediadrm.device_id" || k == "drm.service.enabled") {
+            dynamic_buffer = omni::engine::generateWidevineId(g_masterSeed);
         }
         else if (k == "gsm.version.ril-impl")
             dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
@@ -641,6 +697,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/stat")) type = PROC_STAT;
         else if (strstr(pathname, "/sys/block/") && (strstr(pathname, "device/model") || strstr(pathname, "device/name"))) type = SYS_BLOCK_MODEL;
         else if (strstr(pathname, "scaling_available_governors")) type = SYS_CPU_GOVERNORS;
+        else if (strstr(pathname, "/sys/class/bluetooth/hci0/address")) type = BT_MAC;
+        else if (strstr(pathname, "/sys/class/bluetooth/hci0/name")) type = BT_NAME;
+        // PR20: Red virtual (oculta MAC real del router y estadísticas reales)
+        else if (strcmp(pathname, "/proc/net/arp") == 0)  type = PROC_NET_ARP;
+        else if (strcmp(pathname, "/proc/net/dev") == 0)  type = PROC_NET_DEV;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -856,6 +917,23 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 // Gobernadores AOSP (Elimina firmas 'mtk-cpufreq' o gobernadores propietarios)
                 } else if (type == SYS_CPU_GOVERNORS) {
                     content = "performance powersave schedutil\n";
+                } else if (type == BT_MAC) {
+                    content = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 2) + "\n";
+                } else if (type == BT_NAME) {
+                    content = std::string(fp.model) + "\n";
+                // PR20: Tabla ARP virtualizada (oculta MAC real del gateway)
+                } else if (type == PROC_NET_ARP) {
+                    content = "IP address       HW type  Flags  HW address            Mask     Device\n"
+                              "192.168.1.1      0x1      0x2    00:00:00:00:00:00     *        wlan0\n";
+                // PR20: Estadísticas de red virtualizadas (oculta TX/RX real)
+                } else if (type == PROC_NET_DEV) {
+                    content = "Inter-|   Receive                                                |  Transmit\n"
+                              " face |bytes    packets errs drop fifo frame compressed multicast|"
+                              "bytes    packets errs drop fifo colls carrier compressed\n"
+                              "    lo:       0       0    0    0    0     0          0         0"
+                              "        0       0    0    0    0     0       0          0\n"
+                              " wlan0:  524288    4096    0    0    0     0          0         0"
+                              "   131072    1024    0    0    0     0       0          0\n";
                 }
             }
 
