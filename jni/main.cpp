@@ -45,6 +45,7 @@ static std::string g_currentProfileName = "Redmi 9";
 static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
+static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
 
 struct CachedContent {
     std::string content;
@@ -66,7 +67,10 @@ enum FileType {
     PROC_DTB_MODEL,
     PROC_ETH0_MAC,
     PROC_SELF_STATUS, SYS_CPU_TOPOLOGY, BAT_TECHNOLOGY, BAT_PRESENT,
-    SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP
+    SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP,
+    PROC_BOOT_ID,         // /proc/sys/kernel/random/boot_id — UUID único por device
+    SYS_CPU_FREQ_AVAIL,   // scaling_available_frequencies — firma de plataforma CPU
+    PROC_SELF_CGROUP      // /proc/self/cgroup — puede revelar namespace KernelSU
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -165,9 +169,10 @@ void readConfig() {
             g_config[key] = val;
         }
     }
-    if (g_config.count("profile")) g_currentProfileName = g_config["profile"];
-    if (g_config.count("master_seed")) try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
-    if (g_config.count("jitter")) g_enableJitter = (g_config["jitter"] == "true");
+    if (g_config.count("profile"))       g_currentProfileName = g_config["profile"];
+    if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
+    if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
+    if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
 }
 
 bool shouldHide(const char* key) {
@@ -510,6 +515,26 @@ ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
+// PR37: UUID v4 determinístico desde seed para boot_id
+static std::string generateBootId(long seed) {
+    long s = seed ^ 0xDEADBEEFL;
+    auto nextNibble = [&]() -> char {
+        s = s * 6364136223846793005LL + 1442695040888963407LL;
+        return "0123456789abcdef"[((s >> 33) ^ s) & 0xF];
+    };
+    std::string u;
+    u.reserve(36);
+    for (int i = 0; i < 8;  ++i) u += nextNibble(); u += '-';
+    for (int i = 0; i < 4;  ++i) u += nextNibble(); u += '-';
+    u += '4';
+    for (int i = 0; i < 3;  ++i) u += nextNibble(); u += '-';
+    s = s * 6364136223846793005LL + 1442695040888963407LL;
+    u += "89ab"[((s >> 33) ^ s) & 0x3];
+    for (int i = 0; i < 3;  ++i) u += nextNibble(); u += '-';
+    for (int i = 0; i < 12; ++i) u += nextNibble();
+    return u;
+}
+
 // -----------------------------------------------------------------------------
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
@@ -707,6 +732,17 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
+        // PR37: Network type spoofing — activo solo cuando network_type=lte en config
+        // Oculta señales de conectividad WiFi ante apps que leen system properties
+        else if (g_spoofMobileNetwork && (k == "wifi.interface" ||
+                 k == "dhcp.wlan0.ipaddress" || k == "dhcp.wlan0.dns1" ||
+                 k == "dhcp.wlan0.server"    || k == "net.wifi.ssid"   ||
+                 k == "wifi.on"              || k == "wlan.driver.status")) {
+            dynamic_buffer = "";  // Ocultar señales WiFi
+        }
+        else if (g_spoofMobileNetwork && k == "gsm.network.state") {
+            dynamic_buffer = "CONNECTED";  // Confirmar conexión celular activa
+        }
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
             dynamic_buffer = fp.radioVersion;
         }
@@ -796,6 +832,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         errno = EACCES;
         return -1;
     }
+    // PR37: Bloquear filesystems (revela overlay/erofs de Magisk/KSU)
+    if (path_str == "/proc/filesystems") {
+        errno = EACCES;
+        return -1;
+    }
     if (path_str == "/proc/iomem") {
         return orig_open("/dev/null", flags, mode);
     }
@@ -881,6 +922,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                  strcmp(pathname, "/proc/net/tcp6") == 0)  type = PROC_NET_TCP;
         else if (strcmp(pathname, "/proc/net/udp") == 0 ||
                  strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
+        // PR37: Nuevos VFS handlers
+        else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
+        else if (strcmp(pathname, "/proc/self/cgroup") == 0)               type = PROC_SELF_CGROUP;
+        else if (strstr(pathname, "scaling_available_frequencies"))         type = SYS_CPU_FREQ_AVAIL;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -1195,18 +1240,35 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == BT_NAME) {
                     content = std::string(fp.model) + "\n";
                 // PR20: Tabla ARP virtualizada (oculta MAC real del gateway)
+                // PR37: En modo LTE tabla vacía — datos móviles no exponen gateway ARP local
                 } else if (type == PROC_NET_ARP) {
-                    content = "IP address       HW type  Flags  HW address            Mask     Device\n"
-                              "192.168.1.1      0x1      0x2    00:00:00:00:00:00     *        wlan0\n";
+                    if (g_spoofMobileNetwork) {
+                        content = "IP address       HW type  Flags  HW address            Mask     Device\n";
+                    } else {
+                        content = "IP address       HW type  Flags  HW address            Mask     Device\n"
+                                  "192.168.1.1      0x1      0x2    00:00:00:00:00:00     *        wlan0\n";
+                    }
                 // PR20: Estadísticas de red virtualizadas (oculta TX/RX real)
+                // PR37: En modo LTE mostrar rmnet_data0 en lugar de wlan0
                 } else if (type == PROC_NET_DEV) {
-                    content = "Inter-|   Receive                                                |  Transmit\n"
-                              " face |bytes    packets errs drop fifo frame compressed multicast|"
-                              "bytes    packets errs drop fifo colls carrier compressed\n"
-                              "    lo:       0       0    0    0    0     0          0         0"
-                              "        0       0    0    0    0     0       0          0\n"
-                              " wlan0:  524288    4096    0    0    0     0          0         0"
-                              "   131072    1024    0    0    0     0       0          0\n";
+                    if (g_spoofMobileNetwork) {
+                        // Interfaz de datos móviles con stats LTE realistas
+                        content = "Inter-|   Receive                                                |  Transmit\n"
+                                  " face |bytes    packets errs drop fifo frame compressed multicast|"
+                                  "bytes    packets errs drop fifo colls carrier compressed\n"
+                                  "    lo:       0       0    0    0    0     0          0         0"
+                                  "        0       0    0    0    0     0       0          0\n"
+                                  "rmnet_data0:  2097152    8192    0    0    0     0          0         0"
+                                  "   524288    2048    0    0    0     0       0          0\n";
+                    } else {
+                        content = "Inter-|   Receive                                                |  Transmit\n"
+                                  " face |bytes    packets errs drop fifo frame compressed multicast|"
+                                  "bytes    packets errs drop fifo colls carrier compressed\n"
+                                  "    lo:       0       0    0    0    0     0          0         0"
+                                  "        0       0    0    0    0     0       0          0\n"
+                                  " wlan0:  524288    4096    0    0    0     0          0         0"
+                                  "   131072    1024    0    0    0     0       0          0\n";
+                    }
                 // PR32: Tabla TCP virtualizada — oculta IPs locales y puertos de servicios reales
                 } else if (type == PROC_NET_TCP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
@@ -1214,7 +1276,39 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 // PR32: Tabla UDP virtualizada — ídem
                 } else if (type == PROC_NET_UDP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
-                // Añade esto al final de los else if del contenido VFS
+
+                // PR37: boot_id — UUID determinístico desde seed (Firebase/AppsFlyer lo correlacionan)
+                } else if (type == PROC_BOOT_ID) {
+                    content = generateBootId(g_masterSeed) + "\n";
+
+                // PR37: /proc/self/cgroup — valor genérico de untrusted_app stock
+                } else if (type == PROC_SELF_CGROUP) {
+                    content = "0::/\n";
+
+                // PR37: scaling_available_frequencies — firma de plataforma CPU por SoC
+                } else if (type == SYS_CPU_FREQ_AVAIL) {
+                    std::string plat = toLowerStr(fp.boardPlatform);
+                    if      (plat.find("lahaina")  != std::string::npos) content = "300000 576000 768000 1094400 1401600 1766400 2016000 2265600 2457600 2841600\n";
+                    else if (plat.find("kona")     != std::string::npos) content = "300000 576000 768000 1171200 1401600 1766400 1996800 2265600 2457600 2841600\n";
+                    else if (plat.find("msmnile")  != std::string::npos) content = "300000 576000 768000 1056000 1200000 1401600 1536000 1612800 2016000 2419200 2841600\n";
+                    else if (plat.find("lito")     != std::string::npos ||
+                             plat.find("atoll")    != std::string::npos) content = "300000 576000 768000 1056000 1200000 1401600 1612800 1708800 2016000 2208000 2323200 2515200\n";
+                    else if (plat.find("sm7325")   != std::string::npos) content = "300000 652800 806400 1056000 1209600 1401600 1516800 1612800 2016000 2246400 2515200 2726400\n";
+                    else if (plat.find("sm6350")   != std::string::npos) content = "300000 633600 768000 1036800 1228800 1497600 1612800 1804800\n";
+                    else if (plat.find("bengal")   != std::string::npos ||
+                             plat.find("holi")     != std::string::npos) content = "614400 864000 1056000 1248000 1401600 1497600\n";
+                    else if (plat.find("sm6150")   != std::string::npos) content = "825600 1056000 1209600 1459200 1612800 1766400 1881600 2016000 2208000\n";
+                    else if (plat.find("sdm670")   != std::string::npos) content = "825600 1056000 1209600 1612800 1804800 2073600 2208000\n";
+                    else if (plat.find("mt6785")   != std::string::npos) content = "500000 671875 1000000 1218750 1343750 1500000 1671875 1843750 2062500\n";
+                    else if (plat.find("mt6768")   != std::string::npos ||
+                             plat.find("mt6769")   != std::string::npos) content = "500000 625000 718750 828750 937500 1078750 1178750 1318750 1418750\n";
+                    else if (plat.find("mt6853")   != std::string::npos ||
+                             plat.find("mt6833")   != std::string::npos) content = "500000 718750 1000000 1218750 1343750 1500000 1671875 1843750 2062500\n";
+                    else if (plat.find("mt6765")   != std::string::npos) content = "500000 625000 750000 875000 1000000 1125000 1250000 1350000\n";
+                    else if (plat.find("mt6")      != std::string::npos) content = "500000 718750 1078750 1418750 1756250 1900000\n";
+                    else                                                  content = "300000 576000 768000 1248000 1574400 1766400\n";
+
+                // SYS_CPU_TOPOLOGY (existente, no mover)
                 } else if (type == SYS_CPU_TOPOLOGY) {
                     content = "0-" + std::to_string(fp.core_count - 1) + "\n";
                 } else if (type == BAT_TECHNOLOGY) {
@@ -1258,6 +1352,11 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
 
     std::string path_str(pathname);
     if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+        errno = EACCES;
+        return -1;
+    }
+    // PR37: Bloquear filesystems (revela overlay/erofs de Magisk/KSU)
+    if (path_str == "/proc/filesystems") {
         errno = EACCES;
         return -1;
     }
@@ -1756,9 +1855,12 @@ public:
 
                 jclass str_array_class = env->FindClass("java/lang/String");
 
-                jobjectArray supp_abis_arr = env->NewObjectArray(2, str_array_class, nullptr);
+                // PR37 FIX: SUPPORTED_ABIS debe tener 3 entradas (arm64-v8a, armeabi-v7a, armeabi)
+                // 2 entradas era un bug de PR36 — cualquier ARM64 real reporta las 3
+                jobjectArray supp_abis_arr = env->NewObjectArray(3, str_array_class, nullptr);
                 env->SetObjectArrayElement(supp_abis_arr, 0, abi64);
                 env->SetObjectArrayElement(supp_abis_arr, 1, abi32);
+                env->SetObjectArrayElement(supp_abis_arr, 2, abi_legacy);
 
                 jobjectArray supp_64_arr = env->NewObjectArray(1, str_array_class, nullptr);
                 env->SetObjectArrayElement(supp_64_arr, 0, abi64);
@@ -1780,6 +1882,54 @@ public:
 
                 jfieldID fid_supp_64 = env->GetStaticFieldID(build_class, "SUPPORTED_64_BIT_ABIS", "[Ljava/lang/String;");
                 if (fid_supp_64) env->SetStaticObjectField(build_class, fid_supp_64, supp_64_arr);
+
+                // PR37: Expandir sync a todos los campos Build.* inicializados por Zygote
+                // Estos campos tienen el valor del hardware FÍSICO hasta que los sobrescribimos aquí.
+                // SetStaticObjectField es indetectable — es idéntico a como Zygote los inicializó.
+                if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                    const auto& bfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+
+                    auto setStr = [&](const char* field, const char* val) {
+                        if (!val) return;
+                        jfieldID fid = env->GetStaticFieldID(build_class, field, "Ljava/lang/String;");
+                        if (fid) env->SetStaticObjectField(build_class, fid, env->NewStringUTF(val));
+                    };
+
+                    // Campos principales de Build
+                    setStr("MODEL",        bfp.model);
+                    setStr("BRAND",        bfp.brand);
+                    setStr("MANUFACTURER", bfp.manufacturer);
+                    setStr("DEVICE",       bfp.device);
+                    setStr("PRODUCT",      bfp.product);
+                    setStr("HARDWARE",     bfp.hardware);
+                    setStr("BOARD",        bfp.board);
+                    setStr("FINGERPRINT",  bfp.fingerprint);
+                    setStr("ID",           bfp.buildId);
+                    setStr("DISPLAY",      bfp.display);
+
+                    // Build.SERIAL (API 28+ requiere permiso, pero el campo estático existe)
+                    jfieldID fid_serial = env->GetStaticFieldID(build_class, "SERIAL", "Ljava/lang/String;");
+                    if (fid_serial) {
+                        std::string serial = omni::engine::generateRandomSerial(bfp.brand, g_masterSeed, bfp.securityPatch);
+                        env->SetStaticObjectField(build_class, fid_serial, env->NewStringUTF(serial.c_str()));
+                    }
+
+                    // Build.VERSION.SECURITY_PATCH — en clase anidada Build$VERSION
+                    jclass build_version_class = env->FindClass("android/os/Build$VERSION");
+                    if (build_version_class) {
+                        jfieldID fid_sp = env->GetStaticFieldID(build_version_class, "SECURITY_PATCH", "Ljava/lang/String;");
+                        if (fid_sp) env->SetStaticObjectField(build_version_class, fid_sp,
+                            env->NewStringUTF(bfp.securityPatch));
+
+                        jfieldID fid_release = env->GetStaticFieldID(build_version_class, "RELEASE", "Ljava/lang/String;");
+                        if (fid_release) env->SetStaticObjectField(build_version_class, fid_release,
+                            env->NewStringUTF(bfp.release));
+
+                        jfieldID fid_incr = env->GetStaticFieldID(build_version_class, "INCREMENTAL", "Ljava/lang/String;");
+                        if (fid_incr) env->SetStaticObjectField(build_version_class, fid_incr,
+                            env->NewStringUTF(bfp.incremental));
+                    }
+                }
             }
         }
 
@@ -1851,7 +2001,39 @@ public:
         api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
         api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
 
-        LOGD("System Integrity loaded. Profile: %s", g_currentProfileName.c_str());
+        // PR37: Network type spoofing hooks
+        // Interceptar WifiInfo para ocultar SSID/BSSID cuando g_spoofMobileNetwork=true
+        // NOTA ARQUITECTÓNICA: ConnectivityManager.getActiveNetworkInfo().getType() es Java puro
+        // y pasa por Binder (system_server). No es hookeable con hookJniNativeMethods.
+        // La cobertura aquí es: WifiInfo nativa + system properties + VFS /proc/net/dev.
+        // Cobertura completa de ConnectivityManager requeriría companion app con system perms.
+        if (g_spoofMobileNetwork) {
+            // WifiInfo — tiene métodos nativos accesibles
+            struct WifiInfoHook {
+                static jstring getSSID(JNIEnv* e, jobject) {
+                    return e->NewStringUTF("");  // Sin SSID — no hay red WiFi
+                }
+                static jstring getBSSID(JNIEnv* e, jobject) {
+                    return e->NewStringUTF("02:00:00:00:00:00");  // BSSID nulo AOSP
+                }
+                static jint getRssi(JNIEnv*, jobject) {
+                    return -127;  // Sin señal WiFi
+                }
+                static jint getNetworkId(JNIEnv*, jobject) {
+                    return -1;  // No conectado a ninguna red WiFi
+                }
+            };
+            JNINativeMethod wifiInfoMethods[] = {
+                {"getSSID",     "()Ljava/lang/String;", (void*)WifiInfoHook::getSSID},
+                {"getBSSID",    "()Ljava/lang/String;", (void*)WifiInfoHook::getBSSID},
+                {"getRssi",     "()I",                  (void*)WifiInfoHook::getRssi},
+                {"getNetworkId","()I",                  (void*)WifiInfoHook::getNetworkId},
+            };
+            api->hookJniNativeMethods(env, "android/net/wifi/WifiInfo", wifiInfoMethods, 4);
+        }
+
+        LOGD("System Integrity loaded. Profile: %s | LTE_mode: %s",
+             g_currentProfileName.c_str(), g_spoofMobileNetwork ? "ON" : "OFF");
     }
     void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
