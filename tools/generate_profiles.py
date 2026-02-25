@@ -80,4 +80,16 @@ def generate_header(input_file, output_file):
         f.write("};\n")
 
 if __name__ == "__main__":
+    # ADVERTENCIA (PR29): Este script requiere un archivo externo 'DeviceData.kt.txt'
+    # que NO está incluido en el repositorio. Dicho archivo debe tener el formato
+    # Kotlin DSL: "Device Name" to DeviceFingerprint(field = "value", ...)
+    # Si editas omni_profiles.h directamente (formato C++ posicional), este script
+    # NO puede regenerar el header desde ese archivo — son formatos incompatibles.
+    # Para uso: proveer DeviceData.kt.txt externo antes de ejecutar.
+    import os
+    if not os.path.exists("DeviceData.kt.txt"):
+        print("ERROR: 'DeviceData.kt.txt' no encontrado en el directorio actual.")
+        print("Este archivo fuente externo es requerido y no está incluido en el repo.")
+        print("Si editas omni_profiles.h directamente, no necesitas ejecutar este script.")
+        sys.exit(1)
     generate_header("DeviceData.kt.txt", "jni/omni_profiles.h")

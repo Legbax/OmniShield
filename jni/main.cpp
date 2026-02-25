@@ -452,8 +452,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
 
         // Qualcomm: big.LITTLE topology o A55 homogéneo según familia
         // bengal y trinket = A55 homogéneo. Resto = big(A77/A78) + LITTLE(A55)
-        bool isHomogeneous = (platform.find("bengal")  != std::string::npos) ||
-                             (platform.find("trinket") != std::string::npos);
+        bool isHomogeneous = (platform.find("bengal") != std::string::npos);
 
         // Parámetros del núcleo big según plataforma Qualcomm
         const char* bigPart    = "0xd0d";  // Cortex-A77 (default)
@@ -681,8 +680,11 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "gsm.sim.operator.numeric" || k == "gsm.operator.numeric") {
             // Extraer el MCC/MNC directamente del IMSI generado
+            // 3GPP TS 24.008: MNC de 3 dígitos (USA MCC 310/311) → PLMN de 6 chars
+            // MNC de 2 dígitos (Europa, LATAM) → PLMN de 5 chars
             std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
-            dynamic_buffer = imsi.substr(0, 5);
+            std::string mcc = imsi.substr(0, 3);
+            dynamic_buffer = (mcc == "310" || mcc == "311") ? imsi.substr(0, 6) : imsi.substr(0, 5);
         }
         else if (k == "gsm.sim.operator.iso-country" || k == "gsm.operator.iso-country") {
             // Sincronizar ISO con la región del motor
