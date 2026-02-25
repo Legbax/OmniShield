@@ -27,6 +27,8 @@
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <dirent.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -50,7 +52,7 @@ struct CachedContent {
 };
 
 // FD Tracking
-enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL };
+enum FileType { NONE = 0, PROC_VERSION, PROC_CPUINFO, USB_SERIAL, WIFI_MAC, BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY, BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS, SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE, PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT, PROC_CMDLINE };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
@@ -71,6 +73,8 @@ static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
 static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
 static FILE* (*orig_fopen)(const char*, const char*);
+static int (*orig_ioctl)(int fd, unsigned long request, void* arg);
+static int (*orig_clGetDeviceInfo)(void* device, unsigned int param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret);
 
 // Phase 2 Originals
 #define EGL_VENDOR 0x3053
@@ -98,13 +102,16 @@ static int (*orig_SSL_set_ciphersuites)(SSL *ssl, const char *str);
 // GL Pointers
 typedef unsigned char GLubyte;
 typedef unsigned int GLenum;
+typedef unsigned int GLuint;
 #define GL_VENDOR 0x1F00
 #define GL_RENDERER 0x1F01
 #define GL_VERSION 0x1F02
 static const GLubyte* (*orig_glGetString)(GLenum name);
+static const GLubyte* (*orig_glGetStringi)(GLenum name, GLuint index);
 
 // Vulkan & Sensors
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
+static VkResult (*orig_vkEnumerateDeviceExtensionProperties)(VkPhysicalDevice physicalDevice, const char* pLayerName, uint32_t* pPropertyCount, VkExtensionProperties* pProperties);
 static const char* (*orig_Sensor_getName)(void* sensor);
 static const char* (*orig_Sensor_getVendor)(void* sensor);
 
@@ -177,6 +184,17 @@ static inline bool isHiddenPath(const char* path) {
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
+    if (pathname && strncmp(pathname, "/sys/devices/system/cpu/cpu", 27) == 0) {
+        int cpu_id;
+        if (sscanf(pathname, "/sys/devices/system/cpu/cpu%d", &cpu_id) == 1) {
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) {
+                    errno = ENOENT;
+                    return -1;
+                }
+            }
+        }
+    }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_stat(pathname, statbuf);
 }
@@ -186,6 +204,17 @@ int my_lstat(const char* pathname, struct stat* statbuf) {
 }
 
 int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    if (pathname && strncmp(pathname, "/sys/devices/system/cpu/cpu", 27) == 0) {
+        int cpu_id;
+        if (sscanf(pathname, "/sys/devices/system/cpu/cpu%d", &cpu_id) == 1) {
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) {
+                    errno = ENOENT;
+                    return -1;
+                }
+            }
+        }
+    }
     // Resolver path absoluto si es relativo con AT_FDCWD
     if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
         char cwd[512] = {};
@@ -550,9 +579,7 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (region == "europe") ? "Europe/London" : "America/New_York";
         }
         else if (k == "ro.product.first_api_level") {
-            int release_api = 0;
-            try { release_api = std::stoi(fp.release); } catch (...) {}
-            dynamic_buffer = (release_api >= 11) ? "30" : "29";
+            dynamic_buffer = fp.firstApiLevel;
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
         else if (k == "gsm.version.baseband")               dynamic_buffer = fp.radioVersion;
@@ -643,9 +670,16 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
+        else if (strstr(pathname, "/proc/cmdline")) type = PROC_CMDLINE;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
-        else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
+        else if (strstr(pathname, "/sys/devices/system/cpu/") &&
+                (strstr(pathname, "cpuinfo_max_freq") ||
+                 strstr(pathname, "scaling_max_freq") ||
+                 strstr(pathname, "scaling_min_freq") ||
+                 strstr(pathname, "cpuinfo_min_freq") ||
+                 strstr(pathname, "cpuinfo_cur_freq") ||
+                 strstr(pathname, "scaling_cur_freq"))) type = SYS_CPU_FREQ;
         else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
         else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
         else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
@@ -653,6 +687,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/asound/cards")) type = PROC_ASOUND;
         else if (strstr(pathname, "/proc/bus/input/devices")) type = PROC_INPUT;
         else if (strstr(pathname, "/sys/class/thermal/") && strstr(pathname, "type")) type = SYS_THERMAL;
+        else if (strstr(pathname, "/sys/devices/system/cpu/possible")) type = SYS_CPU_POSSIBLE;
+        else if (strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_PRESENT;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -786,6 +822,17 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         }
                         content = memData;
                     }
+                } else if (type == PROC_CMDLINE) {
+                    char tmpBuf[4096]; ssize_t r; std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
+
+                    size_t hw_pos = rawFile.find("androidboot.hardware=");
+                    if (hw_pos != std::string::npos) {
+                        size_t space_pos = rawFile.find(' ', hw_pos);
+                        if (space_pos == std::string::npos) space_pos = rawFile.length();
+                        rawFile.replace(hw_pos + 21, space_pos - (hw_pos + 21), fp.boardPlatform);
+                    }
+                    content = rawFile;
                 } else if (type == PROC_MODULES || type == PROC_MOUNTS) {
                     char tmpBuf[4096]; ssize_t r; std::string rawFile;
                     while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) rawFile.append(tmpBuf, r);
@@ -794,16 +841,21 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         if (!isHiddenPath(line.c_str())) content += line + "\n";
                     }
                 } else if (type == SYS_CPU_FREQ) {
-                    std::string plat = toLowerStr(fp.boardPlatform);
-                    // Per-SoC big-core max frequency from real hardware dumps
-                    if      (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos||plat.find("msmnile")!=std::string::npos) content="2841600\n";
-                    else if (plat.find("lito")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm7325")!=std::string::npos) content="2400000\n";
-                    else if (plat.find("atoll")!=std::string::npos||plat.find("sdm670")!=std::string::npos) content="2208000\n";
-                    else if (plat.find("bengal")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm6150")!=std::string::npos||plat.find("trinket")!=std::string::npos) content="2016000\n";
-                    else if (plat.find("exynos9825")!=std::string::npos) content="2730000\n";
-                    else if (plat.find("exynos9611")!=std::string::npos||plat.find("exynos9610")!=std::string::npos) content="2300000\n";
-                    else if (plat.find("mt6785")!=std::string::npos) content="2050000\n";
-                    else content="2000000\n"; // MTK/Exynos850 default
+                    if (strstr(pathname, "min")) {
+                        content = "300000\n";
+                    } else if (strstr(pathname, "cur")) {
+                        content = "1200000\n";
+                    } else {
+                        std::string plat = toLowerStr(fp.boardPlatform);
+                        if      (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos||plat.find("msmnile")!=std::string::npos) content="2841600\n";
+                        else if (plat.find("lito")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm7325")!=std::string::npos) content="2400000\n";
+                        else if (plat.find("atoll")!=std::string::npos||plat.find("sdm670")!=std::string::npos) content="2208000\n";
+                        else if (plat.find("bengal")!=std::string::npos||plat.find("sm6350")!=std::string::npos||plat.find("sm6150")!=std::string::npos||plat.find("trinket")!=std::string::npos) content="2016000\n";
+                        else if (plat.find("exynos9825")!=std::string::npos) content="2730000\n";
+                        else if (plat.find("exynos9611")!=std::string::npos||plat.find("exynos9610")!=std::string::npos) content="2300000\n";
+                        else if (plat.find("mt6785")!=std::string::npos) content="2050000\n";
+                        else content="2000000\n";
+                    }
                 } else if (type == SYS_SOC_MACHINE) {
                     content = std::string(fp.hardware) + "\n";
                 } else if (type == SYS_SOC_FAMILY) {
@@ -850,6 +902,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     } else {
                         content = "tsens_tz_sensor\n";
                     }
+                } else if (type == SYS_CPU_POSSIBLE || type == SYS_CPU_PRESENT) {
+                    content = "0-" + std::to_string(fp.core_count - 1) + "\n";
                 }
             }
 
@@ -1067,6 +1121,27 @@ const GLubyte* my_glGetString(GLenum name) {
     return orig_glGetString(name);
 }
 
+const GLubyte* my_glGetStringi(GLenum name, GLuint index) {
+    const GLubyte* ret = orig_glGetStringi(name, index);
+    if (!ret) return ret;
+
+    if (name == GL_EXTENSIONS && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        if (toLowerStr(fp.eglDriver) == "adreno") {
+            std::string ext = reinterpret_cast<const char*>(ret);
+            // Si encontramos una extensión prohibida de ARM/Mali/IMG, la reemplazamos
+            // por una extensión segura y genérica de Qualcomm para no romper el índice.
+            if (ext.find("ARM") != std::string::npos ||
+                ext.find("Mali") != std::string::npos ||
+                ext.find("IMG") != std::string::npos ||
+                ext.find("OES_EGL_image_external_essl3") != std::string::npos) {
+                return (const GLubyte*)"GL_OES_compressed_ETC1_RGB8_texture";
+            }
+        }
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------------------
 // Hooks: Vulkan API
 // -----------------------------------------------------------------------------
@@ -1134,8 +1209,16 @@ const char* my_Sensor_getVendor(void* sensor) {
 int my_sysinfo(struct sysinfo *info) {
     int ret = orig_sysinfo(info);
     if (ret == 0 && info != nullptr) {
+        // Uptime spoofing
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         info->uptime += added_uptime_seconds;
+
+        // RAM spoofing (Sincronización estricta con VFS)
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            unsigned long fakeMemBytes = (unsigned long)fp.ram_gb * 1073741824UL;
+            info->totalram = fakeMemBytes / info->mem_unit;
+        }
     }
     return ret;
 }
@@ -1147,6 +1230,12 @@ struct dirent* my_readdir(DIR *dirp) {
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
+        if (strncmp(dname.c_str(), "cpu", 3) == 0 && isdigit(dname[3])) {
+            int cpu_id = std::stoi(dname.substr(3));
+            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                 if (cpu_id >= G_DEVICE_PROFILES.at(g_currentProfileName).core_count) continue;
+            }
+        }
         if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             if (plat.find("mt") == std::string::npos) {
@@ -1238,6 +1327,63 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 }
 
 
+int my_ioctl(int fd, unsigned long request, void* arg) {
+    int ret = orig_ioctl(fd, request, arg);
+    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
+        struct ifreq *ifr = (struct ifreq *)arg;
+        if (strcmp(ifr->ifr_name, "wlan0") == 0) {
+            unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
+        }
+    }
+    return ret;
+}
+
+VkResult my_vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice, const char* pLayerName,
+    uint32_t* pPropertyCount, VkExtensionProperties* pProperties) {
+
+    VkResult ret = orig_vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+    if (ret == VK_SUCCESS && pProperties != nullptr && pPropertyCount != nullptr) {
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
+            if (egl == "adreno") {
+                uint32_t validCount = 0;
+                for (uint32_t i = 0; i < *pPropertyCount; ++i) {
+                    std::string extName = toLowerStr(pProperties[i].extensionName);
+                    if (extName.find("arm") == std::string::npos && extName.find("mali") == std::string::npos) {
+                        pProperties[validCount] = pProperties[i];
+                        validCount++;
+                    }
+                }
+                *pPropertyCount = validCount;
+            }
+        }
+    }
+    return ret;
+}
+
+#define CL_DEVICE_VENDOR 0x102C
+#define CL_DEVICE_NAME 0x102B
+
+int my_clGetDeviceInfo(void* device, unsigned int param_name, size_t param_value_size, void* param_value, size_t* param_value_size_ret) {
+    int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
+    if (ret == 0 && param_value != nullptr && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string egl = toLowerStr(fp.eglDriver);
+
+        if (egl == "adreno") {
+            if (param_name == CL_DEVICE_VENDOR) {
+                strncpy((char*)param_value, "Qualcomm", param_value_size);
+            } else if (param_name == CL_DEVICE_NAME) {
+                strncpy((char*)param_value, fp.gpuRenderer, param_value_size);
+            }
+        }
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
@@ -1320,9 +1466,22 @@ public:
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
 
+        void* gli_func = DobbySymbolResolver("libGLESv3.so", "glGetStringi");
+        if (gli_func) DobbyHook(gli_func, (void*)my_glGetStringi, (void**)&orig_glGetStringi);
+
         // Vulkan
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
         if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
+
+        void* vk_ext_func = DobbySymbolResolver("libvulkan.so", "vkEnumerateDeviceExtensionProperties");
+        if (vk_ext_func) DobbyHook(vk_ext_func, (void*)my_vkEnumerateDeviceExtensionProperties, (void**)&orig_vkEnumerateDeviceExtensionProperties);
+
+        void* ioctl_func = DobbySymbolResolver(nullptr, "ioctl");
+        if (ioctl_func) DobbyHook(ioctl_func, (void*)my_ioctl, (void**)&orig_ioctl);
+
+        void* opencl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
+        if (!opencl_func) opencl_func = DobbySymbolResolver("libOpenCL.so.1", "clGetDeviceInfo");
+        if (opencl_func) DobbyHook(opencl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
         // Sensores (Mangled names en libandroid.so o libsensors.so)
         // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
