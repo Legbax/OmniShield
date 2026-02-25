@@ -10,6 +10,7 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <regex> // Añadido para TracerPid spoofing
 #include <cstring>
 #include <mutex>
 #include <jni.h>
@@ -62,7 +63,8 @@ enum FileType {
     PROC_HOSTNAME,
     PROC_OSTYPE,
     PROC_DTB_MODEL,
-    PROC_ETH0_MAC
+    PROC_ETH0_MAC,
+    PROC_SELF_STATUS, SYS_CPU_TOPOLOGY, BAT_TECHNOLOGY, BAT_PRESENT
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -581,6 +583,17 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (release_api >= 11) ? "30" : "29";
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
+        // --- PR22: Boot Integrity & Hardware Boot (Defensa profunda TEE) ---
+        else if (k == "ro.boot.verifiedbootstate")    dynamic_buffer = "green";
+        else if (k == "ro.boot.flash.locked")         dynamic_buffer = "1";
+        else if (k == "ro.boot.vbmeta.device_state")  dynamic_buffer = "locked";
+        else if (k == "ro.boot.veritymode")           dynamic_buffer = "enforcing";
+        else if (k == "ro.boot.hardware")             dynamic_buffer = fp.hardware;
+        else if (k == "ro.boot.hardware.platform")    dynamic_buffer = fp.boardPlatform;
+        // --- PR22: Partition Fingerprints (Play Integrity v3+) ---
+        else if (k == "ro.product.system.fingerprint" ||
+                 k == "ro.product.vendor.fingerprint" ||
+                 k == "ro.product.odm.fingerprint")       dynamic_buffer = fp.fingerprint;
         // --- PR21: for_attestation namespace (Play Integrity / Firebase hardened) ---
         // Google Play Services lee estos antes de la hardware-backed attestation.
         // Sin estos hooks, el sistema filtra el identity real del Redmi 9.
@@ -722,6 +735,13 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/cpuinfo")) type = PROC_CPUINFO;
         else if (strstr(pathname, "/sys/class/android_usb") && strstr(pathname, "iSerial")) type = USB_SERIAL;
         else if (strstr(pathname, "/sys/class/net/wlan0/address")) type = WIFI_MAC;
+        // PR22: Hardware Topology & TracerPid
+        else if (strstr(pathname, "/proc/self/status")) type = PROC_SELF_STATUS;
+        else if (strstr(pathname, "/sys/devices/system/cpu/online") ||
+                 strstr(pathname, "/sys/devices/system/cpu/possible") ||
+                 strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_TOPOLOGY;
+        else if (strstr(pathname, "/sys/class/power_supply/battery/technology")) type = BAT_TECHNOLOGY;
+        else if (strstr(pathname, "/sys/class/power_supply/battery/present"))    type = BAT_PRESENT;
         else if (strstr(pathname, "/sys/class/power_supply/battery/temp")) type = BATTERY_TEMP;
         else if (strstr(pathname, "/sys/class/power_supply/battery/voltage_now")) type = BATTERY_VOLT;
         else if (strstr(pathname, "/sys/class/power_supply/battery/capacity")) type = BATTERY_CAPACITY;
@@ -1018,6 +1038,24 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                               "        0       0    0    0    0     0       0          0\n"
                               " wlan0:  524288    4096    0    0    0     0          0         0"
                               "   131072    1024    0    0    0     0       0          0\n";
+                // Añade esto al final de los else if del contenido VFS
+                } else if (type == SYS_CPU_TOPOLOGY) {
+                    content = "0-" + std::to_string(fp.core_count - 1) + "\n";
+                } else if (type == BAT_TECHNOLOGY) {
+                    content = "Li-poly\n";
+                } else if (type == BAT_PRESENT) {
+                    content = "1\n";
+                } else if (type == PROC_SELF_STATUS) {
+                    char tmpBuf[4096];
+                    ssize_t r;
+                    std::string real_content;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1)) > 0) {
+                        tmpBuf[r] = '\0';
+                        real_content += tmpBuf;
+                    }
+                    // Forzar TracerPid a 0 para ocultar hooks de inyección (Dobby/Zygisk)
+                    std::regex tracerRegex("TracerPid:\\s*\\d+");
+                    content = std::regex_replace(real_content, tracerRegex, "TracerPid:\t0");
                 }
             }
 
