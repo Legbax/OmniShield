@@ -10,7 +10,6 @@
 #include <vector>
 #include <map>
 #include <string>
-#include <regex> // Añadido para TracerPid spoofing
 #include <cstring>
 #include <mutex>
 #include <jni.h>
@@ -56,7 +55,7 @@ enum FileType {
     BATTERY_TEMP, BATTERY_VOLT, PROC_MAPS, PROC_UPTIME, BATTERY_CAPACITY,
     BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS,
     SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE,
-    PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT,
+    PROC_ASOUND, PROC_INPUT, SYS_THERMAL,
     PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS,
     BT_MAC, BT_NAME,
     PROC_NET_ARP, PROC_NET_DEV,
@@ -1049,13 +1048,20 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     char tmpBuf[4096];
                     ssize_t r;
                     std::string real_content;
+                    real_content.reserve(4096); // Pre-alloc para evitar reallocs durante el loop
                     while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1)) > 0) {
                         tmpBuf[r] = '\0';
                         real_content += tmpBuf;
                     }
-                    // Forzar TracerPid a 0 para ocultar hooks de inyección (Dobby/Zygisk)
-                    std::regex tracerRegex("TracerPid:\\s*\\d+");
-                    content = std::regex_replace(real_content, tracerRegex, "TracerPid:\t0");
+                    // Sanitizar TracerPid sin regex (O(n) string scan, zero heap alloc extra)
+                    size_t pos = real_content.find("TracerPid:");
+                    if (pos != std::string::npos) {
+                        size_t val_start = pos + 10; // strlen("TracerPid:")
+                        size_t val_end = real_content.find('\n', val_start);
+                        if (val_end == std::string::npos) val_end = real_content.size();
+                        real_content.replace(val_start, val_end - val_start, "\t0");
+                    }
+                    content = real_content;
                 }
             }
 
