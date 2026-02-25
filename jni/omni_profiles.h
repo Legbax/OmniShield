@@ -199,7 +199,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
     { "Galaxy A21s", {
         "samsung", "samsung", "SM-A217F", "a21s", "a21ssqz", "exynos850", "exynos850", "A217FXXU4CUJ1",
         "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
-        "g850-210401-5286", "A217FXXU4CUJ1", "2021-07-01", "11", "exynos850", "mali", "196610", "exynos850", "zygote64_32",
+        "g850-210401-5286", "A217FXXU4CUJ1", "2021-07-01", "11", "exynos850", "mali", "196610", "Exynos850", "zygote64_32",
         "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012",
         "a21ssqz-user 11 RP1A.200720.012 A217FXXU4CUJ1 release-keys", "a21ssqz-user", "SWDD7700", "dpi", "1625097600", "REL", "0",
         "ARM", "Mali-G52 MC1", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404", 8, 4

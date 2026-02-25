@@ -56,8 +56,12 @@ def generate_header(input_file, output_file):
             "screenDensity"
         ]
 
+        int_fields = ["core_count", "ram_gb"]
+
         for field in ordered_fields:
             f.write(f"    const char* {field};\n")
+        for field in int_fields:
+            f.write(f"    int {field};\n")
         f.write("};\n\n")
 
         f.write("static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {\n")
@@ -68,6 +72,9 @@ def generate_header(input_file, output_file):
                 val = fields.get(field, "")
                 val = val.replace('"', '\\"')
                 f.write(f'        "{val}",\n')
+            for field in int_fields:
+                val = fields.get(field, "8" if field == "core_count" else "6")
+                f.write(f'        {val},\n')
             f.write("    } },\n")
 
         f.write("};\n")
