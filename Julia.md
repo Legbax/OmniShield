@@ -372,3 +372,11 @@ vector de fuga del SoC físico vía filesystem — ahora cerrado.
 - **Profile Fix:** `hardwareChipname` del Galaxy F62 corregido de "exynos9825" a "Exynos9825".
 **Prompt del usuario:** "PR20 Namespace Shield & VFS Net — parchear fugas de namespaces secundarios, CPU ABI, build characteristics, crypto state, locale y virtualizar /proc/net/arp + /proc/net/dev. Fix chipname Galaxy F62."
 **Nota para el siguiente agente:** Los namespaces system/vendor/odm son ahora herméticos. El vector de fuga de fabricante real (Xiaomi) en perfiles Samsung/Nokia/Motorola está cerrado.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR23 — Hardware Topology & Toolchain Sync)
+**Resumen de cambios:** v12.9.2 — Saneamiento Crítico de Perfiles y VFS.
+- **Qcom Driver Shield (PR23-001):** Añadidas plataformas `sm6150`, `sm6350` y `sm7325` a la detección `isQcom` en `my_open` y `my_openat`. Evita que el VFS exponga el driver `/dev/mali` en emulaciones de hardware Snapdragon 690/710/778G.
+- **MT6765 Topology Fix (PR23-003):** Se añadió lógica de `cpuinfo` dedicada para el SoC `mt6765` (Galaxy A12), forzando una topología homogénea de 8x Cortex-A53 (`0xd03`) y evitando el fallback a BogoMIPS de Qualcomm.
+- **Python Toolchain Sync (PR23-002):** Actualizado `tools/generate_profiles.py` para soportar de manera nativa los campos enteros `core_count` y `ram_gb` inyectados en el `struct DeviceFingerprint`. Previene corrupción de datos en futuras regeneraciones del header C++.
+**Prompt del usuario:** "Despliegue de Omni-Shield v12.9.2 (Hardware Topology & Toolchain Sync - PR23)..."
+**Nota personal para el siguiente agente:** La arquitectura C++ y las herramientas de automatización de Python vuelven a estar en perfecta sintonía geométrica. Los crasheos gráficos de los modelos Snapdragon y la quimera del Galaxy A12 han sido erradicados. `tools/upgrade_profiles.py` fue excluido deliberadamente de este parche; si se vuelve a utilizar, deberá ser actualizado con `core_count` y `ram_gb`.

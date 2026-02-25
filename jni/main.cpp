@@ -414,6 +414,18 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             out += "CPU part\t: 0xd05\n";
             out += "CPU revision\t: 1\n\n";
         }
+    } else if (platform.find("mt6765") != std::string::npos) {
+        // Helio P35: 8x Cortex-A53 homogéneo
+        for(int i = 0; i < fp.core_count; ++i) {
+            out += "processor\t: " + std::to_string(i) + "\n";
+            out += "BogoMIPS\t: 26.00\n";
+            out += "Features\t: " + features + "\n";
+            out += "CPU implementer\t: 0x41\n";
+            out += "CPU architecture: 8\n";
+            out += "CPU variant\t: 0x0\n";
+            out += "CPU part\t: 0xd03\n"; // Cortex-A53
+            out += "CPU revision\t: 0\n\n";
+        }
     } else {
         // Fallback: Qualcomm big.LITTLE A77/A78+A55 vs Exynos/otros (A55 homogeneous)
         std::string brandLower = toLowerStr(fp.brand);
@@ -731,7 +743,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
-            bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos || plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos);
+            bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos || plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos || plat.find("sm6150") != std::string::npos || plat.find("sm6350") != std::string::npos || plat.find("sm7325") != std::string::npos);
 
             // Si el perfil emula Snapdragon/Adreno, la app no debe poder abrir el driver de Mali, y viceversa
             if (isQcom && strstr(pathname, "/dev/mali")) { errno = ENOENT; return -1; }
@@ -1101,7 +1113,7 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
         if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
             std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
             std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
-            bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos || plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos);
+            bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos || plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos || plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos || plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos || plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos || plat.find("sm6150") != std::string::npos || plat.find("sm6350") != std::string::npos || plat.find("sm7325") != std::string::npos);
 
             // Si el perfil emula Snapdragon/Adreno, la app no debe poder abrir el driver de Mali, y viceversa
             if (isQcom && strstr(pathname, "/dev/mali")) { errno = ENOENT; return -1; }
