@@ -673,7 +673,13 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/cmdline")) type = PROC_CMDLINE;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
-        else if (strstr(pathname, "/sys/devices/system/cpu/") && (strstr(pathname, "cpuinfo_max_freq") || strstr(pathname, "scaling_max_freq") || strstr(pathname, "scaling_min_freq") || strstr(pathname, "cpuinfo_min_freq"))) type = SYS_CPU_FREQ;
+        else if (strstr(pathname, "/sys/devices/system/cpu/") &&
+                (strstr(pathname, "cpuinfo_max_freq") ||
+                 strstr(pathname, "scaling_max_freq") ||
+                 strstr(pathname, "scaling_min_freq") ||
+                 strstr(pathname, "cpuinfo_min_freq") ||
+                 strstr(pathname, "cpuinfo_cur_freq") ||
+                 strstr(pathname, "scaling_cur_freq"))) type = SYS_CPU_FREQ;
         else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
         else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
         else if (strstr(pathname, "/sys/devices/soc0/soc_id")) type = SYS_SOC_ID;
@@ -837,9 +843,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == SYS_CPU_FREQ) {
                     if (strstr(pathname, "min")) {
                         content = "300000\n";
+                    } else if (strstr(pathname, "cur")) {
+                        content = "1200000\n";
                     } else {
                         std::string plat = toLowerStr(fp.boardPlatform);
-                        // Per-SoC big-core max frequency from real hardware dumps
                         if      (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos||plat.find("msmnile")!=std::string::npos) content="2841600\n";
                         else if (plat.find("lito")!=std::string::npos||plat.find("holi")!=std::string::npos||plat.find("sm7325")!=std::string::npos) content="2400000\n";
                         else if (plat.find("atoll")!=std::string::npos||plat.find("sdm670")!=std::string::npos) content="2208000\n";
@@ -847,7 +854,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         else if (plat.find("exynos9825")!=std::string::npos) content="2730000\n";
                         else if (plat.find("exynos9611")!=std::string::npos||plat.find("exynos9610")!=std::string::npos) content="2300000\n";
                         else if (plat.find("mt6785")!=std::string::npos) content="2050000\n";
-                        else content="2000000\n"; // MTK/Exynos850 default
+                        else content="2000000\n";
                     }
                 } else if (type == SYS_SOC_MACHINE) {
                     content = std::string(fp.hardware) + "\n";
@@ -1202,8 +1209,16 @@ const char* my_Sensor_getVendor(void* sensor) {
 int my_sysinfo(struct sysinfo *info) {
     int ret = orig_sysinfo(info);
     if (ret == 0 && info != nullptr) {
+        // Uptime spoofing
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         info->uptime += added_uptime_seconds;
+
+        // RAM spoofing (Sincronización estricta con VFS)
+        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+            const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            unsigned long fakeMemBytes = (unsigned long)fp.ram_gb * 1073741824UL;
+            info->totalram = fakeMemBytes / info->mem_unit;
+        }
     }
     return ret;
 }

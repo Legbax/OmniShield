@@ -305,3 +305,10 @@ jitter=true
 - **CPU Governor Shield (Fisura 3):** Expansión del VFS para cubrir `scaling_max_freq`, `scaling_min_freq`, y `cpuinfo_min_freq`. Implementación de frecuencia mínima genérica (300MHz) para evitar detección de gobernadores propietarios.
 **Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.3... Fisura 1: Fuga de Identidad Gráfica vía OpenCL... Fisura 2: Parámetros de Arranque del Kernel... Fisura 3: Frecuencias de Escalado..."
 **Nota para el siguiente agente:** El sistema ahora presenta una identidad gráfica monolítica (GLES+Vulkan+OpenCL) y oculta rastros del bootloader en el kernel space virtualizado.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (Omni-Shield v12.4)
+**Resumen de cambios:** v12.4 — Deep Memory & Active Frequency Shield.
+- **Sysinfo RAM Sync (Fisura 1):** Reescritura de `my_sysinfo`. Ahora intercepta `totalram` para inyectar el valor exacto del perfil (`ram_gb`), asegurando paridad matemática entre `/proc/meminfo` y las syscalls del sistema (Capa 7).
+- **Active Frequency Cloak (Fisura 2):** Expansión del VFS de CPU para cubrir `cpuinfo_cur_freq` y `scaling_cur_freq`. Se fuerza un valor estático de 1.2GHz ("1200000") para ocultar el comportamiento dinámico del gobernador y la carga térmica real (Capa 8).
+**Prompt del usuario:** "Inicializando protocolo de actualización a Omni-Shield v12.4... Fisura 1: Desincronización de Memoria RAM vía Syscall sysinfo... Fisura 2: Fuga de Frecuencia Activa del Procesador..."
+**Nota para el siguiente agente:** La memoria del sistema es ahora matemáticamente coherente en todas las interfaces de lectura. La actividad de la CPU está enmascarada bajo una carga estática simulada.
