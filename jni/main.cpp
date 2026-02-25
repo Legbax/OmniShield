@@ -319,8 +319,8 @@ int my_uname(struct utsname *buf) {
                 // Google compila sus propios kernels con hashes de commit específicos
                 if (plat.find("lito") != std::string::npos)
                     kv = "4.19.113-g820a424c538c-ab7336171";        // Pixel 5, 4a 5G
-                else if (plat.find("trinket") != std::string::npos)
-                    kv = "4.14.255-g67c58a7c42a0-ab7336171";        // Pixel 4a
+                else if (plat.find("atoll") != std::string::npos)
+                    kv = "4.14.150-g62a62a5a93f7-ab7336171";         // Pixel 4a (sunfish/SM7150)
                 else if (plat.find("sdm670") != std::string::npos)
                     kv = "4.9.189-g5d098cef6d96-ab6174032";         // Pixel 3a XL
                 else
@@ -470,6 +470,10 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
             bigPart = "0xd0a"; bigVariant = "0x2"; bigRev = "1"; // Cortex-A75
         } else if (platform.find("sm6150") != std::string::npos) {
             bigPart = "0xd0b"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A76 (Kryo 460)
+        } else if (platform.find("atoll") != std::string::npos) {
+            bigPart = "0xd0b"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A76 (Kryo 470 Gold)
+        } else if (platform.find("holi") != std::string::npos) {
+            bigPart = "0xd0b"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A76 (Kryo 460 Gold)
         } else if (platform.find("sm7325") != std::string::npos) {
             bigPart = "0xd44"; bigVariant = "0x1"; bigRev = "0"; // Cortex-A78 (Kryo 670)
         }
@@ -840,7 +844,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::string kv = "4.14.186-perf+";
                     if (brd == "google") {
                         if (plat.find("lito")    != std::string::npos) kv = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat.find("trinket") != std::string::npos) kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("atoll") != std::string::npos) kv = "4.14.150-g62a62a5a93f7-ab7336171";
                         else if (plat.find("sdm670")  != std::string::npos) kv = "4.9.189-g5d098cef6d96-ab6174032";
                         else kv = "4.19.113-g820a424c538c-ab7336171";
                     } else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
@@ -913,8 +917,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     if (brd == "google") {
                         if (plat.find("lito") != std::string::npos)
                             kv = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat.find("trinket") != std::string::npos)
-                            kv = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat.find("atoll") != std::string::npos)
+                            kv = "4.14.150-g62a62a5a93f7-ab7336171";
                         else if (plat.find("sdm670") != std::string::npos)
                             kv = "4.9.189-g5d098cef6d96-ab6174032";
                         else
@@ -973,7 +977,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::string kv2 = "4.14.186-perf+";
                     if (brd2 == "google") {
                         if (plat2.find("lito")    != std::string::npos) kv2 = "4.19.113-g820a424c538c-ab7336171";
-                        else if (plat2.find("trinket") != std::string::npos) kv2 = "4.14.255-g67c58a7c42a0-ab7336171";
+                        else if (plat2.find("atoll") != std::string::npos) kv2 = "4.14.150-g62a62a5a93f7-ab7336171";
                         else if (plat2.find("sdm670")  != std::string::npos) kv2 = "4.9.189-g5d098cef6d96-ab6174032";
                         else kv2 = "4.19.113-g820a424c538c-ab7336171";
                     } else if (plat2.find("mt6")    != std::string::npos) kv2 = "4.14.141-perf+";
