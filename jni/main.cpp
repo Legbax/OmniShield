@@ -27,6 +27,8 @@
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <dirent.h>
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -101,6 +103,7 @@ static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, si
 // Phase 4 Originals (v11.9.9)
 static int (*orig_sysinfo)(struct sysinfo *info);
 static struct dirent* (*orig_readdir)(DIR *dirp);
+static unsigned long (*orig_getauxval)(unsigned long type);
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -632,9 +635,13 @@ int my_system_property_get(const char *key, char *value) {
                 dynamic_buffer = "bootdevice";                // MediaTek: path genérico MTK
             } else if (plat.find("exynos") != std::string::npos ||
                        plat.find("s5e")    != std::string::npos) {
-                dynamic_buffer = "soc/11120000.ufs";          // Samsung Exynos UFS genérico
+                dynamic_buffer = "soc/11120000.ufs";          // Samsung Exynos: UFS 2.1
+            } else if (plat.find("bengal")  != std::string::npos ||
+                       plat.find("holi")    != std::string::npos ||
+                       plat.find("trinket") != std::string::npos) {
+                dynamic_buffer = "soc/4744000.sdhci";             // PR33: SM6115/SM4350 = eMMC 5.1
             } else {
-                dynamic_buffer = "soc/1d84000.ufshc";         // Qualcomm UFS genérico (SM7150/SM8250/etc.)
+                dynamic_buffer = "soc/1d84000.ufshc";             // Qualcomm UFS (kona/lahaina/lito/msmnile/etc.)
             }
         }
         else if (k == "ro.boot.flash.locked")         dynamic_buffer = "1";
@@ -782,6 +789,17 @@ int my_system_property_get(const char *key, char *value) {
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
 int my_open(const char *pathname, int flags, mode_t mode) {
+    if (!pathname) return orig_open(pathname, flags, mode);
+
+    std::string path_str(pathname);
+    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+        errno = EACCES;
+        return -1;
+    }
+    if (path_str == "/proc/iomem") {
+        return orig_open("/dev/null", flags, mode);
+    }
+
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
         errno = EACCES;
         return -1;
@@ -1236,6 +1254,17 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    if (!pathname) return orig_openat(dirfd, pathname, flags, mode);
+
+    std::string path_str(pathname);
+    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+        errno = EACCES;
+        return -1;
+    }
+    if (path_str == "/proc/iomem") {
+        return orig_openat(dirfd, "/dev/null", flags, mode);
+    }
+
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
         errno = EACCES;
         return -1;
@@ -1543,6 +1572,36 @@ struct dirent* my_readdir(DIR *dirp) {
 }
 
 // -----------------------------------------------------------------------------
+// Hooks: Hardware Capabilities (getauxval)
+// -----------------------------------------------------------------------------
+#ifndef HWCAP_ATOMICS
+#define HWCAP_ATOMICS (1 << 8)
+#define HWCAP_FPHP    (1 << 9)
+#define HWCAP_ASIMDHP (1 << 10)
+#define HWCAP_ASIMDDP (1 << 20)
+#define HWCAP_LRCPC   (1 << 21)
+#endif
+
+unsigned long my_getauxval(unsigned long type) {
+    unsigned long val = orig_getauxval(type);
+    if ((type == AT_HWCAP || type == AT_HWCAP2) && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string plat = toLowerStr(fp.boardPlatform);
+
+        // Si el perfil es Cortex-A53 puro (ARMv8.0), apagamos las flags ARMv8.2+
+        // del kernel físico para no contradecir el cpuinfo falso.
+        if (plat.find("mt6765") != std::string::npos) {
+            if (type == AT_HWCAP) {
+                val &= ~(HWCAP_ATOMICS | HWCAP_FPHP | HWCAP_ASIMDHP | HWCAP_ASIMDDP | HWCAP_LRCPC);
+            } else if (type == AT_HWCAP2) {
+                val = 0; // ARMv8.0 no tiene features extendidas
+            }
+        }
+    }
+    return val;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
 static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
@@ -1681,6 +1740,48 @@ public:
 
         void* readdir_func = DobbySymbolResolver(nullptr, "readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
+
+        void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
+        if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
+
+        // -----------------------------------------------------------------------------
+        // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote
+        // -----------------------------------------------------------------------------
+        if (env) {
+            jclass build_class = env->FindClass("android/os/Build");
+            if (build_class) {
+                jstring abi64 = env->NewStringUTF("arm64-v8a");
+                jstring abi32 = env->NewStringUTF("armeabi-v7a");
+                jstring abi_legacy = env->NewStringUTF("armeabi"); // ARMv5 legacy compat
+
+                jclass str_array_class = env->FindClass("java/lang/String");
+
+                jobjectArray supp_abis_arr = env->NewObjectArray(2, str_array_class, nullptr);
+                env->SetObjectArrayElement(supp_abis_arr, 0, abi64);
+                env->SetObjectArrayElement(supp_abis_arr, 1, abi32);
+
+                jobjectArray supp_64_arr = env->NewObjectArray(1, str_array_class, nullptr);
+                env->SetObjectArrayElement(supp_64_arr, 0, abi64);
+
+                jobjectArray supp_32_arr = env->NewObjectArray(1, str_array_class, nullptr);
+                env->SetObjectArrayElement(supp_32_arr, 0, abi32);
+
+                jfieldID fid_cpu_abi = env->GetStaticFieldID(build_class, "CPU_ABI", "Ljava/lang/String;");
+                if (fid_cpu_abi) env->SetStaticObjectField(build_class, fid_cpu_abi, abi64);
+
+                jfieldID fid_cpu_abi2 = env->GetStaticFieldID(build_class, "CPU_ABI2", "Ljava/lang/String;");
+                if (fid_cpu_abi2) env->SetStaticObjectField(build_class, fid_cpu_abi2, abi_legacy);
+
+                jfieldID fid_supp_abis = env->GetStaticFieldID(build_class, "SUPPORTED_ABIS", "[Ljava/lang/String;");
+                if (fid_supp_abis) env->SetStaticObjectField(build_class, fid_supp_abis, supp_abis_arr);
+
+                jfieldID fid_supp_32 = env->GetStaticFieldID(build_class, "SUPPORTED_32_BIT_ABIS", "[Ljava/lang/String;");
+                if (fid_supp_32) env->SetStaticObjectField(build_class, fid_supp_32, supp_32_arr);
+
+                jfieldID fid_supp_64 = env->GetStaticFieldID(build_class, "SUPPORTED_64_BIT_ABIS", "[Ljava/lang/String;");
+                if (fid_supp_64) env->SetStaticObjectField(build_class, fid_supp_64, supp_64_arr);
+            }
+        }
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");

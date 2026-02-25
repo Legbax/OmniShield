@@ -82,7 +82,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "V12.5.1.0.RJZMIXM", "2021-07-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
         "Redmi/joyeuse_global/joyeuse:11/RKQ1.200826.002/V12.5.1.0.RJZMIXM:user/release-keys", "RKQ1.200826.002",
         "joyeuse_global-user 11 RKQ1.200826.002 V12.5.1.0.RJZMIXM release-keys", "joyeuse_global-user", "pangu-build-component-system-175632", "builder",
-        "1622112000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 6
+        "1622112000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 6
     } },
     { "Redmi Note 10", {
         "Xiaomi", "Redmi", "M2101K7AI", "mojito", "mojito_global", "qcom", "mojito", "V12.5.6.0.RKFMIXM",
@@ -186,7 +186,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "S5E9611", "zygote64_32",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012",
         "m31sqz-user 11 RP1A.200720.012 M315FXXU4CUG1 release-keys", "m31sqz-user", "21R3NF12", "dpi", "1636934400", "REL", "0",
-        "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404", 8, 6
+        "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2340", "403", 8, 6
     } },
     { "Galaxy A12", {
         "samsung", "samsung", "SM-A125F", "a12", "a12sqz", "mt6765", "mt6765", "A125FXXU5BUJ1",
@@ -234,7 +234,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1", "2105101635", "2021-06-05", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
         "OnePlus/avicii/OnePlus Nord:11/RKQ1.201022.002/2105101635:user/release-keys", "RKQ1.201022.002",
         "avicii-user 11 RKQ1.201022.002 2105101635 release-keys", "avicii-user", "builder02.oneplus.com", "builduser",
-        "1620604800", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8
+        "1620604800", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "408", 8, 8
     } },
     { "OnePlus N10 5G", {
         "OnePlus", "OnePlus", "BE2025", "OnePlus N10 5G", "billie", "qcom", "sm6350", "2104132208",
@@ -250,7 +250,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "2105100150", "2021-06-05", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
         "OnePlus/instantnoodle/OnePlus8:11/RP1A.200720.011/2105100150:user/release-keys", "RP1A.200720.011",
         "instantnoodle-user 11 RP1A.200720.011 2105100150 release-keys", "instantnoodle-user", "builder04.oneplus.com", "builduser",
-        "1620518400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8
+        "1620518400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "401", 8, 8
     } },
     { "Pixel 5", {
         "Google", "google", "Pixel 5", "redfin", "redfin", "redfin", "redfin", "r8.0.0-6692804",
@@ -290,7 +290,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00055-SM6115_GEN_PACK-1", "2b4fae", "2021-05-01", "11", "bengal", "adreno", "196610", "SM6115", "zygote64_32",
         "motorola/borneo/borneo:11/RRQ31.Q3-47-22/2b4fae:user/release-keys", "RRQ31.Q3-47-22",
         "borneo-user 11 RRQ31.Q3-47-22 2b4fae release-keys", "borneo-user", "buildbot-motoauto06.mcd.mot.com", "hudsoncm",
-        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386", 8, 4
+        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 4
     } },
     { "Moto G Stylus 2021", {
         "motorola", "motorola", "moto g stylus (2021) 5G", "nairo", "nairo_retail", "qcom", "holi", "1.0.0.0",

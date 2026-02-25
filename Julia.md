@@ -486,3 +486,71 @@ Fuente: auditoría Claude (DPI) + Gemini Red Team (9 hallazgos).
 - PROC_OSRELEASE ahora tiene exactamente 1 handler (kv/plat/brd). Si ves dos, es una regresión.
 - El bloque kv2/plat2/brd2 fue eliminado intencionalmente en PR32 — no restaurar.
 - Finding 8 (Gemini Widevine) fue descartado: ya cubierto por Phantom Signal PR.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR33 — Precision Seal)
+**Resumen de cambios:** v12.9.13 — 3 correcciones residuales post-PR32 (5 modificaciones en 5 archivos).
+
+- **FIX-01/02 (module.prop + build.yml):** Versión bump v12.9.12 → v12.9.13.
+- **FIX-03 (omni_profiles.h):** Moto G Power 2021 (borneo/bengal) screenDensity: 386 → 404.
+  Pantalla 6.5" 1080×2400 → 404.9 ppi ≈ 404. Error de arrastre identificado en auditoría PR31
+  pero accidentalmente omitido del PR32. ADVERTENCIA: Moto G Stylus 2021 (nairo/holi) conserva
+  DPI 386 — correcto para pantalla 6.8".
+- **FIX-04 (main.cpp):** ro.boot.bootdevice: añadido branch eMMC para bengal/holi/trinket →
+  "soc/4744000.sdhci". SM6115 (Snapdragon 662) y SM4350 (Snapdragon 480) usan eMMC 5.1, no UFS.
+  El fallback Qualcomm UFS "soc/1d84000.ufshc" (PR32) era incorrecto para estos 3 dispositivos:
+  Moto G Power 2021, Nokia 5.4, Moto G Stylus 2021.
+- **FIX-05 (upgrade_profiles.py):** Añadidas 3 entradas al dict de diagonales (POCO F3 6.67",
+  Nokia 5.4 6.39", Moto G Power 2021 6.5" explícito). Añadido dict dpi_overrides con Mi 11 (395)
+  y Nokia 5.4 (409) para proteger valores canónicos que difieren del cálculo matemático puro.
+  Sin este fix, una ejecución de upgrade_profiles.py revertía silenciosamente los DPIs corregidos
+  en PR32.
+
+**Nota para el siguiente agente:**
+- Moto G Stylus 2021 (nairo/holi): DPI 386 = CORRECTO (pantalla 6.8") — no modificar.
+- Nokia 8.3 5G (BVUB_00WW/lito): DPI 386 = CORRECTO (pantalla 6.81") — no modificar.
+- dpi_overrides en upgrade_profiles.py es permanente — no eliminar aunque parezca redundante.
+- El fallback Qualcomm UFS (soc/1d84000.ufshc) es correcto para: kona, lahaina, lito, atoll,
+  msmnile, sdm670, sm6150, sm6350, sm7325. Solo bengal/holi/trinket son eMMC en el catálogo.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR34 — The DPI Seal II)
+**Resumen de cambios:** v12.9.14 — 10 correcciones DPI residuales + dict completo (12 modificaciones en 2 archivos).
+Origen: auditoría post-PR33 detectó que upgrade_profiles.py cubría solo 18/40 dispositivos.
+
+- **FIX-01/02 (module.prop + build.yml):** Versión bump v12.9.13 → v12.9.14.
+- **FIX-03 (omni_profiles.h):** Redmi Note 9 Pro (joyeuse/atoll) DPI 404→394. 6.67" 1080×2400.
+- **FIX-04 (omni_profiles.h):** OnePlus Nord (avicii/lito) DPI 404→408. 6.44" 1080×2400.
+- **FIX-05 (omni_profiles.h):** OnePlus 8 (instantnoodle/kona) DPI 404→401. 6.55" 1080×2400.
+- **FIX-06 (omni_profiles.h):** Mi 11 Lite (courbet/atoll) DPI 404→401. 6.55" 1080×2400.
+- **FIX-07 (omni_profiles.h):** Realme 8 Pro (RMX3091/atoll) DPI 404→411. 6.4" 1080×2400.
+- **FIX-08 (omni_profiles.h):** Realme 8 (RMX3085/mt6785) DPI 404→411. 6.4" 1080×2400.
+- **FIX-09 (omni_profiles.h):** Realme GT Master (RMX3363/sm7325) DPI 404→409. 6.43" 1080×2400.
+- **FIX-10 (omni_profiles.h):** Galaxy M31 (m31sqz/exynos9611) height 2400→2340 + DPI 404→403.
+  Pantalla FHD+ REAL del SM-M315F es 2340×1080. Samsung spec: 403 ppi.
+  ADVERTENCIA: Galaxy A51 (a51sqz) conserva height 2400 + DPI 404 — CORRECTO, NO TOCAR.
+- **FIX-11 (omni_profiles.h):** Redmi 10X 4G (merlin/mt6769) DPI 404→403. 6.53" 1080×2400.
+- **FIX-12 (omni_profiles.h):** OnePlus N10 5G (billie/sm6350) DPI 404→405. 6.49" 1080×2400.
+- **FIX-13 (upgrade_profiles.py):** Dict diagonals ampliado de 18→28 entradas. Height override
+  añade Galaxy M31 a lista 2340. dpi_overrides añade Galaxy M31→"403".
+
+**Nota para el siguiente agente:**
+- El catálogo de 40 perfiles tiene ahora DPIs matemáticamente correctos o con override canónico.
+- Perfiles protegidos sin modificar: Nokia 8.3 5G (386 ✅), Moto G Stylus 2021 (386 ✅),
+  Moto G Power 2021 (404 ✅), POCO F3 (394 ✅), Nokia 5.4 (409 ✅), Mi 11 (395 ✅).
+- Galaxy A51 (a51sqz): height 2400 + DPI 404 = CORRECTO (pantalla 6.5" FHD+ estándar).
+- Los 5 perfiles Pixel conservan sus DPIs originales (valores Google spec no generados por math).
+- upgrade_profiles.py diagonals dict: 28 entradas cubre todos los perfiles no-Pixel del catálogo.
+  Los Pixel se excluyen del dict intencionalmente — sus DPIs son especificaciones Google directas.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR35-Mini — HWCAP Shield)
+**Resumen de cambios:** v12.9.15 — Prevención de contradicción de kernel AT_HWCAP y AT_HWCAP2.
+- **HWCAP Shield:** Implementado hook quirúrgico a `getauxval()`. Cuando el perfil emulado es de arquitectura ARMv8.0 (`mt6765` / Cortex-A53), el módulo aplica una máscara (Bitwise AND) para ocultar las flags `HWCAP_ATOMICS`, `ASIMDDP`, `LRCPC`, etc. También fuerza `AT_HWCAP2` a 0 para prevenir fugas de instrucciones SVE o ARMv8.3+ que el kernel físico inyecta en la memoria de la app.
+- **Eficiencia:** Implementación mediante bloques estrictos de búsqueda y reemplazo para garantizar la integridad posicional del código.
+**Prompt del usuario:** "Misión: Despliegue de Omni-Shield v12.9.15 (HWCAP Shield — PR35-Mini) usando patrón estricto BUSCAR/REEMPLAZAR..."
+**Nota personal para el siguiente agente:** Con este parche, la coherencia de CPU se sostiene tanto en lectura de texto (VFS `/proc/cpuinfo`) como en la consulta binaria directa al kernel (`getauxval`). El escudo cumple los estándares de C++ y bloquea el análisis profundo sin desestabilizar la libc.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR36 — Forensic VFS & API Seal)
+**Resumen de cambios:** v12.9.16 — Sellado de fugas pasivas de VFS y Java API.
+- **Forensic VFS Shield:** Implementada interceptación nativa en `open/openat` para archivos sensibles. `/proc/modules`, `/proc/interrupts` y `smaps_rollup` ahora retornan `EACCES` (simulando restricciones SELinux en untrusted_app). `/proc/iomem` se redirige silenciosamente a `/dev/null` para evadir detecciones en entornos KernelSU.
+- **JNI API Sync:** Añadida sincronización vía JNI Reflection en `postAppSpecialize`. Se sobrescriben los 5 campos estáticos de la clase `android.os.Build` (`CPU_ABI`, `CPU_ABI2` con `armeabi`, `SUPPORTED_ABIS`, `SUPPORTED_32_BIT_ABIS`, `SUPPORTED_64_BIT_ABIS`) que Zygote inicializa antes de la inyección.
+**Prompt del usuario:** "Misión: Despliegue de Omni-Shield v12.9.16 (Forensic VFS & API Seal — PR36)..."
+**⚠️ NOTA CRÍTICA PARA EL SIGUIENTE AGENTE (DEUDA TÉCNICA JNI):** El bloque de sincronización JNI asume que el perfil es siempre `zygote64_32` (arm64-v8a + armeabi-v7a). Esto es 100% correcto para los 40 perfiles del catálogo actual. SIN EMBARGO, si en el futuro se añade un perfil ARM32 puro (ej. un smartwatch o dispositivo IoT antiguo), este bloque JNI forzará variables de 64 bits y creará una quimera detectable. Si se añaden perfiles no-64bit, el bloque JNI debe refactorizarse para leer la propiedad `fp.zygote` del perfil activo.
