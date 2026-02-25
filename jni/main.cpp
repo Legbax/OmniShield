@@ -56,7 +56,8 @@ enum FileType {
     BATTERY_STATUS, PROC_OSRELEASE, PROC_MEMINFO, PROC_MODULES, PROC_MOUNTS,
     SYS_CPU_FREQ, SYS_SOC_MACHINE, SYS_SOC_FAMILY, SYS_SOC_ID, SYS_FB0_SIZE,
     PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT,
-    PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS
+    PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS,
+    BT_MAC, BT_NAME
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -543,6 +544,25 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
             dynamic_buffer = fp.radioVersion;
         }
+        else if (k == "gsm.sim.operator.numeric" || k == "gsm.operator.numeric") {
+            // Extraer el MCC/MNC directamente del IMSI generado
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            dynamic_buffer = imsi.substr(0, 5);
+        }
+        else if (k == "gsm.sim.operator.iso-country" || k == "gsm.operator.iso-country") {
+            // Sincronizar ISO con la región del motor
+            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
+            if (region == "usa") dynamic_buffer = "us";
+            else if (region == "europe") dynamic_buffer = "gb";
+            else if (region == "latam") dynamic_buffer = "br";
+            else dynamic_buffer = "us";
+        }
+        else if (k == "gsm.sim.operator.alpha" || k == "gsm.operator.alpha") {
+            dynamic_buffer = "Omni Network";
+        }
+        else if (k == "ro.mediadrm.device_id" || k == "drm.service.enabled") {
+            dynamic_buffer = omni::engine::generateWidevineId(g_masterSeed);
+        }
         else if (k == "gsm.version.ril-impl")
             dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
@@ -641,6 +661,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/stat")) type = PROC_STAT;
         else if (strstr(pathname, "/sys/block/") && (strstr(pathname, "device/model") || strstr(pathname, "device/name"))) type = SYS_BLOCK_MODEL;
         else if (strstr(pathname, "scaling_available_governors")) type = SYS_CPU_GOVERNORS;
+        else if (strstr(pathname, "/sys/class/bluetooth/hci0/address")) type = BT_MAC;
+        else if (strstr(pathname, "/sys/class/bluetooth/hci0/name")) type = BT_NAME;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
 
@@ -856,6 +878,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 // Gobernadores AOSP (Elimina firmas 'mtk-cpufreq' o gobernadores propietarios)
                 } else if (type == SYS_CPU_GOVERNORS) {
                     content = "performance powersave schedutil\n";
+                } else if (type == BT_MAC) {
+                    content = omni::engine::generateRandomMac(fp.brand, g_masterSeed + 2) + "\n";
+                } else if (type == BT_NAME) {
+                    content = std::string(fp.model) + "\n";
                 }
             }
 

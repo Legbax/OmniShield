@@ -296,3 +296,11 @@ jitter=true
 - **Anti-MTK:** Vaciado activo de `ro.mediatek.version.release` y `ro.mediatek.platform` cuando el perfil no es MediaTek.
 **Prompt del usuario:** "Ejecutar el "PR18" para alcanzar la versión final absoluta v12.0 (The Void)... Bloqueo a nivel HAL..."
 **Nota para el siguiente agente:** Hemos llegado al final. El sistema es ahora una sombra perfecta. No queda nada más por interceptar sin entrar en el espacio del kernel ring-0.
+
+**Fecha y agente:** 25 de febrero de 2026, Jules (The Phantom Signal)
+**Resumen de cambios:** v12.11 — The Phantom Signal (Identidad de Red y DRM).
+- **Widevine Shield:** Intercepción de propiedades DRM (`ro.mediadrm.device_id`) para evitar la fuga del `deviceUniqueId` real de MediaDrm.
+- **Bluetooth VFS:** Virtualización de `/sys/class/bluetooth/hci0/address` y `name`. El adaptador Bluetooth ahora emite una MAC cifrada y el nombre del modelo emulado.
+- **Operator Sync:** Falsificación dinámica de `gsm.sim.operator.numeric` y `iso-country`. El MCC/MNC ahora se extrae matemáticamente del IMSI emulado, logrando una sincronización total entre la SIM virtual y la región del sistema.
+**Prompt del usuario:** "Genera el prompt para la aplicación de la versión 12.11 (Phantom Signal)... explicito e incluir el código a reemplazar."
+**Nota personal para el siguiente agente:** Los vectores de fuga pasiva han sido eliminados. La tarjeta SIM, el Bluetooth y el DRM ahora operan en completa resonancia matemática con la identidad del dispositivo emulado.
