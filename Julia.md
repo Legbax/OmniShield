@@ -398,3 +398,11 @@ vector de fuga del SoC físico vía filesystem — ahora cerrado.
 - **Dead Code Cleanup (PR25-003):** Eliminada detección duplicada de `PROC_OSRELEASE` en la cadena FileType de `my_open()`.
 **Prompt del usuario:** "Despliegue de Omni-Shield v12.9.4 (A53 Feature Fidelity — PR25)"
 **Nota personal para el siguiente agente:** Post-PR25, los 40 perfiles pasan 472/472 checks en 14 vectores de detección con 0 CRITICAL y 0 WARN. La única área de mejora pendiente es el mapping fino de `cpuinfo_max_freq` por plataforma (actualmente binario 2841600/2000000), pero su impacto de detección es mínimo.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR26 — HAL Property Coherence)
+**Resumen de cambios:** v12.9.5 — Desacoplamiento de Coherencia HAL.
+- **EGL Driver Fix (PR26-001):** `ro.hardware.egl` separado del bloque HAL genérico. Ahora retorna `fp.eglDriver` (`adreno`, `mali`, `powervr`) en lugar de `fp.boardPlatform`. Esto cierra una inconsistencia crítica donde apps anticheat leían el nombre del SoC a través de esta propiedad.
+- **Vulkan Driver Fix (PR26-002):** `ro.hardware.vulkan` separado del bloque HAL genérico, retornando `fp.eglDriver` para coherencia con el driver gráfico real.
+- **HAL Camera/Audio/Keystore:** Mantenidos con `fp.boardPlatform` que es el comportamiento canónico de Android para estas propiedades. Se verificó tanto en `my_system_property_get` como en `my_system_property_read_callback`.
+**Prompt del usuario:** "Despliegue de Omni-Shield v12.9.5 (HAL Property Coherence — PR26)"
+**Nota personal para el siguiente agente:** Post-PR26, los 40 perfiles pasan 707/707 checks en 18 vectores de detección durante ciclos limpios. Las propiedades HAL de gráficos (egl/vulkan) ahora son coherentes con el driver del perfil emulado. El bloque HAL genérico (`camera`/`keystore`/`audio`) mantiene `boardPlatform` que es correcto. La única área de mejora residual en todo el sistema es el mapping fino de `cpuinfo_max_freq` por plataforma.

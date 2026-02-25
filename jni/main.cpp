@@ -712,14 +712,18 @@ int my_system_property_get(const char *key, char *value) {
             // ro.soc.model = el chip model del perfil (hardwareChipname)
             dynamic_buffer = fp.hardwareChipname;
         }
-        // --- Intercepción HAL (Cámara, Vulkan, Audio y DRM/Keystore) ---
+        // --- Intercepción HAL (Cámara, Audio y DRM/Keystore) ---
         else if (k == "ro.hardware.camera" ||
-                 k == "ro.hardware.vulkan" ||
                  k == "ro.hardware.keystore" ||
-                 k == "ro.hardware.audio"  ||
-                 k == "ro.hardware.egl") {
+                 k == "ro.hardware.audio") {
             // Forzamos al sistema a reportar el hardware emulado en lugar de la placa base física
             dynamic_buffer = fp.boardPlatform;
+        }
+        // --- Intercepción HAL Gráfico (Vulkan y EGL) ---
+        else if (k == "ro.hardware.vulkan" ||
+                 k == "ro.hardware.egl") {
+            // Android real reporta el driver gráfico ('adreno', 'mali', 'powervr')
+            dynamic_buffer = fp.eglDriver;
         }
         else if (k == "ro.mediatek.version.release" ||
                  k == "ro.mediatek.platform") {
