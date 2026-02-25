@@ -42,8 +42,6 @@ struct DeviceFingerprint {
     int core_count;
     int ram_gb;
     // PR38+39: Sensor chip metadata
-    // Valores canónicos del chip físico del perfil emulado.
-    // Fuente: datasheets de Bosch/ST Micro/TDK + firmware dumps AOSP.
     float accelMaxRange;    // m/s² (LSM6DSO ±8g=78.4532, BMA4xy ±4g=39.2266)
     float accelResolution;  // m/s² mínimo medible
     float gyroMaxRange;     // rad/s (±2000°/s = 34.906586 para la mayoría de chips)
@@ -173,7 +171,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A525F", "a52x", "a52xsqz", "qcom", "atoll", "A525FXXU4AUH1",
         "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A525FXXU4AUH1", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
-        "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "a52xsqz-user", "SWDD7390", "dpi", "1627776000", "REL", "0",
+        "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "RP1A.200720.012",
+        "a52xsqz-user 11 RP1A.200720.012 A525FXXU4AUH1 release-keys", "a52xsqz-user", "SWDD7390", "dpi", "1627776000", "REL", "0",
         "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro)
         false, true, true
@@ -182,7 +181,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A725F", "a72", "a72sqz", "qcom", "atoll", "A725FXXU3AUH2",
         "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A725FXXU3AUH2", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
-        "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "a72sqz-user", "SWDD7391", "dpi", "1627776000", "REL", "0",
+        "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "RP1A.200720.012",
+        "a72sqz-user 11 RP1A.200720.012 A725FXXU3AUH2 release-keys", "a72sqz-user", "SWDD7391", "dpi", "1627776000", "REL", "0",
         "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "393", 8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro)
         false, true, true
@@ -191,7 +191,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A326B", "a32x", "a32xsqz", "mt6853", "mt6853", "A326BXXU4AUH1",
         "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V84.6", "A326BXXU4AUH1", "2021-08-01", "11", "mt6853", "mali", "196610", "MT6853", "zygote64_32",
-        "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "a32xsqz-user", "SWDD8201", "dpi", "1627776000", "REL", "0",
+        "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "RP1A.200720.012",
+        "a32xsqz-user 11 RP1A.200720.012 A326BXXU4AUH1 release-keys", "a32xsqz-user", "SWDD8201", "dpi", "1627776000", "REL", "0",
         "ARM", "Mali-G57 MC3", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404", 8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch)
         false, true, true
@@ -200,7 +201,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-G781B", "r8q", "r8qsqz", "qcom", "kona", "G781BXXU3CUJ2",
         "samsung/r8qsqz/r8q:11/RP1A.200720.012/G781BXXU3CUJ2:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "G781BXXU3CUJ2", "2021-10-01", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
-        "samsung/r8qsqz/r8q:11/RP1A.200720.012/G781BXXU3CUJ2:user/release-keys", "r8qsqz-user", "SWDD5130", "dpi", "1633046400", "REL", "0",
+        "samsung/r8qsqz/r8q:11/RP1A.200720.012/G781BXXU3CUJ2:user/release-keys", "RP1A.200720.012",
+        "r8qsqz-user 11 RP1A.200720.012 G781BXXU3CUJ2 release-keys", "r8qsqz-user", "SWDD5130", "dpi", "1633046400", "REL", "0",
         "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404", 8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
         true, true, true
@@ -209,7 +211,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A515F", "a51", "a51sqz", "exynos9611", "exynos9611", "A515FXXU4CUG1",
         "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "A515FXXU4CUG1",
         "A515FXXU4CUG1", "2021-07-01", "11", "exynos9611", "mali", "196610", "Exynos9611", "zygote64_32",
-        "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "a51sqz-user", "21R3NF12", "dpi", "1625097600", "REL", "0",
+        "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012",
+        "a51sqz-user 11 RP1A.200720.012 A515FXXU4CUG1 release-keys", "a51sqz-user", "21R3NF12", "dpi", "1625097600", "REL", "0",
         "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404", 8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch)
         false, true, true
@@ -218,7 +221,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "m31", "M315FXXU4CUG1",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "M315FXXU4CUG1",
         "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "S5E9611", "zygote64_32",
-        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "m31sqz-user", "21R3NF12", "dpi", "1636934400", "REL", "0",
+        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012",
+        "m31sqz-user 11 RP1A.200720.012 M315FXXU4CUG1 release-keys", "m31sqz-user", "21R3NF12", "dpi", "1636934400", "REL", "0",
         "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2340", "403", 8, 6,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch)
         false, true, true
@@ -227,7 +231,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A125F", "a12", "a12sqz", "mt6765", "mt6765", "A125FXXU5BUJ1",
         "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V56.6", "A125FXXU5BUJ1", "2021-10-01", "11", "mt6765", "powervr", "196610", "MT6765", "zygote64_32",
-        "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "a12sqz-user", "SWDD8800", "dpi", "1633046400", "REL", "0",
+        "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "RP1A.200720.012",
+        "a12sqz-user 11 RP1A.200720.012 A125FXXU5BUJ1 release-keys", "a12sqz-user", "SWDD8800", "dpi", "1633046400", "REL", "0",
         "Imagination Technologies", "PowerVR GE8320", "OpenGL ES 3.2 build 1.13@5776728", "1080", "2400", "404", 8, 4,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch)
         false, false, false
@@ -236,7 +241,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A217F", "a21s", "a21ssqz", "exynos850", "exynos850", "A217FXXU4CUJ1",
         "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "g850-210401-5286", "A217FXXU4CUJ1", "2021-07-01", "11", "exynos850", "mali", "196610", "Exynos850", "zygote64_32",
-        "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "a21ssqz-user", "SWDD7700", "dpi", "1625097600", "REL", "0",
+        "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012",
+        "a21ssqz-user 11 RP1A.200720.012 A217FXXU4CUJ1 release-keys", "a21ssqz-user", "SWDD7700", "dpi", "1625097600", "REL", "0",
         "ARM", "Mali-G52 MC1", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404", 8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch)
         false, true, true
@@ -245,7 +251,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-A315F", "a31", "a31sqz", "mt6768", "mt6768", "A315FXXU4CUH1",
         "samsung/a31sqz/a31:11/RP1A.200720.012/A315FXXU4CUH1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V84.P47", "A315FXXU4CUH1", "2021-08-01", "11", "mt6768", "mali", "196610", "MT6768", "zygote64_32",
-        "samsung/a31sqz/a31:11/RP1A.200720.012/A315FXXU4CUH1:user/release-keys", "a31sqz-user", "SWDD8100", "dpi", "1627776000", "REL", "0",
+        "samsung/a31sqz/a31:11/RP1A.200720.012/A315FXXU4CUH1:user/release-keys", "RP1A.200720.012",
+        "a31sqz-user 11 RP1A.200720.012 A315FXXU4CUH1 release-keys", "a31sqz-user", "SWDD8100", "dpi", "1627776000", "REL", "0",
         "ARM", "Mali-G52 MC2", "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "411", 8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch) - Samsung usa BMI160 en la mayoría de la serie A
         false, true, true
@@ -254,7 +261,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "samsung", "samsung", "SM-E625F", "e1q", "e1qsqz", "exynos9825", "exynos9825", "E625FXXU2BUG1",
         "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user", "E625FXXU2BUG1",
         "E625FXXU2BUG1", "2021-07-01", "11", "exynos9825", "mali", "196610", "Exynos9825", "zygote64_32",
-        "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "e1qsqz-user", "SWDD5830", "dpi", "1625097600", "REL", "0",
+        "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012",
+        "e1qsqz-user 11 RP1A.200720.012 E625FXXU2BUG1 release-keys", "e1qsqz-user", "SWDD5830", "dpi", "1625097600", "REL", "0",
         "ARM", "Mali-G76 MP12", "OpenGL ES 3.2 v1.r23p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "393", 8, 6,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch)
         false, true, true
@@ -263,7 +271,8 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "OnePlus", "OnePlus", "KB2001", "OnePlus8T", "OnePlus8T", "qcom", "kona", "2107142215",
         "OnePlus/kebab/OnePlus8T:11/RP1A.200720.011/2107142215:user/release-keys", "RP1A.200720.011", "release-keys", "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "2107142215", "2021-07-05", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
-        "OnePlus/kebab/OnePlus8T:11/RP1A.200720.011/2107142215:user/release-keys", "kebab-user", "builder01.oneplus.com", "builduser",
+        "OnePlus/kebab/OnePlus8T:11/RP1A.200720.011/2107142215:user/release-keys", "RP1A.200720.011",
+        "kebab-user 11 RP1A.200720.011 2107142215 release-keys", "kebab-user", "builder01.oneplus.com", "builduser",
         "1626307200", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "401", 8, 12,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
         false, true, true
