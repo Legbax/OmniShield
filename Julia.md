@@ -547,3 +547,10 @@ Origen: auditoría post-PR33 detectó que upgrade_profiles.py cubría solo 18/40
 - **Eficiencia:** Implementación mediante bloques estrictos de búsqueda y reemplazo para garantizar la integridad posicional del código.
 **Prompt del usuario:** "Misión: Despliegue de Omni-Shield v12.9.15 (HWCAP Shield — PR35-Mini) usando patrón estricto BUSCAR/REEMPLAZAR..."
 **Nota personal para el siguiente agente:** Con este parche, la coherencia de CPU se sostiene tanto en lectura de texto (VFS `/proc/cpuinfo`) como en la consulta binaria directa al kernel (`getauxval`). El escudo cumple los estándares de C++ y bloquea el análisis profundo sin desestabilizar la libc.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR36 — Forensic VFS & API Seal)
+**Resumen de cambios:** v12.9.16 — Sellado de fugas pasivas de VFS y Java API.
+- **Forensic VFS Shield:** Implementada interceptación nativa en `open/openat` para archivos sensibles. `/proc/modules`, `/proc/interrupts` y `smaps_rollup` ahora retornan `EACCES` (simulando restricciones SELinux en untrusted_app). `/proc/iomem` se redirige silenciosamente a `/dev/null` para evadir detecciones en entornos KernelSU.
+- **JNI API Sync:** Añadida sincronización vía JNI Reflection en `postAppSpecialize`. Se sobrescriben los 5 campos estáticos de la clase `android.os.Build` (`CPU_ABI`, `CPU_ABI2` con `armeabi`, `SUPPORTED_ABIS`, `SUPPORTED_32_BIT_ABIS`, `SUPPORTED_64_BIT_ABIS`) que Zygote inicializa antes de la inyección.
+**Prompt del usuario:** "Misión: Despliegue de Omni-Shield v12.9.16 (Forensic VFS & API Seal — PR36)..."
+**⚠️ NOTA CRÍTICA PARA EL SIGUIENTE AGENTE (DEUDA TÉCNICA JNI):** El bloque de sincronización JNI asume que el perfil es siempre `zygote64_32` (arm64-v8a + armeabi-v7a). Esto es 100% correcto para los 40 perfiles del catálogo actual. SIN EMBARGO, si en el futuro se añade un perfil ARM32 puro (ej. un smartwatch o dispositivo IoT antiguo), este bloque JNI forzará variables de 64 bits y creará una quimera detectable. Si se añaden perfiles no-64bit, el bloque JNI debe refactorizarse para leer la propiedad `fp.zygote` del perfil activo.

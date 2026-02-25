@@ -789,6 +789,17 @@ int my_system_property_get(const char *key, char *value) {
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
 int my_open(const char *pathname, int flags, mode_t mode) {
+    if (!pathname) return orig_open(pathname, flags, mode);
+
+    std::string path_str(pathname);
+    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+        errno = EACCES;
+        return -1;
+    }
+    if (path_str == "/proc/iomem") {
+        return orig_open("/dev/null", flags, mode);
+    }
+
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
         errno = EACCES;
         return -1;
@@ -1243,6 +1254,17 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    if (!pathname) return orig_openat(dirfd, pathname, flags, mode);
+
+    std::string path_str(pathname);
+    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+        errno = EACCES;
+        return -1;
+    }
+    if (path_str == "/proc/iomem") {
+        return orig_openat(dirfd, "/dev/null", flags, mode);
+    }
+
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
         errno = EACCES;
         return -1;
@@ -1721,6 +1743,45 @@ public:
 
         void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
+
+        // -----------------------------------------------------------------------------
+        // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote
+        // -----------------------------------------------------------------------------
+        if (env) {
+            jclass build_class = env->FindClass("android/os/Build");
+            if (build_class) {
+                jstring abi64 = env->NewStringUTF("arm64-v8a");
+                jstring abi32 = env->NewStringUTF("armeabi-v7a");
+                jstring abi_legacy = env->NewStringUTF("armeabi"); // ARMv5 legacy compat
+
+                jclass str_array_class = env->FindClass("java/lang/String");
+
+                jobjectArray supp_abis_arr = env->NewObjectArray(2, str_array_class, nullptr);
+                env->SetObjectArrayElement(supp_abis_arr, 0, abi64);
+                env->SetObjectArrayElement(supp_abis_arr, 1, abi32);
+
+                jobjectArray supp_64_arr = env->NewObjectArray(1, str_array_class, nullptr);
+                env->SetObjectArrayElement(supp_64_arr, 0, abi64);
+
+                jobjectArray supp_32_arr = env->NewObjectArray(1, str_array_class, nullptr);
+                env->SetObjectArrayElement(supp_32_arr, 0, abi32);
+
+                jfieldID fid_cpu_abi = env->GetStaticFieldID(build_class, "CPU_ABI", "Ljava/lang/String;");
+                if (fid_cpu_abi) env->SetStaticObjectField(build_class, fid_cpu_abi, abi64);
+
+                jfieldID fid_cpu_abi2 = env->GetStaticFieldID(build_class, "CPU_ABI2", "Ljava/lang/String;");
+                if (fid_cpu_abi2) env->SetStaticObjectField(build_class, fid_cpu_abi2, abi_legacy);
+
+                jfieldID fid_supp_abis = env->GetStaticFieldID(build_class, "SUPPORTED_ABIS", "[Ljava/lang/String;");
+                if (fid_supp_abis) env->SetStaticObjectField(build_class, fid_supp_abis, supp_abis_arr);
+
+                jfieldID fid_supp_32 = env->GetStaticFieldID(build_class, "SUPPORTED_32_BIT_ABIS", "[Ljava/lang/String;");
+                if (fid_supp_32) env->SetStaticObjectField(build_class, fid_supp_32, supp_32_arr);
+
+                jfieldID fid_supp_64 = env->GetStaticFieldID(build_class, "SUPPORTED_64_BIT_ABIS", "[Ljava/lang/String;");
+                if (fid_supp_64) env->SetStaticObjectField(build_class, fid_supp_64, supp_64_arr);
+            }
+        }
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");

@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.15
-versionCode=12915
+version=v12.9.16
+versionCode=12916
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR35-Mini — HWCAP Shield.
+description=Total Invisibility (The Void). Zygisk module. PR29 — Audit Fix.
