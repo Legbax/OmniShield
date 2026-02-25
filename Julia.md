@@ -540,3 +540,10 @@ Origen: auditoría post-PR33 detectó que upgrade_profiles.py cubría solo 18/40
 - Los 5 perfiles Pixel conservan sus DPIs originales (valores Google spec no generados por math).
 - upgrade_profiles.py diagonals dict: 28 entradas cubre todos los perfiles no-Pixel del catálogo.
   Los Pixel se excluyen del dict intencionalmente — sus DPIs son especificaciones Google directas.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR35-Mini — HWCAP Shield)
+**Resumen de cambios:** v12.9.15 — Prevención de contradicción de kernel AT_HWCAP y AT_HWCAP2.
+- **HWCAP Shield:** Implementado hook quirúrgico a `getauxval()`. Cuando el perfil emulado es de arquitectura ARMv8.0 (`mt6765` / Cortex-A53), el módulo aplica una máscara (Bitwise AND) para ocultar las flags `HWCAP_ATOMICS`, `ASIMDDP`, `LRCPC`, etc. También fuerza `AT_HWCAP2` a 0 para prevenir fugas de instrucciones SVE o ARMv8.3+ que el kernel físico inyecta en la memoria de la app.
+- **Eficiencia:** Implementación mediante bloques estrictos de búsqueda y reemplazo para garantizar la integridad posicional del código.
+**Prompt del usuario:** "Misión: Despliegue de Omni-Shield v12.9.15 (HWCAP Shield — PR35-Mini) usando patrón estricto BUSCAR/REEMPLAZAR..."
+**Nota personal para el siguiente agente:** Con este parche, la coherencia de CPU se sostiene tanto en lectura de texto (VFS `/proc/cpuinfo`) como en la consulta binaria directa al kernel (`getauxval`). El escudo cumple los estándares de C++ y bloquea el análisis profundo sin desestabilizar la libc.

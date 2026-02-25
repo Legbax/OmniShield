@@ -27,6 +27,8 @@
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <dirent.h>
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -101,6 +103,7 @@ static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, si
 // Phase 4 Originals (v11.9.9)
 static int (*orig_sysinfo)(struct sysinfo *info);
 static struct dirent* (*orig_readdir)(DIR *dirp);
+static unsigned long (*orig_getauxval)(unsigned long type);
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -1547,6 +1550,36 @@ struct dirent* my_readdir(DIR *dirp) {
 }
 
 // -----------------------------------------------------------------------------
+// Hooks: Hardware Capabilities (getauxval)
+// -----------------------------------------------------------------------------
+#ifndef HWCAP_ATOMICS
+#define HWCAP_ATOMICS (1 << 8)
+#define HWCAP_FPHP    (1 << 9)
+#define HWCAP_ASIMDHP (1 << 10)
+#define HWCAP_ASIMDDP (1 << 20)
+#define HWCAP_LRCPC   (1 << 21)
+#endif
+
+unsigned long my_getauxval(unsigned long type) {
+    unsigned long val = orig_getauxval(type);
+    if ((type == AT_HWCAP || type == AT_HWCAP2) && G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        std::string plat = toLowerStr(fp.boardPlatform);
+
+        // Si el perfil es Cortex-A53 puro (ARMv8.0), apagamos las flags ARMv8.2+
+        // del kernel físico para no contradecir el cpuinfo falso.
+        if (plat.find("mt6765") != std::string::npos) {
+            if (type == AT_HWCAP) {
+                val &= ~(HWCAP_ATOMICS | HWCAP_FPHP | HWCAP_ASIMDHP | HWCAP_ASIMDDP | HWCAP_LRCPC);
+            } else if (type == AT_HWCAP2) {
+                val = 0; // ARMv8.0 no tiene features extendidas
+            }
+        }
+    }
+    return val;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
 static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
@@ -1685,6 +1718,9 @@ public:
 
         void* readdir_func = DobbySymbolResolver(nullptr, "readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
+
+        void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
+        if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
