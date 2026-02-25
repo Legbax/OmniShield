@@ -69,11 +69,16 @@ def upgrade_profiles(input_file, output_file):
         f.write("#pragma once\n#include <string>\n#include <map>\n\nstruct DeviceFingerprint {\n")
         all_keys = keys + ["gpuVendor", "gpuRenderer", "gpuVersion", "screenWidth", "screenHeight", "screenDensity"]
         for field in all_keys: f.write(f"    const char* {field};\n")
+        int_fields = ["core_count", "ram_gb"]
+        for field in int_fields: f.write(f"    int {field};\n")
         f.write("};\n\nstatic const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {\n")
 
         for name, vals in profiles:
             f.write(f'    {{ "{name}", {{\n')
             for val in vals: f.write(f'        "{val}",\n')
+            # Append default int values (these will be manually maintained)
+            f.write('        8,\n')   # core_count default
+            f.write('        6,\n')   # ram_gb default
             f.write("    } },\n")
         f.write("};\n")
 

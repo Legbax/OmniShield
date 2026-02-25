@@ -380,3 +380,13 @@ vector de fuga del SoC físico vía filesystem — ahora cerrado.
 - **Python Toolchain Sync (PR23-002):** Actualizado `tools/generate_profiles.py` para soportar de manera nativa los campos enteros `core_count` y `ram_gb` inyectados en el `struct DeviceFingerprint`. Previene corrupción de datos en futuras regeneraciones del header C++.
 **Prompt del usuario:** "Despliegue de Omni-Shield v12.9.2 (Hardware Topology & Toolchain Sync - PR23)..."
 **Nota personal para el siguiente agente:** La arquitectura C++ y las herramientas de automatización de Python vuelven a estar en perfecta sintonía geométrica. Los crasheos gráficos de los modelos Snapdragon y la quimera del Galaxy A12 han sido erradicados. `tools/upgrade_profiles.py` fue excluido deliberadamente de este parche; si se vuelve a utilizar, deberá ser actualizado con `core_count` y `ram_gb`.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR24 — Frequency Coherence & Kernel Sync)
+**Resumen de cambios:** v12.9.3 — Armonización de Frecuencia, Kernel e Identidad de GPU.
+- **CPU Freq Sync (PR24-001):** Expandida la detección `isQcom` en el handler `SYS_CPU_FREQ` de 4 a 13 plataformas. 13 perfiles Qualcomm recibían frecuencias de CPU incorrectas.
+- **cpuinfo Fallback Sync (PR24-002):** Añadidas plataformas `sm6150`, `sm6350` y `sm7325` al `isQualcomm` del fallback de `generateMulticoreCpuInfo`. Incluidos `bigPart` específicos: `sm6150`→`0xd0b` (A76), `sm7325`→`0xd44` (A78).
+- **Kernel Version Expansion (PR24-003):** Añadidos handlers de versión de kernel para `bengal`/`holi`/`sm6350` (→4.19.157-perf+) y `sm7325` (→5.4.61-perf+) en `my_uname`, `PROC_VERSION` y ambas instancias de `PROC_OSRELEASE`.
+- **PowerVR Driver Shield (PR24-004):** Lógica de bloqueo de drivers GPU expandida de binaria (Qcom/non-Qcom) a ternaria (Adreno/Mali/PowerVR). Galaxy A12 ahora bloquea tanto `/dev/mali` como `/dev/kgsl`.
+- **upgrade_profiles.py Sync (PR24-005):** Sincronizado `tools/upgrade_profiles.py` con la estructura actual del struct C++ (`core_count` + `ram_gb`).
+**Prompt del usuario:** "Despliegue de Omni-Shield v12.9.3 (Frequency Coherence & Kernel Sync — PR24)"
+**Nota personal para el siguiente agente:** Las CUATRO instancias de detección Qualcomm (`my_open` VFS, `my_openat` VFS, `SYS_CPU_FREQ`, `generateMulticoreCpuInfo` fallback) están ahora sincronizadas con la misma lista de 13 plataformas. Las CUATRO ubicaciones de versión de kernel (`my_uname`, `PROC_VERSION`, y dos `PROC_OSRELEASE`) cubren ahora las 18 plataformas del catálogo. Cualquier nueva plataforma Qualcomm debe añadirse en los 8 puntos simultáneamente.
