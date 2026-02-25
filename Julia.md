@@ -63,6 +63,36 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 25 de febrero de 2026, Jules (PR21 — Attestation Fortress)
+**Resumen de cambios:** v12.7 — Attestation Fortress (11 gaps sistémicos cerrados).
+- **for_attestation namespace (FIX-01):** Hook de las 5 properties Play Integrity/Firebase
+  `ro.product.{model,brand,manufacturer,name,device}.for_attestation`.
+- **release_or_codename (FIX-02):** Hook de `ro.build.version.release_or_codename` → fp.release.
+- **board.first_api_level (FIX-03):** Hook derivado del release del perfil (Android 11 → "30").
+- **ODM/system_ext fingerprints (FIX-04):** Hook de `ro.odm.build.fingerprint` y
+  `ro.system_ext.build.fingerprint` → fp.fingerprint (coherencia para Widevine L1).
+- **cpu.abi singular (FIX-05):** Hook de `ro.product.cpu.abi` → "arm64-v8a"
+  (distinto de abilist que ya estaba hooked).
+- **HAL gralloc/hwcomposer (FIX-06):** Extensión del bloque HAL con `ro.hardware.gralloc`,
+  `ro.hardware.hwcomposer` y `ro.hardware.memtrack` → fp.boardPlatform.
+- **persist.sys.country/language (FIX-07):** Hook region-aware para separar country y language
+  (persist.sys.locale ya estaba hooked en PR20 pero las formas granulares no).
+- **VFS hostname (FIX-08):** Virtualización de `/proc/sys/kernel/hostname` → "localhost".
+- **VFS ostype (FIX-09):** Virtualización de `/proc/sys/kernel/ostype` → "Linux"
+  (pendiente desde PR11 LOW L11-ostype).
+- **VFS DTB model (FIX-10):** Virtualización de `/sys/firmware/devicetree/base/model`
+  con manufacturer + model del perfil activo.
+- **VFS eth0 MAC (FIX-11):** Virtualización de `/sys/class/net/eth0/address` → "02:00:00:00:00:00"
+  (wlan0 ya estaba en PR9 pero eth0 no).
+**Descartado:** FIX-12 del auditor — confirmado falso positivo. `gsm.operator.*` (sin .sim.)
+ya están hooked en PR21 (Phantom Signal): líneas `gsm.sim.operator.numeric || gsm.operator.numeric`, etc.
+**Prompt del usuario:** "PR21 Attestation Fortress — 11 gaps sistémicos de Play Integrity, Widevine,
+Snapchat e Instagram. Excluir FIX-12 (confirmado cubierto en PR21/Phantom Signal)."
+**Nota para el siguiente agente:** Post-PR21 el sistema cubre el namespace for_attestation completo
+(crítico para Play Integrity API v3+). La coherencia HAL es ahora total: camera/vulkan/keystore/
+audio/egl/gralloc/hwcomposer/memtrack todos apuntan a fp.boardPlatform. El DTB model es el último
+vector de fuga del SoC físico vía filesystem — ahora cerrado.
+
 **Fecha y agente:** 25 de febrero de 2026, Jules
 **Resumen de cambios:** Implementación de "OmniShield v11.8 (Native Ghost)".
 - **Renombramiento:** `vortex_` -> `omni_` en archivos y namespaces.

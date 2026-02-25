@@ -58,7 +58,11 @@ enum FileType {
     PROC_ASOUND, PROC_INPUT, SYS_THERMAL, SYS_CPU_POSSIBLE, SYS_CPU_PRESENT,
     PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS,
     BT_MAC, BT_NAME,
-    PROC_NET_ARP, PROC_NET_DEV
+    PROC_NET_ARP, PROC_NET_DEV,
+    PROC_HOSTNAME,
+    PROC_OSTYPE,
+    PROC_DTB_MODEL,
+    PROC_ETH0_MAC
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -577,6 +581,49 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (release_api >= 11) ? "30" : "29";
         }
         else if (k == "ro.build.version.base_os")           dynamic_buffer = "";
+        // --- PR21: for_attestation namespace (Play Integrity / Firebase hardened) ---
+        // Google Play Services lee estos antes de la hardware-backed attestation.
+        // Sin estos hooks, el sistema filtra el identity real del Redmi 9.
+        else if (k == "ro.product.model.for_attestation")        dynamic_buffer = fp.model;
+        else if (k == "ro.product.brand.for_attestation")        dynamic_buffer = fp.brand;
+        else if (k == "ro.product.manufacturer.for_attestation") dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.name.for_attestation")         dynamic_buffer = fp.product;
+        else if (k == "ro.product.device.for_attestation")       dynamic_buffer = fp.device;
+        // --- PR21: release_or_codename (Firebase Auth / Play Services Android 11+) ---
+        else if (k == "ro.build.version.release_or_codename")    dynamic_buffer = fp.release;
+        // --- PR21: board.first_api_level (Widevine L1 / Play Integrity) ---
+        // Derivar del release del perfil. Android 11 = API 30.
+        else if (k == "ro.board.first_api_level") {
+            int api = 0;
+            try { api = std::stoi(fp.release); } catch(...) {}
+            dynamic_buffer = (api >= 11) ? "30" : "29";
+        }
+        // --- PR21: ODM + system_ext fingerprints (Widevine L1 cross-validation) ---
+        // Widevine valida que estos fingerprints coincidan con ro.build.fingerprint.
+        // Si devuelven el fingerprint real del Redmi 9, la discrepancia es detectable.
+        else if (k == "ro.odm.build.fingerprint"         ||
+                 k == "ro.system_ext.build.fingerprint")      dynamic_buffer = fp.fingerprint;
+        // --- PR21: ro.product.cpu.abi singular (Snapchat / Instagram / Firebase) ---
+        // ro.product.cpu.abilist ya está hooked pero la forma singular no lo estaba.
+        // Snapchat e Instagram leen la forma singular específicamente.
+        else if (k == "ro.product.cpu.abi")                     dynamic_buffer = "arm64-v8a";
+        // --- PR21: HAL gralloc + hwcomposer (Widevine HAL coherence check) ---
+        // camera/vulkan/keystore/audio/egl ya están hooked. Gralloc y hwcomposer
+        // completaban el set HAL que Widevine usa para detectar quimeras de hardware.
+        else if (k == "ro.hardware.gralloc"    ||
+                 k == "ro.hardware.hwcomposer" ||
+                 k == "ro.hardware.memtrack")                    dynamic_buffer = fp.boardPlatform;
+        // --- PR21: persist.sys.country / language (Snapchat / Instagram / Tinder) ---
+        // persist.sys.locale ya está hooked (PR20) pero country y language por separado
+        // no lo estaban. Las apps sociales leen las tres para detectar inconsistencias.
+        else if (k == "persist.sys.country") {
+            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
+            dynamic_buffer = (region == "europe") ? "GB" : "US";
+        }
+        else if (k == "persist.sys.language") {
+            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
+            dynamic_buffer = (region == "latam") ? "es" : "en";
+        }
         else if (k == "gsm.version.baseband" || k == "ro.build.expect.baseband" || k == "ro.baseband") {
             dynamic_buffer = fp.radioVersion;
         }
@@ -681,6 +728,15 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/power_supply/battery/status")) type = BATTERY_STATUS;
         else if (strstr(pathname, "/proc/uptime")) type = PROC_UPTIME;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
+        else if (strncmp(pathname, "/proc/sys/kernel/hostname", 25) == 0) {
+            type = PROC_HOSTNAME;
+        } else if (strncmp(pathname, "/proc/sys/kernel/ostype", 23) == 0) {
+            type = PROC_OSTYPE;
+        } else if (strncmp(pathname, "/sys/firmware/devicetree/base/model", 35) == 0) {
+            type = PROC_DTB_MODEL;
+        } else if (strncmp(pathname, "/sys/class/net/eth0/address", 27) == 0) {
+            type = PROC_ETH0_MAC;
+        }
         else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/sys/kernel/osrelease")) type = PROC_OSRELEASE;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
@@ -748,6 +804,34 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
                 } else if (type == BATTERY_STATUS) {
                     content = "Discharging\n";
+                } else if (type == PROC_HOSTNAME) {
+                    // RFC 952: hostname estándar. "localhost" es el valor universal
+                    // en AOSP stock. Cualquier hostname personalizado MIUI es detectable.
+                    content = "localhost\n";
+
+                } else if (type == PROC_OSTYPE) {
+                    // Pendiente desde PR11 (LOW L11-ostype). Valor fijo para todos los
+                    // kernels Linux de Android. Nunca debe exponer el vendor kernel.
+                    content = "Linux\n";
+
+                } else if (type == PROC_DTB_MODEL) {
+                    // Device Tree Blob model. Instagram y Firebase lo leen directamente.
+                    // En el Redmi 9 real contiene "Xiaomi Redmi 9 (mt6768)" — expone
+                    // fabricante y SoC real aunque todas las properties estén hooked.
+                    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
+                        const auto& fp2 = G_DEVICE_PROFILES.at(g_currentProfileName);
+                        content = std::string(fp2.manufacturer) + " " + std::string(fp2.model) + "\n";
+                    } else {
+                        content = "Android Device\n";
+                    }
+
+                } else if (type == PROC_ETH0_MAC) {
+                    // eth0 es la interfaz Ethernet/USB. wlan0 ya está spoofed (PR9/PR20).
+                    // Durante tethering o cuando la app itera todas las interfaces,
+                    // eth0 puede revelar la MAC real con OUI del fabricante real (MediaTek).
+                    // Usamos el mismo mecanismo que wlan0: dirección desactivada AOSP estándar.
+                    content = "02:00:00:00:00:00\n";
+
                 } else if (type == PROC_OSRELEASE) {
                     std::string plat = toLowerStr(fp.boardPlatform);
                     std::string brd  = toLowerStr(fp.brand);
