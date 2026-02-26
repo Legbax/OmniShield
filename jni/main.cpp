@@ -140,6 +140,11 @@ static int (*orig_sysinfo)(struct sysinfo *info);
 static struct dirent* (*orig_readdir)(DIR *dirp);
 static unsigned long (*orig_getauxval)(unsigned long type);
 
+// PR41: dup family — cerrar bypass de caché VFS
+static int (*orig_dup)(int oldfd);
+static int (*orig_dup2)(int oldfd, int newfd);
+static int (*orig_dup3)(int oldfd, int newfd, int flags);
+
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
@@ -389,6 +394,14 @@ int my_uname(struct utsname *buf) {
                 kv = "4.19.157-perf+";
             } else if (plat.find("sm7325") != std::string::npos) {
                 kv = "5.4.61-perf+";
+            }
+            // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+            else if (plat.find("exynos9611") != std::string::npos) {
+                kv = "4.14.113-25145160";
+            } else if (plat.find("exynos9825") != std::string::npos) {
+                kv = "4.14.113-22911262";
+            } else if (plat.find("exynos850") != std::string::npos) {
+                kv = "4.19.113-25351273";
             }
         }
 
@@ -682,10 +695,7 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.crypto.type")                     dynamic_buffer = "file";
         // --- PR20: Locale coherente con región del perfil ---
         else if (k == "ro.product.locale" || k == "persist.sys.locale") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            if (region == "europe")      dynamic_buffer = "en-GB";
-            else if (region == "latam")  dynamic_buffer = "es-US";
-            else                         dynamic_buffer = "en-US"; // usa + default
+            dynamic_buffer = "en-US";  // PR41: Solo USA
         }
         else if (k == "ro.product.first_api_level") {
             int release_api = 0;
@@ -756,21 +766,22 @@ int my_system_property_get(const char *key, char *value) {
         // persist.sys.locale ya está hooked (PR20) pero country y language por separado
         // no lo estaban. Las apps sociales leen las tres para detectar inconsistencias.
         else if (k == "persist.sys.country") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "europe") ? "GB" : "US";
+            dynamic_buffer = "US";  // PR41: Solo USA
         }
         else if (k == "persist.sys.language") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "latam") ? "es" : "en";
+            dynamic_buffer = "en";  // PR41: Solo USA
         }
         // --- v12.10: Chronos & Command Shield ---
         else if (k == "ro.opengles.version")          dynamic_buffer = fp.openGlEs;
         else if (k == "sys.usb.state" || k == "sys.usb.config") dynamic_buffer = "mtp";
         else if (k == "persist.sys.timezone") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            if (region == "europe") dynamic_buffer = "Europe/London";
-            else if (region == "latam") dynamic_buffer = "America/Sao_Paulo";
-            else dynamic_buffer = "America/New_York";
+            // PR41: Pool de zonas horarias USA — determinístico por seed
+            static const std::vector<std::string> US_TZ = {
+                "America/New_York", "America/Chicago", "America/Denver",
+                "America/Los_Angeles", "America/Phoenix"
+            };
+            omni::engine::Random tzRng(g_masterSeed + 555);
+            dynamic_buffer = US_TZ[tzRng.nextInt(US_TZ.size())];
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
@@ -797,21 +808,19 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (mcc == "310" || mcc == "311") ? imsi.substr(0, 6) : imsi.substr(0, 5);
         }
         else if (k == "gsm.sim.operator.iso-country" || k == "gsm.operator.iso-country") {
-            // Sincronizar ISO con la región del motor
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            if (region == "usa") dynamic_buffer = "us";
-            else if (region == "europe") dynamic_buffer = "gb";
-            else if (region == "latam") dynamic_buffer = "br";
-            else dynamic_buffer = "us";
+            dynamic_buffer = "us";  // PR41: Solo USA
         }
         else if (k == "gsm.sim.operator.alpha" || k == "gsm.operator.alpha") {
-            dynamic_buffer = "Omni Network";
+            // PR41: Carrier USA real derivado del IMSI (coherente con PLMN)
+            dynamic_buffer = omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed);
         }
         else if (k == "ro.mediadrm.device_id" || k == "drm.service.enabled") {
             dynamic_buffer = omni::engine::generateWidevineId(g_masterSeed);
         }
-        else if (k == "gsm.version.ril-impl")
-            dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
+        else if (k == "gsm.version.ril-impl") {
+            // PR41: Formato RIL real (el valor anterior era un classpath Java, no un ril-impl)
+            dynamic_buffer = omni::engine::getRilVersionForProfile(g_currentProfileName);
+        }
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
         else if (k == "ro.soc.manufacturer") {
             // Derivar el fabricante del SoC del boardPlatform del perfil activo
@@ -992,6 +1001,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     else if (plat.find("bengal")!=std::string::npos||plat.find("holi")!=std::string::npos||
                              plat.find("sm6350")!=std::string::npos) kv="4.19.157-perf+";
                     else if (plat.find("sm7325")!=std::string::npos) kv="5.4.61-perf+";
+                    // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+                    else if (plat.find("exynos9611")!=std::string::npos) kv="4.14.113-25145160";
+                    else if (plat.find("exynos9825")!=std::string::npos) kv="4.14.113-22911262";
+                    else if (plat.find("exynos850")!=std::string::npos) kv="4.19.113-25351273";
 
                     long dateUtc = 0;
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
@@ -1077,6 +1090,14 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         kv = "4.19.157-perf+";
                     } else if (plat.find("sm7325") != std::string::npos) {
                         kv = "5.4.61-perf+";
+                    }
+                    // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+                    else if (plat.find("exynos9611") != std::string::npos) {
+                        kv = "4.14.113-25145160";
+                    } else if (plat.find("exynos9825") != std::string::npos) {
+                        kv = "4.14.113-22911262";
+                    } else if (plat.find("exynos850") != std::string::npos) {
+                        kv = "4.19.113-25351273";
                     }
                     content = kv + "\n";
                 } else if (type == PROC_UPTIME) {
@@ -1561,6 +1582,72 @@ ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
 }
 
 // -----------------------------------------------------------------------------
+// PR41: Hooks: dup family (VFS cache bypass prevention)
+// Si un SDK clona un FD virtualizado con dup(), el nuevo FD debe heredar la caché.
+// Sin esto, read(dup(fd)) leería el hardware real (MediaTek) en lugar del emulado.
+// -----------------------------------------------------------------------------
+int my_dup(int oldfd) {
+    int newfd = orig_dup(oldfd);
+    if (newfd >= 0) {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(oldfd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[newfd] = it->second;
+            g_fdOffsetMap[newfd] = 0;
+            auto cache_it = g_fdContentCache.find(oldfd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[newfd] = cache_it->second;
+        }
+    }
+    return newfd;
+}
+
+int my_dup2(int oldfd, int newfd) {
+    // Si newfd ya está en nuestra caché, limpiarlo primero
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        g_fdMap.erase(newfd);
+        g_fdOffsetMap.erase(newfd);
+        g_fdContentCache.erase(newfd);
+    }
+    int ret = orig_dup2(oldfd, newfd);
+    if (ret >= 0) {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(oldfd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[ret] = it->second;
+            g_fdOffsetMap[ret] = 0;
+            auto cache_it = g_fdContentCache.find(oldfd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[ret] = cache_it->second;
+        }
+    }
+    return ret;
+}
+
+int my_dup3(int oldfd, int newfd, int flags) {
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        g_fdMap.erase(newfd);
+        g_fdOffsetMap.erase(newfd);
+        g_fdContentCache.erase(newfd);
+    }
+    int ret = orig_dup3(oldfd, newfd, flags);
+    if (ret >= 0) {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(oldfd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[ret] = it->second;
+            g_fdOffsetMap[ret] = 0;
+            auto cache_it = g_fdContentCache.find(oldfd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[ret] = cache_it->second;
+        }
+    }
+    return ret;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
 int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
@@ -1898,6 +1985,13 @@ public:
         void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
+        // PR41: dup family hooks — prevenir bypass de caché VFS
+        DobbyHook((void*)dup, (void*)my_dup, (void**)&orig_dup);
+        void* dup2_func = DobbySymbolResolver(nullptr, "dup2");
+        if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
+        void* dup3_func = DobbySymbolResolver(nullptr, "dup3");
+        if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
+
         // -----------------------------------------------------------------------------
         // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote
         // -----------------------------------------------------------------------------
@@ -1927,7 +2021,8 @@ public:
                 if (fid_cpu_abi) env->SetStaticObjectField(build_class, fid_cpu_abi, abi64);
 
                 jfieldID fid_cpu_abi2 = env->GetStaticFieldID(build_class, "CPU_ABI2", "Ljava/lang/String;");
-                if (fid_cpu_abi2) env->SetStaticObjectField(build_class, fid_cpu_abi2, abi_legacy);
+                if (fid_cpu_abi2) env->SetStaticObjectField(build_class, fid_cpu_abi2, abi32);
+                // PR41: CPU_ABI2 = "armeabi-v7a" (ARMv7), NO "armeabi" (ARMv5 legacy de 2003)
 
                 jfieldID fid_supp_abis = env->GetStaticFieldID(build_class, "SUPPORTED_ABIS", "[Ljava/lang/String;");
                 if (fid_supp_abis) env->SetStaticObjectField(build_class, fid_supp_abis, supp_abis_arr);

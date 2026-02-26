@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.20
-versionCode=12920
+version=v12.9.21
+versionCode=12921
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR40 — Combined Audit Seal.
+description=Total Invisibility (The Void). Zygisk module. PR41 — USA Identity Seal + Cross-Audit Fix.

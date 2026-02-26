@@ -634,3 +634,30 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   El único con hasBarometerSensor=true que es REAL es: ASUS ZenFone 7.
   Dispositivos con baro correcto (true): Mi 10T, Mi 11, OnePlus 8T, OnePlus 8, Nokia 8.3 5G,
   Pixel 5, Pixel 4a, Pixel 4a 5G, Pixel 3a XL, Moto Edge Plus, ASUS ZenFone 7.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR41 — USA Identity Seal + Cross-Audit Fix)
+**Resumen de cambios:** v12.9.21 — 25 correcciones en 6 archivos + 1 eliminación. Fuente: auditoría cruzada de 4 agentes (Claude, Gemini, Grok, Palantir).
+
+- **FIX-01→07 (omni_engine.hpp):** Purga total de regiones no-USA. `getRegionForProfile()` → siempre "usa". IMSI pool expandido a 5 carriers (T-Mobile, AT&T, Verizon, Sprint, US Cellular). Eliminados pools ICCID/teléfono/GPS de Europe/LATAM/India. GPS ahora selecciona entre 5 ciudades USA con altitudes coherentes. Nuevo `getCarrierNameForImsi()` mapea PLMN→nombre comercial. Nuevo `getRilVersionForProfile()` retorna formato RIL real por plataforma. FIX-02b: fallback de IMSI_POOLS corregido de "europe" → "usa" (código muerto pero referencia a clave inexistente).
+- **FIX-08→14 (main.cpp — propiedades):** `gsm.sim.operator.alpha` → carrier USA real (antes: "Omni Network"). `gsm.version.ril-impl` → formato real (antes: classpath Java). iso-country/country/language/locale → hardcoded USA. Timezone → pool de 5 zonas USA.
+- **FIX-15 (main.cpp — JNI):** `CPU_ABI2` corregido de "armeabi" (ARMv5) a "armeabi-v7a" (ARMv7).
+- **FIX-16 (main.cpp — VFS):** Hooks `dup`/`dup2`/`dup3` implementados. Si un SDK clona un FD virtualizado, el nuevo FD hereda la caché VFS. Cierra vector de bypass donde `dup(fd_cpuinfo)` + `read()` exponía hardware real.
+- **FIX-17/17b/17c (main.cpp — kernel):** Branches Exynos en `my_uname()` + `PROC_VERSION` VFS + `PROC_OSRELEASE` VFS: exynos9611→`4.14.113-25145160`, exynos9825→`4.14.113-22911262`, exynos850→`4.19.113-25351273`. Elimina quimera de kernel Qualcomm `-perf+` en perfiles Samsung Exynos. Las 3 ubicaciones de kernel (uname + 2 VFS) ahora están sincronizadas.
+- **FIX-18 (omni_profiles.h):** Pixel 4a 5G vendorFingerprint: `bramble_vend`/`vendor` → `bramble`/`user`.
+- **FIX-19 (omni_profiles.h):** Galaxy M31 hardwareChipname: `S5E9611` → `Exynos9611`.
+- **FIX-20 (omni_profiles.h):** Galaxy M31 board: `m31` → `exynos9611`.
+- **FIX-21 (omni_profiles.h):** Moto Edge Plus hasBarometerSensor: `false` → `true`. Omitido en PR40.
+- **FIX-22 (service.sh):** SSAID fallback máscara: `0xFFFFFFFFFFFF` (48-bit) → `0xFFFFFFFFFFFFFFFF` (64-bit).
+- **Eliminado:** `tools/upgrade_profiles.py` — incompatible con DeviceFingerprint v2 (PR38+39).
+- **Version bump:** module.prop + build.yml → v12.9.21.
+
+**Prompt del usuario:** "PR41 — USA Identity Seal + Cross-Audit Fix. 25 fixes en 6 archivos + 1 eliminación. Consolidación de 4 auditorías externas."
+
+**Nota para el siguiente agente:**
+- `getRegionForProfile()` ahora es un stub que retorna "usa". Si en el futuro se necesita multi-región, restaurar la lógica y expandir los pools y mapas de carrier.
+- Los hooks `dup/dup2/dup3` usan el mismo `g_fdMutex` que `my_open/my_read/my_close`. No añadir mutex adicional — causaría deadlock.
+- Las 3 ubicaciones de kernel (my_uname, PROC_VERSION VFS, PROC_OSRELEASE VFS) ahora tienen los mismos branches Exynos. Si se añade un nuevo SoC Samsung, actualizar las 3 simultáneamente.
+- `getCarrierNameForImsi()` llama a `generateValidImsi()` internamente. Esto es determinístico (misma seed = mismo carrier = mismo PLMN = mismo alpha). No cachear — la llamada es barata.
+- `getRilVersionForProfile()` solo distingue MTK, Samsung y Qualcomm. Si se añaden perfiles Google Tensor en el futuro, añadir branch "gs101" → "android google ril 1.0".
+- Moto Edge (sin Plus) conserva `false, false, false` — CORRECTO. El Moto Edge (SM7250/lito) NO tiene barómetro. Solo el Edge Plus (SM8250-AB/kona) lo tiene.
+- La lista canónica de dispositivos con barómetro=true tras PR41 es: Mi 10T, Mi 11, OnePlus 8T, OnePlus 8, Nokia 8.3 5G, Pixel 5, Pixel 4a, Pixel 4a 5G, Pixel 3a XL, **Moto Edge Plus**, ASUS ZenFone 7 (11 dispositivos).

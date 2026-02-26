@@ -47,7 +47,7 @@ print(result)
 derive_ssaid_fallback() {
     local seed="$1"
     local offset="$2"
-    printf '%016x' $(( (seed + offset * 2654435761) & 0xFFFFFFFFFFFF )) | head -c 16
+    printf '%016x' $(( (seed + offset * 2654435761) & 0xFFFFFFFFFFFFFFFF )) | head -c 16
 }
 
 # Wrapper principal

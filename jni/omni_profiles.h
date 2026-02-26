@@ -236,9 +236,9 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         false, false, true
     } },
     { "Galaxy M31", {
-        "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "m31", "M315FXXU4CUG1",
+        "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "exynos9611", "M315FXXU4CUG1",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
-        "M315FXXU4CUG1", "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "S5E9611", "zygote64_32",
+        "M315FXXU4CUG1", "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "Exynos9611", "zygote64_32",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012",
         "m31sqz-user 11 RP1A.200720.012 M315FXXU4CUG1 release-keys", "m31sqz-user", "21R3NF12", "dpi",
         "1636934400", "REL", "0", "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2340", "403",
@@ -349,7 +349,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "Google", "google", "Pixel 4a (5G)", "bramble", "bramble", "bramble", "bramble", "b2-0.3-7214727",
         "google/bramble/bramble:11/RQ3A.210705.001/7380771:user/release-keys", "RQ3A.210705.001", "release-keys", "user",
         "g7250-00195-210614-B-7352378", "7380771", "2021-07-05", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
-        "google/bramble_vend/bramble:11/RQ3A.210705.001/7380771:vendor/release-keys", "RQ3A.210705.001",
+        "google/bramble/bramble:11/RQ3A.210705.001/7380771:user/release-keys", "RQ3A.210705.001",
         "bramble-user 11 RQ3A.210705.001 7380771 release-keys", "bramble-user", "abfarm-release-rbe-64.hot.corp.google.com", "android-build",
         "1625616000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "413",
         8, 6,
@@ -420,7 +420,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "384",
         8, 12,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, false, false
+        false, true, false
     } },
     { "Nokia 8.3 5G", {
         "HMD Global", "Nokia", "Nokia 8.3 5G", "nokia_8.3_5g", "BVUB_00WW", "qcom", "lito", "00WW_3_510",
