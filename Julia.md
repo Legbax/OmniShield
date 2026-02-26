@@ -703,3 +703,25 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - **Version bump:** module.prop + build.yml → v12.9.23.
 
 **Prompt del usuario:** "Misión Crítica: Hotfix de compilación... identificador no declarado 'ARPHRD_ETHER'..."
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR43 — Deep Kernel Seal)
+**Resumen de cambios:** v12.9.23 — Kernel & Network Hardening (5 fixes críticos implementados).
+- **FIX-01 (main.cpp):** `my_fcntl` hook implementado para interceptar `F_DUPFD` y `F_DUPFD_CLOEXEC`. Cierra el bypass de caché VFS donde `fcntl(fd, F_DUPFD)` creaba un nuevo descriptor que escapaba del tracking de `g_fdMap`.
+- **FIX-02 (main.cpp):** `getArmFeatures` corrección de regresión. Eliminados `mt6769` (Helio G80/G85, Cortex-A55) y `exynos850` (Cortex-A55) de la lista restringida ARMv8.0. Estos SoCs soportan ARMv8.2 (incluyendo `lrcpc` y `dcpop`), por lo que su ocultación anterior era una anomalía.
+- **FIX-04 (main.cpp):** `my_getifaddrs` hardening. Filtrado activo de interfaces de depuración/internas: `eth0`, `p2p0`, `dummy*`, `tun*`. En modo `g_spoofMobileNetwork` (LTE), también se oculta `wlan0` de `getifaddrs` para consistencia con `/proc/net/dev`.
+- **FIX-05/10:** Mantenidos en lógica PR42 por falta de datos externos (mapas de carrier/batería).
+**Prompt del usuario:** "Ejecuta los cambio en el ultimo prompt, manten la versión" (Referencia a PR43).
+**Nota para el siguiente agente:**
+- La implementación de `my_fcntl` asume que el 3er argumento es `long arg`. Esto es seguro en ABI ARM64.
+- `my_getifaddrs` ahora desvincula nodos de la lista enlazada para ocultar interfaces sensibles.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR43 — Deep Kernel Seal - Security Focus)
+**Resumen de cambios:** v12.9.23 — Implementación de fixes de seguridad crítica (Kernel/C++).
+- **FIX-01 (main.cpp):** `my_fcntl` hook implementado para cerrar bypass VFS via `F_DUPFD`.
+- **FIX-02 (main.cpp):** `getArmFeatures` corregido. Lista negra reducida estrictamente a `mt6765` y `exynos9611` (ARMv8.0). Eliminados falsos positivos (A55/A75) que soportan ARMv8.2.
+- **FIX-03 (main.cpp):** `my_getauxval` actualizado para enmascarar HWCAP en `exynos9611` (consistente con FIX-02).
+- **FIX-04 (main.cpp):** `my_getifaddrs` hardening. Filtrado de interfaces internas (`eth0`, `p2p0`, `tun`, `dummy`) y ocultación de `wlan0` en modo LTE.
+- **FIX-08 (main.cpp):** `PROC_NET_IPV6_ROUTE` virtualizado (oculto en modo LTE).
+- **FIX-09 (main.cpp):** `SYS_THERMAL` virtualización de temperatura (`/temp`) en rango 30-45°C.
+- **Skipped:** Fixes de datos (mapas de carrier, batería, perfiles) omitidos por falta de tablas fuente.
+**Prompt del usuario:** "Ejecuta los cambio en el ultimo prompt, manten la versión" (Contexto de Code Review).

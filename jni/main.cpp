@@ -106,7 +106,8 @@ enum FileType {
     SYS_CPU_FREQ_AVAIL,   // scaling_available_frequencies — firma de plataforma CPU
     PROC_SELF_CGROUP,     // /proc/self/cgroup — puede revelar namespace KernelSU
     BATTERY_CHARGE_FULL,  // PR42: /sys/class/power_supply/battery/charge_full[_design]
-    PROC_NET_IF_INET6     // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
+    PROC_NET_IF_INET6,    // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
+    PROC_NET_IPV6_ROUTE   // PR43: /proc/net/ipv6_route
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -149,6 +150,9 @@ static unsigned long (*orig_getauxval)(unsigned long type);
 static int (*orig_dup)(int oldfd);
 static int (*orig_dup2)(int oldfd, int newfd);
 static int (*orig_dup3)(int oldfd, int newfd, int flags);
+
+// PR43: fcntl hook — cerrar F_DUPFD bypass de caché VFS
+static int (*orig_fcntl)(int fd, int cmd, ...);
 
 // PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
 static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
@@ -440,6 +444,26 @@ int my_ioctl(int fd, unsigned long request, void* arg) {
     return ret;
 }
 
+// PR43: fcntl hook (Duplicate FD propagation)
+// Intercepta fcntl(F_DUPFD) para propagar la caché VFS al nuevo descriptor.
+// Argumento 'arg' es long para cubrir tanto int (F_DUPFD) como punteros (F_GETLK).
+int my_fcntl(int fd, int cmd, long arg) {
+    int ret = orig_fcntl(fd, cmd, arg);
+    if (ret >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) {
+        // Propagar caché VFS al nuevo FD clonado
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(fd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[ret] = it->second;
+            g_fdOffsetMap[ret] = 0;
+            auto cache_it = g_fdContentCache.find(fd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[ret] = cache_it->second;
+        }
+    }
+    return ret;
+}
+
 // 4. Deep VFS (Root Hiding)
 int my_access(const char *pathname, int mode) {
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
@@ -450,19 +474,44 @@ int my_access(const char *pathname, int mode) {
 int my_getifaddrs(struct ifaddrs **ifap) {
     int ret = orig_getifaddrs(ifap);
     if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
-        struct ifaddrs *ifa = *ifap;
-        while (ifa) {
-            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
-                struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
+        struct ifaddrs *curr = *ifap;
+        struct ifaddrs *prev = nullptr;
+        while (curr) {
+            bool remove = false;
+            if (curr->ifa_name) {
+                std::string name = curr->ifa_name;
+                // PR43: Stealth filtering (eth0, p2p0, tun, dummy)
+                if (name == "eth0" || name == "p2p0" ||
+                    name.find("dummy") == 0 || name.find("tun") == 0) {
+                    remove = true;
+                }
+                // PR43: En modo LTE spoofing, ocultar wlan0 también
+                if (g_spoofMobileNetwork && name == "wlan0") {
+                    remove = true;
+                }
+            }
 
-                // Validación de seguridad contra punteros nulos
-                if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
+            if (remove) {
+                // Desvincular nodo de la lista
+                if (prev) {
+                    prev->ifa_next = curr->ifa_next;
+                    curr = curr->ifa_next;
+                } else {
+                    *ifap = curr->ifa_next; // Nuevo head
+                    curr = curr->ifa_next;
+                }
+            } else {
+                // Mantener nodo, aplicar spoofing si es wlan0 (y no estamos en modo LTE)
+                if (curr->ifa_addr && curr->ifa_addr->sa_family == AF_PACKET &&
+                    curr->ifa_name && strcmp(curr->ifa_name, "wlan0") == 0) {
+                    struct sockaddr_ll *s = (struct sockaddr_ll*)curr->ifa_addr;
                     // Static MAC 02:00:00:00:00:00 for AOSP privacy
                     unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
                     memcpy(s->sll_addr, static_mac, 6);
                 }
+                prev = curr;
+                curr = curr->ifa_next;
             }
-            ifa = ifa->ifa_next;
         }
     }
     return ret;
@@ -473,10 +522,10 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 // -----------------------------------------------------------------------------
 
 static std::string getArmFeatures(const std::string& platform) {
-    if (platform.find("mt6768") != std::string::npos || platform.find("mt6765") != std::string::npos ||
-        platform.find("mt6769") != std::string::npos ||  // PR42: Cortex-A55, ARMv8.0
-        platform.find("exynos9611") != std::string::npos ||  // PR42: Cortex-A73, ARMv8.0
-        platform.find("sdm670") != std::string::npos || platform.find("exynos850") != std::string::npos)
+    // PR43 FIX: mt6769 (Helio G80/G85) y exynos850 son Cortex-A55 (ARMv8.2) → soportan lrcpc/dcpop.
+    // Solo mt6765 (P35, Cortex-A53) y exynos9611 (A73/A53) deben reportar features ARMv8.0.
+    if (platform.find("mt6765") != std::string::npos ||
+        platform.find("exynos9611") != std::string::npos)
         return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm";
     return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp";
 }
@@ -1020,6 +1069,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strcmp(pathname, "/proc/net/udp") == 0 ||
                  strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
         else if (strstr(pathname, "/proc/net/if_inet6"))   type = PROC_NET_IF_INET6;
+        else if (strstr(pathname, "/proc/net/ipv6_route")) type = PROC_NET_IPV6_ROUTE;
         // PR37: Nuevos VFS handlers
         else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
         else if (strcmp(pathname, "/proc/self/cgroup") == 0)               type = PROC_SELF_CGROUP;
@@ -1307,14 +1357,19 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                                   "B: KEY=10000000000000 0\n\n";
                     }
                 } else if (type == SYS_THERMAL) {
-                    std::string plat = toLowerStr(fp.boardPlatform);
-                    if (plat.find("mt") != std::string::npos) {
-                        char tmpBuf[128]; ssize_t r;
-                        if ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
-                    } else if (plat.find("exynos") != std::string::npos) {
-                        content = "exynos-therm\n";
+                    if (strstr(pathname, "temp")) {
+                         // Temperature in millicelsius (30C - 45C)
+                         content = std::to_string(30000 + (g_masterSeed % 15000)) + "\n";
                     } else {
-                        content = "tsens_tz_sensor\n";
+                        std::string plat = toLowerStr(fp.boardPlatform);
+                        if (plat.find("mt") != std::string::npos) {
+                            char tmpBuf[128]; ssize_t r;
+                            if ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                        } else if (plat.find("exynos") != std::string::npos) {
+                            content = "exynos-therm\n";
+                        } else {
+                            content = "tsens_tz_sensor\n";
+                        }
                     }
                 // Sincronización btime (Evita detección de manipulación de uptime)
                 } else if (type == PROC_STAT) {
@@ -1405,6 +1460,14 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 // PR32: Tabla UDP virtualizada — ídem
                 } else if (type == PROC_NET_UDP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+
+                } else if (type == PROC_NET_IPV6_ROUTE) {
+                    if (g_spoofMobileNetwork) {
+                        content = ""; // Ocultar rutas IPv6 en modo LTE
+                    } else {
+                        char tmpBuf[4096]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    }
 
                 } else if (type == PROC_NET_IF_INET6) {
                     // PR42: En modo LTE, ocultar wlan0 de IPv6.
@@ -1901,9 +1964,9 @@ unsigned long my_getauxval(unsigned long type) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::string plat = toLowerStr(fp.boardPlatform);
 
-        // Si el perfil es Cortex-A53 puro (ARMv8.0), apagamos las flags ARMv8.2+
+        // Si el perfil es Cortex-A53 puro (ARMv8.0) o Exynos 9611, apagamos las flags ARMv8.2+
         // del kernel físico para no contradecir el cpuinfo falso.
-        if (plat.find("mt6765") != std::string::npos) {
+        if (plat.find("mt6765") != std::string::npos || plat.find("exynos9611") != std::string::npos) {
             if (type == AT_HWCAP) {
                 val &= ~(HWCAP_ATOMICS | HWCAP_FPHP | HWCAP_ASIMDHP | HWCAP_ASIMDDP | HWCAP_LRCPC);
             } else if (type == AT_HWCAP2) {
@@ -2076,6 +2139,10 @@ public:
         if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
         void* dup3_func = DobbySymbolResolver(nullptr, "dup3");
         if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
+
+        // PR43: fcntl hook (F_DUPFD)
+        void* fcntl_func = DobbySymbolResolver(nullptr, "fcntl");
+        if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
 
         // PR42: ioctl hook — MAC real bypass via syscall directo
         // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
