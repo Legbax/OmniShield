@@ -31,6 +31,22 @@ def parse_profiles(content):
         if ram_gb_match:
             fields["ram_gb"] = ram_gb_match.group(1)
 
+        # PR38+39: Extracción de campos float y bool (sensor metadata)
+        # Valores como: accelMaxRange = 78.4532f, hasHeartRateSensor = false
+        float_fields = ["accelMaxRange", "accelResolution", "gyroMaxRange",
+                        "gyroResolution", "magMaxRange"]
+        for ff in float_fields:
+            # Match: field = 123.456f (opcional f)
+            match = re.search(fr'{ff}\s*=\s*([\d\.]+f?)', body)
+            if match: fields[ff] = match.group(1)
+
+        bool_fields = ["hasHeartRateSensor", "hasBarometerSensor",
+                       "hasFingerprintWakeupSensor"]
+        for bf in bool_fields:
+            # Match: field = true/false
+            match = re.search(fr'{bf}\s*=\s*(true|false)', body)
+            if match: fields[bf] = match.group(1)
+
         if fields:
             profiles.append((name, fields))
         else:
@@ -65,11 +81,19 @@ def generate_header(input_file, output_file):
         ]
 
         int_fields = ["core_count", "ram_gb"]
+        float_fields = ["accelMaxRange", "accelResolution", "gyroMaxRange",
+                        "gyroResolution", "magMaxRange"]
+        bool_fields = ["hasHeartRateSensor", "hasBarometerSensor",
+                       "hasFingerprintWakeupSensor"]
 
         for field in ordered_fields:
             f.write(f"    const char* {field};\n")
         for field in int_fields:
             f.write(f"    int {field};\n")
+        for field in float_fields:
+            f.write(f"    float {field};\n")
+        for field in bool_fields:
+            f.write(f"    bool {field};\n")
         f.write("};\n\n")
 
         f.write("static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {\n")
@@ -83,6 +107,12 @@ def generate_header(input_file, output_file):
             for field in int_fields:
                 default_val = "8" if field == "core_count" else "6"
                 val = fields.get(field, default_val)
+                f.write(f'        {val},\n')
+            for field in float_fields:
+                val = fields.get(field, "0.0f")
+                f.write(f'        {val},\n')
+            for field in bool_fields:
+                val = fields.get(field, "false")
                 f.write(f'        {val},\n')
             f.write("    } },\n")
 

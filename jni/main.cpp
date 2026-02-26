@@ -2125,57 +2125,20 @@ public:
             api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
         }
 
-        // PR37: Network type spoofing hooks
-        // Interceptar WifiInfo para ocultar SSID/BSSID cuando g_spoofMobileNetwork=true
-        // NOTA ARQUITECTÓNICA: ConnectivityManager.getActiveNetworkInfo().getType() es Java puro
-        // y pasa por Binder (system_server). No es hookeable con hookJniNativeMethods.
-        // La cobertura aquí es: WifiInfo nativa + system properties + VFS /proc/net/dev.
-        // Cobertura completa de ConnectivityManager requeriría companion app con system perms.
-        if (g_spoofMobileNetwork) {
-            // WifiInfo — tiene métodos nativos accesibles
-            struct WifiInfoHook {
-                static jstring getSSID(JNIEnv* e, jobject) {
-                    return e->NewStringUTF("");  // Sin SSID — no hay red WiFi
-                }
-                static jstring getBSSID(JNIEnv* e, jobject) {
-                    return e->NewStringUTF("02:00:00:00:00:00");  // BSSID nulo AOSP
-                }
-                static jint getRssi(JNIEnv*, jobject) {
-                    return -127;  // Sin señal WiFi
-                }
-                static jint getNetworkId(JNIEnv*, jobject) {
-                    return -1;  // No conectado a ninguna red WiFi
-                }
-            };
-            JNINativeMethod wifiInfoMethods[] = {
-                {"getSSID",     "()Ljava/lang/String;", (void*)WifiInfoHook::getSSID},
-                {"getBSSID",    "()Ljava/lang/String;", (void*)WifiInfoHook::getBSSID},
-                {"getRssi",     "()I",                  (void*)WifiInfoHook::getRssi},
-                {"getNetworkId","()I",                  (void*)WifiInfoHook::getNetworkId},
-            };
-            api->hookJniNativeMethods(env, "android/net/wifi/WifiInfo", wifiInfoMethods, 4);
+        // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
+        // getSSID/getBSSID/getRssi/getNetworkId son métodos Java puros (no RegisterNatives).
+        // hookJniNativeMethods solo intercepta métodos nativos reales — aquí fallaba silenciosamente.
+        // La protección de red en modo LTE recae en:
+        //   - property hooks: wifi.interface, dhcp.wlan0.*, net.wifi.ssid → ""
+        //   - VFS: /proc/net/dev → rmnet_data0, /proc/net/arp → tabla vacía
+        // DIRECTIVA ARQUITECTÓNICA: Para hookear métodos Java puros se requiere
+        // DobbySymbolResolver sobre símbolos C++ mangleados en libandroid.so,
+        // igual que el patrón exitoso de Sensor::getName()/getVendor().
 
-            // PR38+39: WifiManager — getScanResults vacío elimina triangulación Wi-Fi
-            // BSSIDs de APs locales → triangulación geográfica exacta sin GPS activo.
-            // Lista vacía = WiFi "apagado", sin APs visibles.
-            struct WifiManagerHook {
-                static jobject getScanResults(JNIEnv* e, jobject) {
-                    jclass cls = e->FindClass("java/util/ArrayList");
-                    jmethodID ctor = e->GetMethodID(cls, "<init>", "()V");
-                    return e->NewObject(cls, ctor);
-                }
-                static jboolean isWifiEnabled(JNIEnv*, jobject)  { return JNI_FALSE; }
-                static jint     getWifiState(JNIEnv*, jobject)   { return 1; }  // WIFI_STATE_DISABLED
-                static jboolean startScan(JNIEnv*, jobject)      { return JNI_FALSE; }
-            };
-            JNINativeMethod wifiManagerMethods[] = {
-                {"getScanResults", "()Ljava/util/List;", (void*)WifiManagerHook::getScanResults},
-                {"isWifiEnabled",  "()Z",                (void*)WifiManagerHook::isWifiEnabled},
-                {"getWifiState",   "()I",                (void*)WifiManagerHook::getWifiState},
-                {"startScan",      "()Z",                (void*)WifiManagerHook::startScan},
-            };
-            api->hookJniNativeMethods(env, "android/net/wifi/WifiManager", wifiManagerMethods, 4);
-        }
+        LOGD("System Integrity loaded. Profile: %s | LTE: %s | GPS: %.4f,%.4f",
+             g_currentProfileName.c_str(),
+             g_spoofMobileNetwork ? "ON" : "OFF",
+             g_cachedLat, g_cachedLon);
 
         // PR38+39: Sensor metadata hooks
         // Spoofing de metadatos numéricos que identifican el chip físico.
@@ -2272,10 +2235,6 @@ public:
                                       sensorListMethods, 1);
         }
 
-        LOGD("System Integrity loaded. Profile: %s | LTE: %s | GPS: %.4f,%.4f",
-             g_currentProfileName.c_str(),
-             g_spoofMobileNetwork ? "ON" : "OFF",
-             g_cachedLat, g_cachedLon);
     }
     void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
