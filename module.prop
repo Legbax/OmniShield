@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.24
-versionCode=12924
+version=v12.9.25
+versionCode=12925
 author=Jules & legbax
 description=Total Invisibility (The Void). Zygisk module. PR44 — Camera2 Physical Seal, MediaCodec Crash Guard & Front/Rear Discrimination

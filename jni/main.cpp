@@ -2191,6 +2191,7 @@ static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
         default:
             // LENS_FACING (0x00050006) cae aquí intencionalmente.
             // Es el oráculo de isFrontCameraMetadata — no interceptar.
+            if (orig_nativeReadValues == nullptr) return nullptr;
             return orig_nativeReadValues(env, thiz, tag);
     }
 }
@@ -2257,6 +2258,22 @@ public:
     void preAppSpecialize(zygisk::Api *api, JNIEnv *env) override { readConfig(); }
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+
+        // GUARDIA: solo inyectar en procesos objetivo
+        std::string procName;
+        { std::ifstream f("/proc/self/cmdline"); std::getline(f, procName, '\0'); }
+
+        static const char* ALLOWED[] = {
+            "com.snapchat.android", "com.instagram.android",
+            "com.tinder", "com.bumble.app", "com.badoo.mobile",
+            "com.match.android", "com.grindr.android",
+            "com.OkCupid", "com.pof.android", nullptr
+        };
+        bool isTarget = false;
+        for (int i = 0; ALLOWED[i]; i++)
+            if (procName.find(ALLOWED[i]) != std::string::npos) { isTarget = true; break; }
+
+        if (!isTarget) return;  // Salida temprana — sin hooks en procesos del sistema
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
