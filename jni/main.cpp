@@ -317,15 +317,18 @@ static inline bool isHiddenPath(const char* path) {
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
+    if (!orig_stat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_stat(pathname, statbuf);
 }
 int my_lstat(const char* pathname, struct stat* statbuf) {
+    if (!orig_lstat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_lstat(pathname, statbuf);
 }
 
 int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    if (!orig_fstatat) { errno = ENOSYS; return -1; }
     // Resolver path absoluto si es relativo con AT_FDCWD
     if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
         char cwd[512] = {};
@@ -340,6 +343,7 @@ int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
     return orig_fstatat(dirfd, pathname, statbuf, flags);
 }
 FILE* my_fopen(const char* pathname, const char* mode) {
+    if (!orig_fopen) { errno = ENOENT; return nullptr; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
     return orig_fopen(pathname, mode);
 }
@@ -385,6 +389,7 @@ const char* my_eglQueryString(void* display, int name) {
 
 // 2. Uptime Spoofing
 int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
+    if (!orig_clock_gettime) return -1;
     int ret = orig_clock_gettime(clockid, tp);
     // Solo modificamos relojes de uptime de sistema
     if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
@@ -397,6 +402,7 @@ int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
 
 // 3. Kernel Identity
 int my_uname(struct utsname *buf) {
+    if (!orig_uname) return -1;
     int ret = orig_uname(buf);
     if (ret == 0 && buf != nullptr) {
         strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
@@ -458,6 +464,7 @@ int my_uname(struct utsname *buf) {
 #endif
 
 int my_ioctl(int fd, unsigned long request, void* arg) {
+    if (!orig_ioctl) return -1;
     int ret = orig_ioctl(fd, request, arg);
     if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
         struct ifreq* ifr = static_cast<struct ifreq*>(arg);
@@ -474,6 +481,7 @@ int my_ioctl(int fd, unsigned long request, void* arg) {
 // Intercepta fcntl(F_DUPFD) para propagar la caché VFS al nuevo descriptor.
 // Argumento 'arg' es long para cubrir tanto int (F_DUPFD) como punteros (F_GETLK).
 int my_fcntl(int fd, int cmd, long arg) {
+    if (!orig_fcntl) return -1;
     int ret = orig_fcntl(fd, cmd, arg);
     if (ret >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) {
         // Propagar caché VFS al nuevo FD clonado
@@ -492,12 +500,14 @@ int my_fcntl(int fd, int cmd, long arg) {
 
 // 4. Deep VFS (Root Hiding)
 int my_access(const char *pathname, int mode) {
+    if (!orig_access) return -1;
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_access(pathname, mode);
 }
 
 // 5. Network Interfaces (Layer 2)
 int my_getifaddrs(struct ifaddrs **ifap) {
+    if (!orig_getifaddrs) return -1;
     int ret = orig_getifaddrs(ifap);
     if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
         struct ifaddrs *curr = *ifap;
@@ -672,6 +682,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
 }
 
 ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    if (!orig_readlinkat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
@@ -700,6 +711,7 @@ static std::string generateBootId(long seed) {
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
 int my_system_property_get(const char *key, char *value) {
+    if (!orig_system_property_get) return 0;
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
     int ret = orig_system_property_get(key, value);
 
@@ -996,6 +1008,7 @@ int my_system_property_get(const char *key, char *value) {
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
 int my_open(const char *pathname, int flags, mode_t mode) {
+    if (!orig_open) { errno = ENOSYS; return -1; }
     if (!pathname) return orig_open(pathname, flags, mode);
 
     std::string path_str(pathname);
@@ -1585,6 +1598,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    if (!orig_openat) { errno = ENOSYS; return -1; }
     if (!pathname) return orig_openat(dirfd, pathname, flags, mode);
 
     std::string path_str(pathname);
@@ -1681,6 +1695,7 @@ int my_close(int fd) {
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
+    if (!orig_read) { errno = ENOSYS; return -1; }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1712,6 +1727,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 }
 
 off_t my_lseek(int fd, off_t offset, int whence) {
+    if (!orig_lseek) { errno = ENOSYS; return -1; }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1734,6 +1750,7 @@ off64_t my_lseek64(int fd, off64_t offset, int whence) {
 }
 
 ssize_t my_pread(int fd, void* buf, size_t count, off_t offset) {
+    if (!orig_pread) { errno = ENOSYS; return -1; }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1761,6 +1778,7 @@ ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
 // Sin esto, read(dup(fd)) leería el hardware real (MediaTek) en lugar del emulado.
 // -----------------------------------------------------------------------------
 int my_dup(int oldfd) {
+    if (!orig_dup) return -1;
     int newfd = orig_dup(oldfd);
     if (newfd >= 0) {
         std::lock_guard<std::mutex> lock(g_fdMutex);
@@ -1777,6 +1795,7 @@ int my_dup(int oldfd) {
 }
 
 int my_dup2(int oldfd, int newfd) {
+    if (!orig_dup2) return -1;
     // Si newfd ya está en nuestra caché, limpiarlo primero
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
@@ -1800,6 +1819,7 @@ int my_dup2(int oldfd, int newfd) {
 }
 
 int my_dup3(int oldfd, int newfd, int flags) {
+    if (!orig_dup3) return -1;
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         g_fdMap.erase(newfd);
@@ -1950,6 +1970,7 @@ const char* my_Sensor_getVendor(void* sensor) {
 // Hooks: sysinfo (Uptime Paradox Fix)
 // -----------------------------------------------------------------------------
 int my_sysinfo(struct sysinfo *info) {
+    if (!orig_sysinfo) return -1;
     int ret = orig_sysinfo(info);
     if (ret == 0 && info != nullptr) {
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
@@ -1962,6 +1983,7 @@ int my_sysinfo(struct sysinfo *info) {
 // Hooks: readdir (Ocultación de nodos de batería MTK)
 // -----------------------------------------------------------------------------
 struct dirent* my_readdir(DIR *dirp) {
+    if (!orig_readdir) return nullptr;
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
@@ -1990,6 +2012,7 @@ struct dirent* my_readdir(DIR *dirp) {
 #endif
 
 unsigned long my_getauxval(unsigned long type) {
+    if (!orig_getauxval) return 0;
     unsigned long val = orig_getauxval(type);
     if ((type == AT_HWCAP || type == AT_HWCAP2) && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);

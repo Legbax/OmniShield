@@ -63,6 +63,24 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR48 — Anti-crash: null guards libc/syscall completo)
+**Resumen de cambios:** v12.9.28 — 23 null guards para todos los hooks Dobby de libc/syscall.
+- **23 hooks blindados:** `my_stat`, `my_lstat`, `my_fstatat`, `my_fopen`, `my_clock_gettime`, `my_uname`, `my_ioctl`, `my_fcntl`, `my_access`, `my_getifaddrs`, `my_readlinkat`, `my_system_property_get`, `my_open`, `my_openat` (crítico — detectado por revisión externa), `my_read`, `my_lseek`, `my_pread`, `my_dup`, `my_dup2`, `my_dup3`, `my_sysinfo`, `my_readdir`, `my_getauxval`.
+- **my_openat (CRÍTICO):** Omitido en el plan inicial. Es el hook más llamado en Android moderno. La línea `if (!pathname) return orig_openat(...)` en la primera línea del cuerpo dereferenciaba `orig_openat` sin verificarlo. Detectado por revisión externa y corregido.
+- **my_system_property_read_callback:** Ya guardado en PR47 (`if (!orig_system_property_read_callback) { callback(cookie, "", "", 0); return; }`). No requirió acción.
+- **Patrón de retorno seguro:** `int`/`ssize_t`/`off_t` → `{ errno = ENOSYS; return -1; }`. `FILE*`/`dirent*` → `return nullptr;`. `unsigned long` (getauxval) → `return 0;`. `my_system_property_get` → `return 0;` (semántica POSIX: longitud 0).
+**Prompt del usuario:** "Aplica los fixes restantes." (continuación de sesión anterior)
+**Nota personal para el siguiente agente:** Todos los hooks de libc/syscall y los hooks JNI nombrados están ahora completamente blindados. El patrón definitivo es: SIEMPRE añadir `if (!orig_XXX)` como primera línea del cuerpo de cada hook Dobby. Si DobbyHook falla silenciosamente (símbolo no encontrado, permisos, ASLR), `orig_XXX` queda null — sin el guard, la siguiente llamada al hook crashea el proceso entero. El ciclo "Repeated restarts of zygote" en Zygisk Next está causado exactamente por esto.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR47 — Anti-crash: categorías A+B+C)
+**Resumen de cambios:** v12.9.27 — Corrección del crash "Repeated restarts of zygote".
+- **Categoría A (null guards):** 12 hooks JNI nombrados sin verificación de `orig_*`: `my_clGetDeviceInfo`, `my_eglQueryString`, `my_glGetString`, `my_vkGetPhysicalDeviceProperties`, 4 hooks SSL, `my_Sensor_getName`, `my_Sensor_getVendor`, `my_nativeReadValues` (guard al inicio cubre 7 call sites internos), `my_native_setup`, `my_SettingsSecure_getString`, `my_system_property_read_callback`.
+- **Categoría B (JNI exception cascade):** `hookJniNativeMethods` en métodos Java no-nativos (Location.getLatitude, Sensor.getMaximumRange, NetworkInfo.getType, SensorManager.getSensorList, ITelephony) deja excepciones JNI pendientes → colapso de todas las llamadas JNI subsiguientes. Solución: `if (env->ExceptionCheck()) env->ExceptionClear();` después de cada `hookJniNativeMethods` (8 sitios) y del bloque de sincronización de `android.os.Build`.
+- **Categoría C (self-reference):** `cameraMethods[0].fnPtr` y `codecMethods[0].fnPtr` permanecían apuntando a `my_nativeReadValues`/`my_native_setup` cuando hookJniNativeMethods fallaba. Asignarlos a `orig_*` creaba recursión infinita → stack overflow. Solución: check de auto-referencia antes de asignar.
+- **Process guard:** Movido `setOption(FORCE_DENYLIST_UNMOUNT)` a después del guard de proceso.
+**Prompt del usuario:** "Luego de instalar, Zygisk Next crashea con el siguiente mensaje: 'Repeated restarts of zygote has been detected, Zygote monitor has automatically stopped.'"
+**Nota personal para el siguiente agente:** Las tres categorías de crash eran independientes y podían coexistir. La Categoría B es la más insidiosa: un hook JNI sobre un método que no existe en la versión de Android del dispositivo no solo falla — deja el entorno JNI en un estado de excepción pendiente que silenciosamente corrompe TODAS las operaciones JNI posteriores. SIEMPRE limpiar excepciones después de hookJniNativeMethods.
+
 **Fecha y agente:** 26 de febrero de 2026, Jules (PR38+39 — Sensor, Location & Network Complete)
 **Resumen de cambios:** v12.9.18 — Sensor Metadata, GPS Coherence, Network Complete, Seed Rotation Support.
 - **Sensor Metadata (CRÍTICO):** Hook de 8 métodos numéricos de `android/hardware/Sensor`: `getMaximumRange`, `getResolution`, `getPower`, `getMinDelay`, `getMaxDelay`, `getVersion`, `getFifoMaxEventCount`, `getFifoReservedEventCount`. Los valores se derivan de una tabla canónica de chips por SoC (LSM6DSO/BMI160/BMA4xy/BMA253 según plataforma). `getMaximumRange` y `getResolution` discriminan por `getType()` del objeto para retornar accel/gyro/mag correctamente.
