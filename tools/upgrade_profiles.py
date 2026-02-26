@@ -39,6 +39,15 @@ def upgrade_profiles(input_file, output_file):
         "Nokia 5.4": "409",  # Nokia spec oficial 409 ppi (math 6.39" = 411)
         # PR34: Override canónico para Galaxy M31 (spec Samsung 403 ppi, math 2340px = 402)
         "Galaxy M31": "403", # Samsung SM-M315F 6.4" 1080×2340 → spec 403 ppi (math=402)
+        # PR40: HD+ Samsung — int(sqrt(720²+1600²)/6.5) = 269, spec Samsung = 270
+        "Galaxy A21s":  "270",  # SM-A217F 6.5" HD+ 720×1600 — Samsung spec 270 ppi
+        "Galaxy A32 5G": "270", # SM-A326B 6.5" HD+ 720×1600 — Samsung spec 270 ppi
+        "Galaxy A12":   "270",  # SM-A125F 6.5" HD+ 720×1600 — Samsung spec 270 ppi
+        # PR40: Pixel — excluidos de diagonals dict (spec Google directa, no math)
+        "Pixel 5":      "432",  # redfin  6.0" OLED 1080×2340 — Google spec 432 ppi
+        "Pixel 4a 5G":  "413",  # bramble 6.2" OLED 1080×2340 — Google spec 413 ppi
+        "Pixel 4a":     "443",  # sunfish 5.81" OLED 1080×2340 — Google spec 443 ppi
+        "Pixel 3a XL":  "400",  # bonito  6.0" FHD  1080×2160 — Google spec 400 ppi
     }
 
     block_pattern = re.compile(r'\{\s*"([^"]+)",\s*\{(.*?)\}\s*\},', re.DOTALL)
@@ -67,10 +76,18 @@ def upgrade_profiles(input_file, output_file):
         platform = data.get("boardPlatform", "").lower()
         hardware = data.get("hardware", "").lower()
 
-        width = 1080
-        height = 2400
-        if name in ["Redmi 9", "Moto Edge Plus", "Moto Edge", "Galaxy M31"]:
-            height = 2340
+        # PR40: Corrección de dimensiones reales por tipo de pantalla
+        width_overrides = {
+            "Galaxy A21s": 720, "Galaxy A32 5G": 720, "Galaxy A12": 720
+        }
+        height_overrides = {
+            "Redmi 9": 2340, "Moto Edge Plus": 2340, "Moto Edge": 2340, "Galaxy M31": 2340,
+            "Galaxy A21s": 1600, "Galaxy A32 5G": 1600, "Galaxy A12": 1600,
+            "Pixel 5": 2340, "Pixel 4a 5G": 2340, "Pixel 4a": 2340, "Pixel 3a XL": 2160
+        }
+
+        width = width_overrides.get(name, 1080)
+        height = height_overrides.get(name, 2400)
 
         diag = diagonals.get(name, 6.5)
         # PR33: Aplicar override si existe; si no, calcular matemáticamente

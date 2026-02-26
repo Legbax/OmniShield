@@ -109,10 +109,17 @@ done
 
 # Notificar al sistema que invalide el caché de Settings si se modificó algo
 if [ "$MODIFIED" -eq 1 ]; then
+    # PR40 (Gemini BUG-C1-01): Restaurar propietario y contexto SELinux.
+    # Python y sed pueden dejar el archivo sin owner system:system o sin contexto
+    # u:object_r:system_data_file:s0, causando crash en system_server al leerlo.
+    chown system:system "$SSAID_FILE"
+    chmod 600 "$SSAID_FILE"
+    restorecon "$SSAID_FILE" 2>/dev/null
+
     # Force-stop del SettingsProvider para invalidar caché en memoria
     am force-stop com.android.providers.settings 2>/dev/null
 fi
 
 # ============================================================
-# FIN PR37 SSAID Injection
+# FIN PR37/PR40 SSAID Injection
 # ============================================================

@@ -1962,6 +1962,22 @@ public:
                     setStr("ID",           bfp.buildId);
                     setStr("DISPLAY",      bfp.display);
 
+                    // PR40 (Gemini BUG-C1-02): Ocultar firmas de Custom ROMs.
+                    // LineageOS/PixelOS reportan "test-keys"/"userdebug" en Zygote static fields.
+                    // Nota: bfp.tags y bfp.type ya existen en el struct (posiciones 11 y 12)
+                    // y tienen "release-keys"/"user" en todos los 40 perfiles, pero el JNI
+                    // sync anterior no los incluía — esta es la brecha que se cierra aquí.
+                    setStr("TAGS",         "release-keys");
+                    setStr("TYPE",         "user");
+
+                    // PR40: Sincronizar Build.TIME con el perfil (tipo long J, en milisegundos).
+                    // Build.TIME del ROM físico puede diferir del perfil emulado.
+                    jfieldID fid_time = env->GetStaticFieldID(build_class, "TIME", "J");
+                    if (fid_time) {
+                        jlong build_time = std::stoll(bfp.buildDateUtc) * 1000LL;
+                        env->SetStaticLongField(build_class, fid_time, build_time);
+                    }
+
                     // Build.SERIAL (API 28+ requiere permiso, pero el campo estático existe)
                     jfieldID fid_serial = env->GetStaticFieldID(build_class, "SERIAL", "Ljava/lang/String;");
                     if (fid_serial) {
@@ -1983,6 +1999,13 @@ public:
                         jfieldID fid_incr = env->GetStaticFieldID(build_version_class, "INCREMENTAL", "Ljava/lang/String;");
                         if (fid_incr) env->SetStaticObjectField(build_version_class, fid_incr,
                             env->NewStringUTF(bfp.incremental));
+
+                        // PR40 (Gemini BUG-C1-03): Forzar SDK_INT=30 (Android 11).
+                        // Sin este fix, Android 12+ físico reporta SDK_INT=31 mientras el
+                        // fingerprint del perfil declara Android 11 → detección garantizada.
+                        // Nota: signature "I" = int. NO confundir con "J" (long) de Build.TIME.
+                        jfieldID fid_sdk = env->GetStaticFieldID(build_version_class, "SDK_INT", "I");
+                        if (fid_sdk) env->SetStaticIntField(build_version_class, fid_sdk, 30);
                     }
                 }
             }
@@ -2207,7 +2230,7 @@ public:
         {
             struct SensorListHook {
                 static jobject getSensorList(JNIEnv* e, jobject, jint type) {
-                    // TYPE_HEART_RATE=21: solo Galaxy S20 FE lo tiene en el catálogo
+                    // TYPE_HEART_RATE=21: ningún perfil del catálogo tiene sensor HR (PR40 fix)
                     if (type == 21 && !g_sensorHasHeartRate) {
                         jclass cls = e->FindClass("java/util/ArrayList");
                         if (cls) {

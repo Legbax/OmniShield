@@ -576,3 +576,61 @@ Origen: auditoría post-PR33 detectó que upgrade_profiles.py cubría solo 18/40
 - **JNI API Sync:** Añadida sincronización vía JNI Reflection en `postAppSpecialize`. Se sobrescriben los 5 campos estáticos de la clase `android.os.Build` (`CPU_ABI`, `CPU_ABI2` con `armeabi`, `SUPPORTED_ABIS`, `SUPPORTED_32_BIT_ABIS`, `SUPPORTED_64_BIT_ABIS`) que Zygote inicializa antes de la inyección.
 **Prompt del usuario:** "Misión: Despliegue de Omni-Shield v12.9.16 (Forensic VFS & API Seal — PR36)..."
 **⚠️ NOTA CRÍTICA PARA EL SIGUIENTE AGENTE (DEUDA TÉCNICA JNI):** El bloque de sincronización JNI asume que el perfil es siempre `zygote64_32` (arm64-v8a + armeabi-v7a). Esto es 100% correcto para los 40 perfiles del catálogo actual. SIN EMBARGO, si en el futuro se añade un perfil ARM32 puro (ej. un smartwatch o dispositivo IoT antiguo), este bloque JNI forzará variables de 64 bits y creará una quimera detectable. Si se añaden perfiles no-64bit, el bloque JNI debe refactorizarse para leer la propiedad `fp.zygote` del perfil activo.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR40 — Combined Audit Seal)
+**Resumen de cambios:** v12.9.20 — Auditoría cruzada interna + Red Team Gemini. 31 hallazgos en 6 archivos.
+
+**Hallazgos internos — jni/omni_profiles.h (28 fixes):**
+- **Samsung HD+ [HIGH × 3]:** Galaxy A21s, A32 5G y A12 declarados como FHD+ 1080×2400 cuando
+  sus pantallas son HD+ 720×1600. Corregidos a "720","1600","270". Vector de detección real:
+  apps que llaman a DisplayMetrics/WindowMetrics verían contradicción con el modelo declarado.
+- **Pixel screenHeight [HIGH × 4]:** Pixel 5, Pixel 4a 5G, Pixel 4a (2400→2340) y Pixel 3a XL
+  (2400→2160). DPIs ya eran correctos — solo corrige el campo height. Google usa 2340 en su
+  línea Pixel de 2020-2021, no 2400.
+- **hasBarometerSensor=true [MEDIUM × 19]:** 19 dispositivos mid-range declarados con barómetro
+  cuando sus specs oficiales no lo incluyen. La mayoría de la serie Samsung A/F/M, POCO, Redmi,
+  OnePlus Nord/N10, y Realme 8/Pro/GT. Corregidos a false. ASUS ZenFone 7 (caso inverso):
+  false→true porque el flagship SM8150-AB SÍ tiene barómetro.
+- **hasHeartRateSensor=true [MEDIUM × 1]:** Galaxy S20 FE declarado con HR sensor que Samsung
+  eliminó desde S10. Corregido a false. Comentario incorrecto en main.cpp también corregido.
+
+**Hallazgos Red Team Gemini — service.sh + main.cpp (3 fixes):**
+- **SELinux Blindaje (`service.sh`) [CRÍTICO]:** `chown system:system` + `chmod 600` +
+  `restorecon` tras modificar `settings_ssaid.xml`. Python y sed pueden dejar el archivo
+  sin owner system:system o sin contexto u:object_r:system_data_file:s0, causando crash
+  de system_server o fallo en cascada de apps.
+- **Custom ROM Shield (`main.cpp`) [ALTO]:** `Build.TAGS` → "release-keys" y `Build.TYPE` →
+  "user" forzados vía JNI. Los campos bfp.tags/bfp.type existían en el struct y ya tenían
+  los valores correctos en los 40 perfiles, pero el sync JNI los omitía. LineageOS, PixelOS y
+  otras custom ROMs reportan "test-keys"/"userdebug" en static fields de Zygote.
+- **Build.TIME sync (`main.cpp`) [ALTO]:** `Build.TIME` (tipo long J) forzado a
+  `std::stoll(bfp.buildDateUtc) * 1000LL` milisegundos. Elimina discrepancia temporal
+  entre el perfil emulado y el ROM físico subyacente.
+- **SDK_INT Lock (`main.cpp`) [ALTO]:** `Build.VERSION.SDK_INT` forzado a `30`. Sin este
+  fix, Android 12+ físico (SDK 31+) reporta un nivel de API que contradice el fingerprint
+  Android 11 del perfil.
+
+**Herramientas — tools/upgrade_profiles.py (protección defensiva):**
+- `width_override` para dispositivos HD+ (720px). `height_overrides` para HD+ (1600px),
+  Pixel 2340 y Pixel 3a XL 2160. `dpi_overrides` para HD+ Samsung (270) y Pixel (spec Google).
+  Previene regresión si upgrade_profiles.py se ejecuta con DeviceData.kt.txt externo.
+
+**Prompt del usuario:** "Combina los hallazgos del Red Team Gemini con los tuyos y forma un
+prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
+
+**Nota personal para el siguiente agente:**
+- `Build.TIME` usa `SetStaticLongField` con signature `"J"` — NO usar SetStaticIntField.
+  `std::stoll(bfp.buildDateUtc)` es seguro porque todos los 40 perfiles tienen epoch Unix válido.
+- `SDK_INT` forzado a `30` hardcodeado — NO derivar de `bfp.release` (atoi("11") ≠ 30).
+- El `restorecon` en service.sh requiere que SELinux esté en enforcing (dispositivo stock).
+  En dispositivos permissive falla silenciosamente (2>/dev/null) sin causar daño.
+- Samsung HD+ DPI: la fórmula int(sqrt(720²+1600²)/6.5) = 269, pero Samsung spec = 270.
+  Los dpi_overrides en upgrade_profiles.py son permanentes — no eliminar.
+- Los perfiles Pixel ahora están protegidos en upgrade_profiles.py con height_overrides y
+  dpi_overrides explícitos. Los 5 Pixel siguen excluidos del dict diagonals — correcto.
+- Galaxy A51 (a51sqz) conserva 1080×2400 + DPI 404 = CORRECTO (6.5" FHD+ real). No tocar.
+- Galaxy A31 tiene pantalla 6.4" FHD+ 1080×2400 (DPI 411) = CORRECTO. No confundir con A32 5G.
+- Los sensores corregidos: NINGÚN perfil del catálogo tiene hasHeartRateSensor=true tras PR40.
+  El único con hasBarometerSensor=true que es REAL es: ASUS ZenFone 7.
+  Dispositivos con baro correcto (true): Mi 10T, Mi 11, OnePlus 8T, OnePlus 8, Nokia 8.3 5G,
+  Pixel 5, Pixel 4a, Pixel 4a 5G, Pixel 3a XL, Moto Edge Plus, ASUS ZenFone 7.

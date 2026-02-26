@@ -91,7 +91,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "sweet_global-user 11 RKQ1.200826.002 V12.5.4.0.RKGMIXM release-keys", "sweet_global-user", "pangu-build-component-system-178104", "builder",
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
-        false, true, false
+        false, false, false
     } },
     { "Redmi Note 9 Pro", {
         "Xiaomi", "Redmi", "M2003J6B2G", "joyeuse", "joyeuse_global", "qcom", "joyeuse", "V12.5.1.0.RJZMIXM",
@@ -101,7 +101,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "joyeuse_global-user 11 RKQ1.200826.002 V12.5.1.0.RJZMIXM release-keys", "joyeuse_global-user", "pangu-build-component-system-175632", "builder",
         "1622112000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
-        false, true, false
+        false, false, false
     } },
     { "Redmi Note 10", {
         "Xiaomi", "Redmi", "M2101K7AI", "mojito", "mojito_global", "qcom", "mojito", "V12.5.6.0.RKFMIXM",
@@ -123,7 +123,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1625097600", "REL", "0", "ARM", "Mali-G57 MC2", "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
         8, 6,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false
     } },
     { "POCO X3 NFC", {
         "Xiaomi", "POCO", "M2007J20CG", "surya", "surya_global", "qcom", "surya", "V12.5.2.0.RJGMIXM",
@@ -134,7 +134,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1622630400", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, false, false
     } },
     { "Mi 11 Lite", {
         "Xiaomi", "Xiaomi", "M2101K9AG", "courbet", "courbet_global", "qcom", "courbet", "V12.5.3.0.RKAMIXM",
@@ -145,7 +145,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "401",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, false, false
     } },
     { "Mi 11", {
         "Xiaomi", "Xiaomi", "M2011K2G", "venus", "venus_global", "qcom", "venus", "V12.5.6.0.RKBMIXM",
@@ -178,7 +178,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, false, false
     } },
     { "Galaxy A52", {
         "samsung", "samsung", "SM-A525F", "a52x", "a52xsqz", "qcom", "atoll", "A525FXXU4AUH1",
@@ -189,7 +189,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro),
-        false, true, true
+        false, false, true
     } },
     { "Galaxy A72", {
         "samsung", "samsung", "SM-A725F", "a72", "a72sqz", "qcom", "atoll", "A725FXXU3AUH2",
@@ -200,7 +200,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "393",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro),
-        false, true, true
+        false, false, true
     } },
     { "Galaxy A32 5G", {
         "samsung", "samsung", "SM-A326B", "a32x", "a32xsqz", "mt6853", "mt6853", "A326BXXU4AUH1",
@@ -208,10 +208,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MOLY.LR12A.R3.MP.V84.6", "A326BXXU4AUH1", "2021-08-01", "11", "mt6853", "mali", "196610", "MT6853", "zygote64_32",
         "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "RP1A.200720.012",
         "a32xsqz-user 11 RP1A.200720.012 A326BXXU4AUH1 release-keys", "a32xsqz-user", "SWDD8201", "dpi",
-        "1627776000", "REL", "0", "ARM", "Mali-G57 MC3", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
+        "1627776000", "REL", "0", "ARM", "Mali-G57 MC3", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "720", "1600", "270",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true
     } },
     { "Galaxy S20 FE", {
         "samsung", "samsung", "SM-G781B", "r8q", "r8qsqz", "qcom", "kona", "G781BXXU3CUJ2",
@@ -222,7 +222,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        true, true, true
+        false, true, true
     } },
     { "Galaxy A51", {
         "samsung", "samsung", "SM-A515F", "a51", "a51sqz", "exynos9611", "exynos9611", "A515FXXU4CUG1",
@@ -233,7 +233,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1625097600", "REL", "0", "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true
     } },
     { "Galaxy M31", {
         "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "m31", "M315FXXU4CUG1",
@@ -244,7 +244,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1636934400", "REL", "0", "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2340", "403",
         8, 6,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true
     } },
     { "Galaxy A12", {
         "samsung", "samsung", "SM-A125F", "a12", "a12sqz", "mt6765", "mt6765", "A125FXXU5BUJ1",
@@ -252,7 +252,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MOLY.LR12A.R3.MP.V56.6", "A125FXXU5BUJ1", "2021-10-01", "11", "mt6765", "powervr", "196610", "MT6765", "zygote64_32",
         "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "RP1A.200720.012",
         "a12sqz-user 11 RP1A.200720.012 A125FXXU5BUJ1 release-keys", "a12sqz-user", "SWDD8800", "dpi",
-        "1633046400", "REL", "0", "Imagination Technologies", "PowerVR GE8320", "OpenGL ES 3.2 build 1.13@5776728", "1080", "2400", "404",
+        "1633046400", "REL", "0", "Imagination Technologies", "PowerVR GE8320", "OpenGL ES 3.2 build 1.13@5776728", "720", "1600", "270",
         8, 4,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
         false, false, false
@@ -263,10 +263,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "g850-210401-5286", "A217FXXU4CUJ1", "2021-07-01", "11", "exynos850", "mali", "196610", "Exynos850", "zygote64_32",
         "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012",
         "a21ssqz-user 11 RP1A.200720.012 A217FXXU4CUJ1 release-keys", "a21ssqz-user", "SWDD7700", "dpi",
-        "1625097600", "REL", "0", "ARM", "Mali-G52 MC1", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
+        "1625097600", "REL", "0", "ARM", "Mali-G52 MC1", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "720", "1600", "270",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true
     } },
     { "Galaxy A31", {
         "samsung", "samsung", "SM-A315F", "a31", "a31sqz", "mt6768", "mt6768", "A315FXXU4CUH1",
@@ -277,7 +277,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000", "REL", "0", "ARM", "Mali-G52 MC2", "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "411",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch) - Samsung usa BMI160 en la mayoría de la serie A,
-        false, true, true
+        false, false, true
     } },
     { "Galaxy F62", {
         "samsung", "samsung", "SM-E625F", "e1q", "e1qsqz", "exynos9825", "exynos9825", "E625FXXU2BUG1",
@@ -288,7 +288,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1625097600", "REL", "0", "ARM", "Mali-G76 MP12", "OpenGL ES 3.2 v1.r23p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "393",
         8, 6,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true
     } },
     { "OnePlus 8T", {
         "OnePlus", "OnePlus", "KB2001", "OnePlus8T", "OnePlus8T", "qcom", "kona", "2107142215",
@@ -310,7 +310,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1620604800", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "408",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, false, true
     } },
     { "OnePlus N10 5G", {
         "OnePlus", "OnePlus", "BE2025", "OnePlus N10 5G", "billie", "qcom", "sm6350", "2104132208",
@@ -321,7 +321,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1617235200", "REL", "0", "Qualcomm", "Adreno (TM) 619L", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "405",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, false, true
     } },
     { "OnePlus 8", {
         "OnePlus", "OnePlus", "IN2013", "OnePlus8", "instantnoodle", "qcom", "kona", "2105100150",
@@ -340,7 +340,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1", "7474174", "2021-08-05", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
         "google/redfin/redfin:11/RQ3A.210805.001.A1/7474174:user/release-keys", "RQ3A.210805.001.A1",
         "redfin-user 11 RQ3A.210805.001.A1 7474174 release-keys", "redfin-user", "abfarm-release-rbe-32-00025", "android-build",
-        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "432",
+        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "432",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
         false, true, false
@@ -351,7 +351,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "g7250-00195-210614-B-7352378", "7380771", "2021-07-05", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
         "google/bramble_vend/bramble:11/RQ3A.210705.001/7380771:vendor/release-keys", "RQ3A.210705.001",
         "bramble-user 11 RQ3A.210705.001 7380771 release-keys", "bramble-user", "abfarm-release-rbe-64.hot.corp.google.com", "android-build",
-        "1625616000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "413",
+        "1625616000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "413",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
         false, true, false
@@ -362,7 +362,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00022-SM7150_GEN_PACK-1", "7390230", "2021-08-05", "11", "atoll", "adreno", "196610", "SM7150", "zygote64_32",
         "google/sunfish/sunfish:11/RQ3A.210805.001/7390230:user/release-keys", "RQ3A.210805.001",
         "sunfish-user 11 RQ3A.210805.001 7390230 release-keys", "sunfish-user", "abfarm-release-rbe-32-00027", "android-build",
-        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "443",
+        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "443",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
         false, true, false
@@ -373,7 +373,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.3.0-00079-SDM670_GEN_PACK-1", "6734798", "2021-05-05", "11", "sdm670", "adreno", "196610", "SDM670", "zygote64_32",
         "google/bonito/bonito:11/RP1A.200720.011/6734798:user/release-keys", "RP1A.200720.011",
         "bonito-user 11 RP1A.200720.011 6734798 release-keys", "bonito-user", "abfarm-release-rbe-32-00010", "android-build",
-        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 615", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "400",
+        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 615", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2160", "400",
         8, 4,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
         false, true, false
@@ -453,7 +453,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1635724800", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "411",
         8, 8,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false
     } },
     { "Realme GT Master", {
         "realme", "realme", "RMX3363", "RE58B2L1", "RMX3363", "qcom", "sm7325", "S.20211201",
@@ -464,7 +464,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1638316800", "REL", "0", "Qualcomm", "Adreno (TM) 642L", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "409",
         8, 8,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false
     } },
     { "ASUS ZenFone 7", {
         "asus", "asus", "ASUS_I002D", "ASUS_I002D", "WW_I002D", "qcom", "kona", "18.0840.2101.26-0",
@@ -475,7 +475,7 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1629859200", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, false, false
+        false, true, false
     } },
     { "Realme 8", {
         "realme", "realme", "RMX3085", "RMX3085", "RMX3085", "mt6785", "RMX3085", "1630454400000",
@@ -486,6 +486,6 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1630454400", "REL", "0", "ARM", "Mali-G76 MC4", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "411",
         8, 6,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false
     } },
 };
