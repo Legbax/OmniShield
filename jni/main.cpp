@@ -2257,8 +2257,6 @@ public:
     }
     void preAppSpecialize(zygisk::Api *api, JNIEnv *env) override { readConfig(); }
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
-        api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
-
         // GUARDIA: solo inyectar en procesos objetivo
         std::string procName;
         { std::ifstream f("/proc/self/cmdline"); std::getline(f, procName, '\0'); }
@@ -2274,6 +2272,9 @@ public:
             if (procName.find(ALLOWED[i]) != std::string::npos) { isTarget = true; break; }
 
         if (!isTarget) return;  // Salida temprana — sin hooks en procesos del sistema
+
+        // PR46: FORCE_DENYLIST_UNMOUNT solo para procesos objetivo confirmados
+        api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
@@ -2742,6 +2743,10 @@ public:
             api->hookJniNativeMethods(env,
                 "android/hardware/camera2/impl/CameraMetadataNative",
                 cameraMethods, 1);
+            // PR46: hookJniNativeMethods guarda el original en cameraMethods[0].fnPtr
+            orig_nativeReadValues =
+                reinterpret_cast<jbyteArray(*)(JNIEnv*, jobject, jint)>(
+                    cameraMethods[0].fnPtr);
         }
 
         // PR44: MediaCodec — crash guard en native_setup (lado de creación)
@@ -2754,6 +2759,10 @@ public:
             };
             api->hookJniNativeMethods(env, "android/media/MediaCodec",
                                       codecMethods, 1);
+            // PR46: capturar puntero original del codec
+            orig_native_setup =
+                reinterpret_cast<void(*)(JNIEnv*, jobject, jstring, jboolean, jboolean)>(
+                    codecMethods[0].fnPtr);
         }
 
     }
