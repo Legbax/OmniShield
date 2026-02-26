@@ -50,6 +50,21 @@ struct DeviceFingerprint {
     bool hasHeartRateSensor;
     bool hasBarometerSensor;
     bool hasFingerprintWakeupSensor;
+    // PR44: Camera2 — sensor trasero (rear). Hookeado activamente.
+    float sensorPhysicalWidth;    // SENSOR_INFO_PHYSICAL_SIZE width (mm)
+    float sensorPhysicalHeight;   // SENSOR_INFO_PHYSICAL_SIZE height (mm)
+    int32_t pixelArrayWidth;      // SENSOR_INFO_PIXEL_ARRAY_SIZE width (px)
+    int32_t pixelArrayHeight;     // SENSOR_INFO_PIXEL_ARRAY_SIZE height (px)
+    float focalLength;            // LENS_INFO_AVAILABLE_FOCAL_LENGTHS (mm)
+    float aperture;               // LENS_INFO_AVAILABLE_APERTURES (f-number)
+    // PR44: Camera2 — sensor frontal (front). Hookeado activamente via LENS_FACING oracle.
+    // LENS_FACING (tag 0x00050006): 0=FRONT, 1=BACK. Consultado en isFrontCameraMetadata().
+    float frontSensorPhysicalWidth;
+    float frontSensorPhysicalHeight;
+    int32_t frontPixelArrayWidth;
+    int32_t frontPixelArrayHeight;
+    float frontFocalLength;
+    float frontAperture;
 };
 
 static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
@@ -61,7 +76,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "lancelot_global-user 11 RP1A.200720.011 V12.5.6.0.RJCMIXM release-keys", "lancelot_global-user", "pangu-build-component-system-177793", "builder",
         "1632960000", "REL", "0", "ARM", "Mali-G52 MC2", "OpenGL ES 3.2 v1.r26p0-01rel0.812488876c6978508e75b7509d43763d", "1080", "2340", "395", 8, 4,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 4912.0f,  // BMA4xy (Bosch)
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        4.80f, 3.60f, 4224, 3168, 2.75f, 2.2f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "POCO X3 Pro", {
         "Xiaomi", "POCO", "M2102J20SG", "vayu", "vayu_global", "qcom", "vayu", "V12.5.3.0.RJUMIXM",
@@ -71,7 +89,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "vayu_global-user 11 RKQ1.200826.002 V12.5.3.0.RJUMIXM release-keys", "vayu_global-user", "c3-miui-ota-bd98", "builder",
         "1622630400", "REL", "0", "Qualcomm", "Adreno (TM) 640", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.74f, 1.6f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Mi 10T", {
         "Xiaomi", "Xiaomi", "M2007J3SY", "apollo", "apollo_global", "qcom", "apollo", "V12.5.1.0.RJDMIXM",
@@ -81,7 +102,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "apollo_global-user 11 RKQ1.200826.002 V12.5.1.0.RJDMIXM release-keys", "apollo_global-user", "c3-miui-ota-bd05", "builder",
         "1622112000", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
-        false, true, false
+        false, true, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Redmi Note 10 Pro", {
         "Xiaomi", "Redmi", "M2101K6G", "sweet", "sweet_global", "qcom", "sweet", "V12.5.4.0.RKGMIXM",
@@ -91,7 +115,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "sweet_global-user 11 RKQ1.200826.002 V12.5.4.0.RKGMIXM release-keys", "sweet_global-user", "pangu-build-component-system-178104", "builder",
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        9.60f, 7.20f, 12032, 9024, 5.58f, 1.9f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Redmi Note 9 Pro", {
         "Xiaomi", "Redmi", "M2003J6B2G", "joyeuse", "joyeuse_global", "qcom", "joyeuse", "V12.5.1.0.RJZMIXM",
@@ -101,194 +128,231 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "joyeuse_global-user 11 RKQ1.200826.002 V12.5.1.0.RJZMIXM release-keys", "joyeuse_global-user", "pangu-build-component-system-175632", "builder",
         "1622112000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394", 8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro)
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 1.79f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Redmi Note 10", {
         "Xiaomi", "Redmi", "M2101K7AI", "mojito", "mojito_global", "qcom", "mojito", "V12.5.6.0.RKFMIXM",
         "Redmi/mojito_global/mojito:11/RKQ1.200826.002/V12.5.6.0.RKFMIXM:user/release-keys", "RKQ1.200826.002", "release-keys", "user",
         "MPSS.AT.4.0-00055-SM6150_GEN_PACK-1", "V12.5.6.0.RKFMIXM", "2021-09-01", "11", "sm6150", "adreno", "196610", "SM6150", "zygote64_32",
-        "Redmi/mojito_global/mojito:11/RKQ1.200826.002/V12.5.6.0.RKFMIXM:user/release-keys", "RKQ1.200826.002",
-        "mojito_global-user 11 RKQ1.200826.002 V12.5.6.0.RKFMIXM release-keys", "mojito_global-user", "pangu-build-component-system-179001", "builder",
+        "Redmi/mojito_global/mojito:11/RKQ1.200826.002/V12.5.6.0.RKFMIXM:user/release-keys", "mojito_global-user", "pangu-build-component-system-179001", "builder",
         "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 612", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "409",
         8, 4,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "POCO M3 Pro 5G", {
         "Xiaomi", "POCO", "M2103K19PG", "camellia", "camellia_global", "mt6833", "camellia", "V12.5.2.0.RKRMIXM",
         "POCO/camellia_global/camellia:11/RP1A.200720.011/V12.5.2.0.RKRMIXM:user/release-keys", "RP1A.200720.011", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V73.6", "V12.5.2.0.RKRMIXM", "2021-07-01", "11", "mt6833", "mali", "196610", "MT6833", "zygote64_32",
-        "POCO/camellia_global/camellia:11/RP1A.200720.011/V12.5.2.0.RKRMIXM:user/release-keys", "RP1A.200720.011",
-        "camellia_global-user 11 RP1A.200720.011 V12.5.2.0.RKRMIXM release-keys", "camellia_global-user", "pangu-build-component-system-176812", "builder",
+        "POCO/camellia_global/camellia:11/RP1A.200720.011/V12.5.2.0.RKRMIXM:user/release-keys", "camellia_global-user", "pangu-build-component-system-176812", "builder",
         "1625097600", "REL", "0", "ARM", "Mali-G57 MC2", "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
         8, 6,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "POCO X3 NFC", {
         "Xiaomi", "POCO", "M2007J20CG", "surya", "surya_global", "qcom", "surya", "V12.5.2.0.RJGMIXM",
         "POCO/surya_global/surya:11/RKQ1.200826.002/V12.5.2.0.RJGMIXM:user/release-keys", "RKQ1.200826.002", "release-keys", "user",
         "MPSS.AT.4.0-00026-SM7150_GEN_PACK-1", "V12.5.2.0.RJGMIXM", "2021-10-01", "11", "atoll", "adreno", "196610", "SM7150-AB", "zygote64_32",
-        "POCO/surya_global/surya:11/RKQ1.200826.002/V12.5.2.0.RJGMIXM:user/release-keys", "RKQ1.200826.002",
-        "surya_global-user 11 RKQ1.200826.002 V12.5.2.0.RJGMIXM release-keys", "surya_global-user", "c3-miui-ota-bd77", "builder",
+        "POCO/surya_global/surya:11/RKQ1.200826.002/V12.5.2.0.RJGMIXM:user/release-keys", "surya_global-user", "c3-miui-ota-bd77", "builder",
         "1622630400", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Mi 11 Lite", {
         "Xiaomi", "Xiaomi", "M2101K9AG", "courbet", "courbet_global", "qcom", "courbet", "V12.5.3.0.RKAMIXM",
         "Xiaomi/courbet_global/courbet:11/RKQ1.200826.002/V12.5.3.0.RKAMIXM:user/release-keys", "RKQ1.200826.002", "release-keys", "user",
         "MPSS.AT.4.0-00026-SM7150_GEN_PACK-1", "V12.5.3.0.RKAMIXM", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7150-AB", "zygote64_32",
-        "Xiaomi/courbet_global/courbet:11/RKQ1.200826.002/V12.5.3.0.RKAMIXM:user/release-keys", "RKQ1.200826.002",
-        "courbet_global-user 11 RKQ1.200826.002 V12.5.3.0.RKAMIXM release-keys", "courbet_global-user", "pangu-build-component-system-180421", "builder",
+        "Xiaomi/courbet_global/courbet:11/RKQ1.200826.002/V12.5.3.0.RKAMIXM:user/release-keys", "courbet_global-user", "pangu-build-component-system-180421", "builder",
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "401",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 4.74f, 2.0f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Mi 11", {
         "Xiaomi", "Xiaomi", "M2011K2G", "venus", "venus_global", "qcom", "venus", "V12.5.6.0.RKBMIXM",
         "Xiaomi/venus_global/venus:11/RKQ1.200826.002/V12.5.6.0.RKBMIXM:user/release-keys", "RKQ1.200826.002", "release-keys", "user",
         "MPSS.HI.3.3.c1-00076-SM8350_GEN_PACK-1", "V12.5.6.0.RKBMIXM", "2021-10-01", "11", "lahaina", "adreno", "196610", "SM8350", "zygote64_32",
-        "Xiaomi/venus_global/venus:11/RKQ1.200826.002/V12.5.6.0.RKBMIXM:user/release-keys", "RKQ1.200826.002",
-        "venus_global-user 11 RKQ1.200826.002 V12.5.6.0.RKBMIXM release-keys", "venus_global-user", "pangu-build-component-system-182133", "builder",
+        "Xiaomi/venus_global/venus:11/RKQ1.200826.002/V12.5.6.0.RKBMIXM:user/release-keys", "venus_global-user", "pangu-build-component-system-182133", "builder",
         "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 660", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "395",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, true, true,
+        // PR44: Camera2
+        9.60f, 7.20f, 12032, 9024, 5.58f, 1.85f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Redmi 10X 4G", {
         "Xiaomi", "Redmi", "M2004J7AC", "merlin", "merlin", "mt6769", "merlin", "V12.5.3.0.QJJCNXM",
         "Redmi/merlin/merlin:11/RP1A.200720.011/V12.5.3.0.QJJCNXM:user/release-keys", "RP1A.200720.011", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V110.6", "V12.5.3.0.QJJCNXM", "2021-07-01", "11", "mt6769", "mali", "196610", "MT6769", "zygote64_32",
-        "Redmi/merlin/merlin:11/RP1A.200720.011/V12.5.3.0.QJJCNXM:user/release-keys", "RP1A.200720.011",
-        "merlin-user 11 RP1A.200720.011 V12.5.3.0.QJJCNXM release-keys", "merlin-user", "pangu-build-component-system-175411", "builder",
+        "Redmi/merlin/merlin:11/RP1A.200720.011/V12.5.3.0.QJJCNXM:user/release-keys", "merlin-user", "pangu-build-component-system-175411", "builder",
         "1622505600", "REL", "0", "ARM", "Mali-G52 MC2", "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "403",
         8, 4,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 4912.0f,  // BMA4xy (Bosch),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.74f, 1.79f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "POCO F3", {
         "Xiaomi", "POCO", "M2012K11AG", "alioth", "alioth_global", "qcom", "alioth", "V12.5.5.0.RKHMIXM",
         "POCO/alioth_global/alioth:11/RKQ1.200826.002/V12.5.5.0.RKHMIXM:user/release-keys", "RKQ1.200826.002", "release-keys", "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "V12.5.5.0.RKHMIXM", "2021-09-01", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
-        "POCO/alioth_global/alioth:11/RKQ1.200826.002/V12.5.5.0.RKHMIXM:user/release-keys", "RKQ1.200826.002",
-        "alioth_global-user 11 RKQ1.200826.002 V12.5.5.0.RKHMIXM release-keys", "alioth_global-user", "c3-miui-ota-bd88", "builder",
+        "POCO/alioth_global/alioth:11/RKQ1.200826.002/V12.5.5.0.RKHMIXM:user/release-keys", "alioth_global-user", "c3-miui-ota-bd88", "builder",
         "1630454400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.74f, 1.79f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Galaxy A52", {
         "samsung", "samsung", "SM-A525F", "a52x", "a52xsqz", "qcom", "atoll", "A525FXXU4AUH1",
         "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A525FXXU4AUH1", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
-        "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "RP1A.200720.012",
-        "a52xsqz-user 11 RP1A.200720.012 A525FXXU4AUH1 release-keys", "a52xsqz-user", "SWDD7390", "dpi",
+        "samsung/a52xsqz/a52x:11/RP1A.200720.012/A525FXXU4AUH1:user/release-keys", "a52xsqz-user", "SWDD7390", "dpi",
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.23f, 1.8f,
+        6.40f, 4.80f, 6528, 4896, 3.56f, 2.2f
     } },
     { "Galaxy A72", {
         "samsung", "samsung", "SM-A725F", "a72", "a72sqz", "qcom", "atoll", "A725FXXU3AUH2",
         "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MPSS.AT.4.0-00050-SM7150_GEN_PACK-1", "A725FXXU3AUH2", "2021-08-01", "11", "atoll", "adreno", "196610", "SM7125", "zygote64_32",
-        "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "RP1A.200720.012",
-        "a72sqz-user 11 RP1A.200720.012 A725FXXU3AUH2 release-keys", "a72sqz-user", "SWDD7391", "dpi",
+        "samsung/a72sqz/a72:11/RP1A.200720.012/A725FXXU3AUH2:user/release-keys", "a72sqz-user", "SWDD7391", "dpi",
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "393",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.36f, 1.8f,
+        6.40f, 4.80f, 6528, 4896, 3.56f, 2.2f
     } },
     { "Galaxy A32 5G", {
         "samsung", "samsung", "SM-A326B", "a32x", "a32xsqz", "mt6853", "mt6853", "A326BXXU4AUH1",
         "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V84.6", "A326BXXU4AUH1", "2021-08-01", "11", "mt6853", "mali", "196610", "MT6853", "zygote64_32",
-        "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "RP1A.200720.012",
-        "a32xsqz-user 11 RP1A.200720.012 A326BXXU4AUH1 release-keys", "a32xsqz-user", "SWDD8201", "dpi",
-        "1627776000", "REL", "0", "ARM", "Mali-G57 MC3", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
+        "samsung/a32xsqz/a32x:11/RP1A.200720.012/A326BXXU4AUH1:user/release-keys", "a32xsqz-user", "SWDD8201", "dpi",
+        "1627776000", "REL", "0", "ARM", "Mali-G57 MC3", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "720", "1600", "270",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.28f, 2.0f,
+        3.67f, 2.75f, 4128, 3096, 1.93f, 2.4f
     } },
     { "Galaxy S20 FE", {
         "samsung", "samsung", "SM-G781B", "r8q", "r8qsqz", "qcom", "kona", "G781BXXU3CUJ2",
         "samsung/r8qsqz/r8q:11/RP1A.200720.012/G781BXXU3CUJ2:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "G781BXXU3CUJ2", "2021-10-01", "11", "kona", "adreno", "196610", "SM8250", "zygote64_32",
-        "samsung/r8qsqz/r8q:11/RP1A.200720.012/G781BXXU3CUJ2:user/release-keys", "RP1A.200720.012",
-        "r8qsqz-user 11 RP1A.200720.012 G781BXXU3CUJ2 release-keys", "r8qsqz-user", "SWDD5130", "dpi",
+        "samsung/r8qsqz/r8q:11/RP1A.200720.012/G781BXXU3CUJ2:user/release-keys", "r8qsqz-user", "SWDD5130", "dpi",
         "1633046400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        true, true, true
+        false, true, true,
+        // PR44: Camera2
+        7.20f, 5.40f, 4032, 3024, 4.07f, 1.8f,
+        6.40f, 4.80f, 6528, 4896, 3.56f, 2.2f
     } },
     { "Galaxy A51", {
         "samsung", "samsung", "SM-A515F", "a51", "a51sqz", "exynos9611", "exynos9611", "A515FXXU4CUG1",
         "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "A515FXXU4CUG1", "A515FXXU4CUG1", "2021-07-01", "11", "exynos9611", "mali", "196610", "Exynos9611", "zygote64_32",
-        "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "RP1A.200720.012",
-        "a51sqz-user 11 RP1A.200720.012 A515FXXU4CUG1 release-keys", "a51sqz-user", "21R3NF12", "dpi",
+        "samsung/a51sqz/a51:11/RP1A.200720.012/A515FXXU4CUG1:user/release-keys", "a51sqz-user", "21R3NF12", "dpi",
         "1625097600", "REL", "0", "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.28f, 2.0f,
+        5.04f, 3.78f, 5184, 3880, 2.73f, 2.4f
     } },
     { "Galaxy M31", {
-        "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "m31", "M315FXXU4CUG1",
+        "samsung", "samsung", "SM-M315F", "m31", "m31sqz", "exynos9611", "exynos9611", "M315FXXU4CUG1",
         "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
-        "M315FXXU4CUG1", "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "S5E9611", "zygote64_32",
-        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "RP1A.200720.012",
-        "m31sqz-user 11 RP1A.200720.012 M315FXXU4CUG1 release-keys", "m31sqz-user", "21R3NF12", "dpi",
+        "M315FXXU4CUG1", "M315FXXU4CUG1", "2021-11-01", "11", "exynos9611", "mali", "196610", "Exynos9611", "zygote64_32",
+        "samsung/m31sqz/m31:11/RP1A.200720.012/M315FXXU4CUG1:user/release-keys", "m31sqz-user", "21R3NF12", "dpi",
         "1636934400", "REL", "0", "ARM", "Mali-G72 MP3", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2340", "403",
         8, 6,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 4.28f, 2.0f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Galaxy A12", {
         "samsung", "samsung", "SM-A125F", "a12", "a12sqz", "mt6765", "mt6765", "A125FXXU5BUJ1",
         "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V56.6", "A125FXXU5BUJ1", "2021-10-01", "11", "mt6765", "powervr", "196610", "MT6765", "zygote64_32",
-        "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "RP1A.200720.012",
-        "a12sqz-user 11 RP1A.200720.012 A125FXXU5BUJ1 release-keys", "a12sqz-user", "SWDD8800", "dpi",
-        "1633046400", "REL", "0", "Imagination Technologies", "PowerVR GE8320", "OpenGL ES 3.2 build 1.13@5776728", "1080", "2400", "404",
+        "samsung/a12sqz/a12:11/RP1A.200720.012/A125FXXU5BUJ1:user/release-keys", "a12sqz-user", "SWDD8800", "dpi",
+        "1633046400", "REL", "0", "Imagination Technologies", "PowerVR GE8320", "OpenGL ES 3.2 build 1.13@5776728", "720", "1600", "270",
         8, 4,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.00f, 2.0f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "Galaxy A21s", {
         "samsung", "samsung", "SM-A217F", "a21s", "a21ssqz", "exynos850", "exynos850", "A217FXXU4CUJ1",
         "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "g850-210401-5286", "A217FXXU4CUJ1", "2021-07-01", "11", "exynos850", "mali", "196610", "Exynos850", "zygote64_32",
-        "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "RP1A.200720.012",
-        "a21ssqz-user 11 RP1A.200720.012 A217FXXU4CUJ1 release-keys", "a21ssqz-user", "SWDD7700", "dpi",
-        "1625097600", "REL", "0", "ARM", "Mali-G52 MC1", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "404",
+        "samsung/a21ssqz/a21s:11/RP1A.200720.012/A217FXXU4CUJ1:user/release-keys", "a21ssqz-user", "SWDD7700", "dpi",
+        "1625097600", "REL", "0", "ARM", "Mali-G52 MC1", "OpenGL ES 3.2 v1.r25p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "720", "1600", "270",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.28f, 2.0f,
+        3.67f, 2.75f, 4128, 3096, 1.93f, 2.4f
     } },
     { "Galaxy A31", {
         "samsung", "samsung", "SM-A315F", "a31", "a31sqz", "mt6768", "mt6768", "A315FXXU4CUH1",
         "samsung/a31sqz/a31:11/RP1A.200720.012/A315FXXU4CUH1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "MOLY.LR12A.R3.MP.V84.P47", "A315FXXU4CUH1", "2021-08-01", "11", "mt6768", "mali", "196610", "MT6768", "zygote64_32",
-        "samsung/a31sqz/a31:11/RP1A.200720.012/A315FXXU4CUH1:user/release-keys", "RP1A.200720.012",
-        "a31sqz-user 11 RP1A.200720.012 A315FXXU4CUH1 release-keys", "a31sqz-user", "SWDD8100", "dpi",
+        "samsung/a31sqz/a31:11/RP1A.200720.012/A315FXXU4CUH1:user/release-keys", "a31sqz-user", "SWDD8100", "dpi",
         "1627776000", "REL", "0", "ARM", "Mali-G52 MC2", "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "411",
         8, 4,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch) - Samsung usa BMI160 en la mayoría de la serie A,
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.28f, 2.0f,
+        4.61f, 3.46f, 5184, 3880, 2.49f, 2.2f
     } },
     { "Galaxy F62", {
         "samsung", "samsung", "SM-E625F", "e1q", "e1qsqz", "exynos9825", "exynos9825", "E625FXXU2BUG1",
         "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012", "release-keys", "user",
         "E625FXXU2BUG1", "E625FXXU2BUG1", "2021-07-01", "11", "exynos9825", "mali", "196610", "Exynos9825", "zygote64_32",
-        "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "RP1A.200720.012",
-        "e1qsqz-user 11 RP1A.200720.012 E625FXXU2BUG1 release-keys", "e1qsqz-user", "SWDD5830", "dpi",
+        "samsung/e1qsqz/e1q:11/RP1A.200720.012/E625FXXU2BUG1:user/release-keys", "e1qsqz-user", "SWDD5830", "dpi",
         "1625097600", "REL", "0", "ARM", "Mali-G76 MP12", "OpenGL ES 3.2 v1.r23p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "393",
         8, 6,
         156.9064f, 0.004788f, 34.906586f, 0.001064f, 1200.0f,  // BMI160 (Bosch),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        7.40f, 5.56f, 9216, 6912, 4.28f, 2.0f,
+        6.40f, 4.80f, 6528, 4896, 3.56f, 2.2f
     } },
     { "OnePlus 8T", {
         "OnePlus", "OnePlus", "KB2001", "OnePlus8T", "OnePlus8T", "qcom", "kona", "2107142215",
@@ -299,7 +363,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1626307200", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "401",
         8, 12,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, true, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 5.58f, 1.56f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "OnePlus Nord", {
         "OnePlus", "OnePlus", "AC2003", "OnePlus Nord", "avicii", "qcom", "lito", "2105101635",
@@ -310,7 +377,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1620604800", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "408",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.97f, 2.45f,
+        6.40f, 4.80f, 6528, 4896, 3.56f, 2.2f
     } },
     { "OnePlus N10 5G", {
         "OnePlus", "OnePlus", "BE2025", "OnePlus N10 5G", "billie", "qcom", "sm6350", "2104132208",
@@ -321,7 +391,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1617235200", "REL", "0", "Qualcomm", "Adreno (TM) 619L", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "405",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, false, true,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "OnePlus 8", {
         "OnePlus", "OnePlus", "IN2013", "OnePlus8", "instantnoodle", "qcom", "kona", "2105100150",
@@ -332,7 +405,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1620518400", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "401",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, true
+        false, true, true,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 5.58f, 1.78f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Pixel 5", {
         "Google", "google", "Pixel 5", "redfin", "redfin", "redfin", "redfin", "r8.0.0-6692804",
@@ -340,21 +416,27 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.VT.5.2-00075-SM7250_GEN_PACK-1", "7474174", "2021-08-05", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
         "google/redfin/redfin:11/RQ3A.210805.001.A1/7474174:user/release-keys", "RQ3A.210805.001.A1",
         "redfin-user 11 RQ3A.210805.001.A1 7474174 release-keys", "redfin-user", "abfarm-release-rbe-32-00025", "android-build",
-        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "432",
+        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "432",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, true, false,
+        // PR44: Camera2
+        5.76f, 4.29f, 4056, 3040, 4.44f, 1.7f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "Pixel 4a 5G", {
         "Google", "google", "Pixel 4a (5G)", "bramble", "bramble", "bramble", "bramble", "b2-0.3-7214727",
         "google/bramble/bramble:11/RQ3A.210705.001/7380771:user/release-keys", "RQ3A.210705.001", "release-keys", "user",
         "g7250-00195-210614-B-7352378", "7380771", "2021-07-05", "11", "lito", "adreno", "196610", "SM7250", "zygote64_32",
-        "google/bramble_vend/bramble:11/RQ3A.210705.001/7380771:vendor/release-keys", "RQ3A.210705.001",
+        "google/bramble/bramble:11/RQ3A.210705.001/7380771:user/release-keys", "RQ3A.210705.001",
         "bramble-user 11 RQ3A.210705.001 7380771 release-keys", "bramble-user", "abfarm-release-rbe-64.hot.corp.google.com", "android-build",
-        "1625616000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "413",
+        "1625616000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "413",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, true, false,
+        // PR44: Camera2
+        5.76f, 4.29f, 4056, 3040, 4.44f, 2.0f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "Pixel 4a", {
         "Google", "google", "Pixel 4a", "sunfish", "sunfish", "sunfish", "sunfish", "s5-0.5-6765805",
@@ -362,10 +444,13 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.4.0-00022-SM7150_GEN_PACK-1", "7390230", "2021-08-05", "11", "atoll", "adreno", "196610", "SM7150", "zygote64_32",
         "google/sunfish/sunfish:11/RQ3A.210805.001/7390230:user/release-keys", "RQ3A.210805.001",
         "sunfish-user 11 RQ3A.210805.001 7390230 release-keys", "sunfish-user", "abfarm-release-rbe-32-00027", "android-build",
-        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "443",
+        "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "443",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, true, false,
+        // PR44: Camera2
+        5.76f, 4.29f, 4056, 3040, 4.44f, 2.0f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "Pixel 3a XL", {
         "Google", "google", "Pixel 3a XL", "bonito", "bonito", "bonito", "bonito", "b4s4-0.2-5613699",
@@ -373,10 +458,13 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "MPSS.AT.3.0-00079-SDM670_GEN_PACK-1", "6734798", "2021-05-05", "11", "sdm670", "adreno", "196610", "SDM670", "zygote64_32",
         "google/bonito/bonito:11/RP1A.200720.011/6734798:user/release-keys", "RP1A.200720.011",
         "bonito-user 11 RP1A.200720.011 6734798 release-keys", "bonito-user", "abfarm-release-rbe-32-00010", "android-build",
-        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 615", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "400",
+        "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 615", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2160", "400",
         8, 4,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, true, false
+        false, true, false,
+        // PR44: Camera2
+        5.52f, 4.14f, 4032, 3024, 4.40f, 2.0f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "Moto G Power 2021", {
         "motorola", "motorola", "moto g power (2021)", "borneo", "borneo", "qcom", "bengal", "2b4fae",
@@ -387,7 +475,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "404",
         8, 4,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // ICM-42688 (TDK),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.74f, 2.0f,
+        3.20f, 2.40f, 3264, 2448, 2.02f, 2.0f
     } },
     { "Moto G Stylus 2021", {
         "motorola", "motorola", "moto g stylus (2021) 5G", "nairo", "nairo_retail", "qcom", "holi", "1.0.0.0",
@@ -398,7 +489,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 619", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386",
         8, 4,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // ICM-42688 (TDK),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.74f, 2.0f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Moto Edge", {
         "motorola", "motorola", "moto edge", "racer", "racer_retail", "qcom", "lito", "1.0.0.0",
@@ -409,18 +503,23 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1617235200", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "384",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        5.04f, 3.78f, 5184, 3880, 2.73f, 2.4f
     } },
     { "Moto Edge Plus", {
         "motorola", "motorola", "motorola edge+", "sofiar", "sofiar_retail", "qcom", "kona", "1.0.0.0",
         "motorola/sofiar_retail/sofiar:11/RROS31.Q1-13-52/1.0.0.0:user/release-keys", "RROS31.Q1-13-52", "release-keys", "user",
         "MPSS.HI.3.2.c1.1-00125-SM8250_GEN_PACK-1", "1.0.0.0", "2021-05-01", "11", "kona", "adreno", "196610", "SM8250-AB", "zygote64_32",
-        "motorola/sofiar_retail/sofiar:11/RROS31.Q1-13-52/1.0.0.0:user/release-keys", "RROS31.Q1-13-52",
-        "sofiar_retail-user 11 RROS31.Q1-13-52 1.0.0.0 release-keys", "sofiar_retail-user", "moto-build-prod-04", "moto",
+        "motorola/sofiar_retail/sofiar:11/RROS31.Q1-13-52/1.0.0.0:user/release-keys", "sofiar_retail-user", "moto-build-prod-04", "moto",
         "1619827200", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2340", "384",
         8, 12,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, false, false
+        false, true, false,
+        // PR44: Camera2
+        9.60f, 7.20f, 12032, 9024, 5.58f, 1.8f,
+        5.04f, 3.78f, 5184, 3880, 2.73f, 2.4f
     } },
     { "Nokia 8.3 5G", {
         "HMD Global", "Nokia", "Nokia 8.3 5G", "nokia_8.3_5g", "BVUB_00WW", "qcom", "lito", "00WW_3_510",
@@ -431,7 +530,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1627776000", "REL", "0", "Qualcomm", "Adreno (TM) 620", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "386",
         8, 6,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSR (ST Micro),
-        false, true, false
+        false, true, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6936, 5.09f, 2.0f,
+        4.80f, 3.60f, 5520, 4140, 2.75f, 2.0f
     } },
     { "Nokia 5.4", {
         "HMD Global", "Nokia", "Nokia 5.4", "nokia_5.4", "CAV_00WW", "qcom", "bengal", "00WW_2_440",
@@ -442,7 +544,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1622505600", "REL", "0", "Qualcomm", "Adreno (TM) 610", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "409",
         8, 4,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // ICM-42688 (TDK),
-        false, false, false
+        false, false, false,
+        // PR44: Camera2
+        6.40f, 4.80f, 8000, 6000, 4.74f, 2.0f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Realme 8 Pro", {
         "realme", "realme", "RMX3091", "RMX3091", "RMX3091", "qcom", "atoll", "1636363205855",
@@ -453,7 +558,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1635724800", "REL", "0", "Qualcomm", "Adreno (TM) 618", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "411",
         8, 8,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        9.60f, 7.20f, 12032, 9024, 5.58f, 1.88f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "Realme GT Master", {
         "realme", "realme", "RMX3363", "RE58B2L1", "RMX3363", "qcom", "sm7325", "S.20211201",
@@ -464,7 +572,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1638316800", "REL", "0", "Qualcomm", "Adreno (TM) 642L", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "409",
         8, 8,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 1.8f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
     { "ASUS ZenFone 7", {
         "asus", "asus", "ASUS_I002D", "ASUS_I002D", "WW_I002D", "qcom", "kona", "18.0840.2101.26-0",
@@ -475,7 +586,10 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1629859200", "REL", "0", "Qualcomm", "Adreno (TM) 650", "OpenGL ES 3.2 V@0502.0 (GIT@5f4e5c9, Ia3b7920, 1600000000)", "1080", "2400", "394",
         8, 8,
         78.4532f, 0.0023946f, 34.906586f, 0.001064f, 4912.0f,  // LSM6DSO (ST Micro),
-        false, false, false
+        false, true, false,
+        // PR44: Camera2 - ZenFone 7 Flip (front == rear)
+        7.40f, 5.56f, 9248, 6944, 4.09f, 2.0f,
+        7.40f, 5.56f, 9248, 6944, 4.09f, 2.0f
     } },
     { "Realme 8", {
         "realme", "realme", "RMX3085", "RMX3085", "RMX3085", "mt6785", "RMX3085", "1630454400000",
@@ -486,6 +600,9 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         "1630454400", "REL", "0", "ARM", "Mali-G76 MC4", "OpenGL ES 3.2 v1.r26p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2400", "411",
         8, 6,
         39.2266f, 0.0011974f, 34.906586f, 0.001064f, 2000.0f,  // BMA253 (Bosch),
-        false, true, false
+        false, false, false,
+        // PR44: Camera2
+        7.40f, 5.56f, 9248, 6944, 5.09f, 2.0f,
+        4.00f, 3.00f, 4608, 3456, 2.18f, 2.45f
     } },
 };

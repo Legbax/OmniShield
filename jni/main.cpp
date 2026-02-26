@@ -23,6 +23,9 @@
 #include <ifaddrs.h>
 #include <linux/if_packet.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <linux/if_arp.h>
 #include <errno.h>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
@@ -68,6 +71,22 @@ static long   g_seedVersion        = 0;
 static bool   g_sensorHasHeartRate = false;
 static bool   g_sensorHasBarometer = false;
 
+// PR44: Camera2 — globals ópticos cargados desde G_DEVICE_PROFILES en postAppSpecialize
+// Rear camera (siempre activo)
+static float   g_camPhysicalWidth   = 6.40f;
+static float   g_camPhysicalHeight  = 4.80f;
+static int32_t g_camPixelWidth      = 8000;
+static int32_t g_camPixelHeight     = 6000;
+static float   g_camFocalLength     = 4.74f;
+static float   g_camAperture        = 1.8f;
+// Front camera (activo vía isFrontCameraMetadata — LENS_FACING oracle)
+static float   g_camFrontPhysWidth  = 3.84f;
+static float   g_camFrontPhysHeight = 2.88f;
+static int32_t g_camFrontPixWidth   = 6528;
+static int32_t g_camFrontPixHeight  = 4896;
+static float   g_camFrontFocLen     = 2.20f;
+static float   g_camFrontAperture   = 2.2f;
+
 // PR38+39: Inicializar caché de GPS (llamar en postAppSpecialize tras readConfig)
 static void initLocationCache() {
     if (!g_locationCached && !g_currentProfileName.empty() && g_masterSeed != 0) {
@@ -101,7 +120,10 @@ enum FileType {
     SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP,
     PROC_BOOT_ID,         // /proc/sys/kernel/random/boot_id — UUID único por device
     SYS_CPU_FREQ_AVAIL,   // scaling_available_frequencies — firma de plataforma CPU
-    PROC_SELF_CGROUP      // /proc/self/cgroup — puede revelar namespace KernelSU
+    PROC_SELF_CGROUP,     // /proc/self/cgroup — puede revelar namespace KernelSU
+    BATTERY_CHARGE_FULL,  // PR42: /sys/class/power_supply/battery/charge_full[_design]
+    PROC_NET_IF_INET6,    // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
+    PROC_NET_IPV6_ROUTE   // PR43: /proc/net/ipv6_route
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -135,10 +157,29 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 
+// PR44: Camera2 — CameraMetadataNative.nativeReadValues(int tag) : byte[]
+// Firma AOSP Android 11: instance method, (I)[B — SIN parámetro ptr explícito
+static jbyteArray (*orig_nativeReadValues)(JNIEnv*, jobject, jint);
+
+// PR44: MediaCodec — native_setup(String name, boolean nameIsType, boolean encoder)
+// Firma AOSP Android 11: instance method, (Ljava/lang/String;ZZ)V
+static void (*orig_native_setup)(JNIEnv*, jobject, jstring, jboolean, jboolean);
+
 // Phase 4 Originals (v11.9.9)
 static int (*orig_sysinfo)(struct sysinfo *info);
 static struct dirent* (*orig_readdir)(DIR *dirp);
 static unsigned long (*orig_getauxval)(unsigned long type);
+
+// PR41: dup family — cerrar bypass de caché VFS
+static int (*orig_dup)(int oldfd);
+static int (*orig_dup2)(int oldfd, int newfd);
+static int (*orig_dup3)(int oldfd, int newfd, int flags);
+
+// PR43: fcntl hook — cerrar F_DUPFD bypass de caché VFS
+static int (*orig_fcntl)(int fd, int cmd, ...);
+
+// PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
+static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -390,10 +431,59 @@ int my_uname(struct utsname *buf) {
             } else if (plat.find("sm7325") != std::string::npos) {
                 kv = "5.4.61-perf+";
             }
+            // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+            else if (plat.find("exynos9611") != std::string::npos) {
+                kv = "4.14.113-25145160";
+            } else if (plat.find("exynos9825") != std::string::npos) {
+                kv = "4.14.113-22911262";
+            } else if (plat.find("exynos850") != std::string::npos) {
+                kv = "4.19.113-25351273";
+            }
         }
 
         strcpy(buf->release, kv.c_str());
         strcpy(buf->version, "#1 SMP PREEMPT");
+    }
+    return ret;
+}
+
+// PR42: Intercepta ioctl SIOCGIFHWADDR para wlan0/eth0
+// Las apps nativas en C/C++ evitan getifaddrs y leen la MAC directamente del kernel.
+// Este hook retorna 02:00:00:00:00:00 (MAC de privacidad AOSP) en ambas interfaces.
+
+#ifndef ARPHRD_ETHER
+#define ARPHRD_ETHER 1
+#endif
+
+int my_ioctl(int fd, unsigned long request, void* arg) {
+    int ret = orig_ioctl(fd, request, arg);
+    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
+        struct ifreq* ifr = static_cast<struct ifreq*>(arg);
+        if (strcmp(ifr->ifr_name, "wlan0") == 0 || strcmp(ifr->ifr_name, "eth0") == 0) {
+            unsigned char static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
+            ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+        }
+    }
+    return ret;
+}
+
+// PR43: fcntl hook (Duplicate FD propagation)
+// Intercepta fcntl(F_DUPFD) para propagar la caché VFS al nuevo descriptor.
+// Argumento 'arg' es long para cubrir tanto int (F_DUPFD) como punteros (F_GETLK).
+int my_fcntl(int fd, int cmd, long arg) {
+    int ret = orig_fcntl(fd, cmd, arg);
+    if (ret >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) {
+        // Propagar caché VFS al nuevo FD clonado
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(fd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[ret] = it->second;
+            g_fdOffsetMap[ret] = 0;
+            auto cache_it = g_fdContentCache.find(fd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[ret] = cache_it->second;
+        }
     }
     return ret;
 }
@@ -408,19 +498,44 @@ int my_access(const char *pathname, int mode) {
 int my_getifaddrs(struct ifaddrs **ifap) {
     int ret = orig_getifaddrs(ifap);
     if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
-        struct ifaddrs *ifa = *ifap;
-        while (ifa) {
-            if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_PACKET) {
-                struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
+        struct ifaddrs *curr = *ifap;
+        struct ifaddrs *prev = nullptr;
+        while (curr) {
+            bool remove = false;
+            if (curr->ifa_name) {
+                std::string name = curr->ifa_name;
+                // PR43: Stealth filtering (eth0, p2p0, tun, dummy)
+                if (name == "eth0" || name == "p2p0" ||
+                    name.find("dummy") == 0 || name.find("tun") == 0) {
+                    remove = true;
+                }
+                // PR43: En modo LTE spoofing, ocultar wlan0 también
+                if (g_spoofMobileNetwork && name == "wlan0") {
+                    remove = true;
+                }
+            }
 
-                // Validación de seguridad contra punteros nulos
-                if (ifa->ifa_name != nullptr && strcmp(ifa->ifa_name, "wlan0") == 0) {
+            if (remove) {
+                // Desvincular nodo de la lista
+                if (prev) {
+                    prev->ifa_next = curr->ifa_next;
+                    curr = curr->ifa_next;
+                } else {
+                    *ifap = curr->ifa_next; // Nuevo head
+                    curr = curr->ifa_next;
+                }
+            } else {
+                // Mantener nodo, aplicar spoofing si es wlan0 (y no estamos en modo LTE)
+                if (curr->ifa_addr && curr->ifa_addr->sa_family == AF_PACKET &&
+                    curr->ifa_name && strcmp(curr->ifa_name, "wlan0") == 0) {
+                    struct sockaddr_ll *s = (struct sockaddr_ll*)curr->ifa_addr;
                     // Static MAC 02:00:00:00:00:00 for AOSP privacy
                     unsigned char static_mac[] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
                     memcpy(s->sll_addr, static_mac, 6);
                 }
+                prev = curr;
+                curr = curr->ifa_next;
             }
-            ifa = ifa->ifa_next;
         }
     }
     return ret;
@@ -431,8 +546,10 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 // -----------------------------------------------------------------------------
 
 static std::string getArmFeatures(const std::string& platform) {
-    if (platform.find("mt6768") != std::string::npos || platform.find("mt6765") != std::string::npos ||
-        platform.find("sdm670") != std::string::npos || platform.find("exynos850") != std::string::npos)
+    // PR43 FIX: mt6769 (Helio G80/G85) y exynos850 son Cortex-A55 (ARMv8.2) → soportan lrcpc/dcpop.
+    // Solo mt6765 (P35, Cortex-A53) y exynos9611 (A73/A53) deben reportar features ARMv8.0.
+    if (platform.find("mt6765") != std::string::npos ||
+        platform.find("exynos9611") != std::string::npos)
         return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm";
     return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp";
 }
@@ -682,10 +799,7 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.crypto.type")                     dynamic_buffer = "file";
         // --- PR20: Locale coherente con región del perfil ---
         else if (k == "ro.product.locale" || k == "persist.sys.locale") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            if (region == "europe")      dynamic_buffer = "en-GB";
-            else if (region == "latam")  dynamic_buffer = "es-US";
-            else                         dynamic_buffer = "en-US"; // usa + default
+            dynamic_buffer = "en-US";  // PR41: Solo USA
         }
         else if (k == "ro.product.first_api_level") {
             int release_api = 0;
@@ -756,21 +870,18 @@ int my_system_property_get(const char *key, char *value) {
         // persist.sys.locale ya está hooked (PR20) pero country y language por separado
         // no lo estaban. Las apps sociales leen las tres para detectar inconsistencias.
         else if (k == "persist.sys.country") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "europe") ? "GB" : "US";
+            dynamic_buffer = "US";  // PR41: Solo USA
         }
         else if (k == "persist.sys.language") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            dynamic_buffer = (region == "latam") ? "es" : "en";
+            dynamic_buffer = "en";  // PR41: Solo USA
         }
         // --- v12.10: Chronos & Command Shield ---
         else if (k == "ro.opengles.version")          dynamic_buffer = fp.openGlEs;
         else if (k == "sys.usb.state" || k == "sys.usb.config") dynamic_buffer = "mtp";
         else if (k == "persist.sys.timezone") {
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            if (region == "europe") dynamic_buffer = "Europe/London";
-            else if (region == "latam") dynamic_buffer = "America/Sao_Paulo";
-            else dynamic_buffer = "America/New_York";
+            // PR42: Timezone derivado de la MISMA ciudad que GPS (seed+7777)
+            // Coherencia garantizada: si GPS=Phoenix → TZ=America/Phoenix siempre
+            dynamic_buffer = omni::engine::getTimezoneForProfile(g_masterSeed);
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
@@ -797,21 +908,37 @@ int my_system_property_get(const char *key, char *value) {
             dynamic_buffer = (mcc == "310" || mcc == "311") ? imsi.substr(0, 6) : imsi.substr(0, 5);
         }
         else if (k == "gsm.sim.operator.iso-country" || k == "gsm.operator.iso-country") {
-            // Sincronizar ISO con la región del motor
-            std::string region = omni::engine::getRegionForProfile(g_currentProfileName);
-            if (region == "usa") dynamic_buffer = "us";
-            else if (region == "europe") dynamic_buffer = "gb";
-            else if (region == "latam") dynamic_buffer = "br";
-            else dynamic_buffer = "us";
+            dynamic_buffer = "us";  // PR41: Solo USA
         }
         else if (k == "gsm.sim.operator.alpha" || k == "gsm.operator.alpha") {
-            dynamic_buffer = "Omni Network";
+            // PR41: Carrier USA real derivado del IMSI (coherente con PLMN)
+            dynamic_buffer = omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed);
         }
         else if (k == "ro.mediadrm.device_id" || k == "drm.service.enabled") {
             dynamic_buffer = omni::engine::generateWidevineId(g_masterSeed);
         }
-        else if (k == "gsm.version.ril-impl")
-            dynamic_buffer = "com.android.internal.telephony.uicc.RILConstants";
+        else if (k == "gsm.version.ril-impl") {
+            // PR41: Formato RIL real (el valor anterior era un classpath Java, no un ril-impl)
+            dynamic_buffer = omni::engine::getRilVersionForProfile(g_currentProfileName);
+        }
+        else if (k == "ro.carrier") {
+            // PR42: Carrier short name coherente con IMSI generado
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            std::string mccMnc = imsi.substr(0, 6);
+            if (mccMnc == "311480") dynamic_buffer = "vzw";         // Verizon
+            else if (mccMnc == "310410") dynamic_buffer = "att";    // AT&T
+            else dynamic_buffer = "tmo";                             // T-Mobile (310260/310120), Sprint→TMo, US Cellular→tmo
+        }
+        else if (k == "ro.cdma.home.operator.numeric") {
+            // PR42: Solo relevante para Verizon (CDMA legacy) — coherente con IMSI
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            dynamic_buffer = imsi.substr(0, 6);  // MCC+MNC = PLMN del carrier
+        }
+        else if (k == "telephony.lteOnCdmaDevice") {
+            // PR42: Verizon = 1 (red CDMA legacy + LTE), resto = 0
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            dynamic_buffer = (imsi.substr(0, 6) == "311480") ? "1" : "0";
+        }
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
         else if (k == "ro.soc.manufacturer") {
             // Derivar el fabricante del SoC del boardPlatform del perfil activo
@@ -922,6 +1049,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                  strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_TOPOLOGY;
         else if (strstr(pathname, "/sys/class/power_supply/battery/technology")) type = BAT_TECHNOLOGY;
         else if (strstr(pathname, "/sys/class/power_supply/battery/present"))    type = BAT_PRESENT;
+        else if (strstr(pathname, "/sys/class/power_supply/battery/charge_full")) type = BATTERY_CHARGE_FULL;
         else if (strstr(pathname, "/sys/class/power_supply/battery/temp")) type = BATTERY_TEMP;
         else if (strstr(pathname, "/sys/class/power_supply/battery/voltage_now")) type = BATTERY_VOLT;
         else if (strstr(pathname, "/sys/class/power_supply/battery/capacity")) type = BATTERY_CAPACITY;
@@ -964,6 +1092,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                  strcmp(pathname, "/proc/net/tcp6") == 0)  type = PROC_NET_TCP;
         else if (strcmp(pathname, "/proc/net/udp") == 0 ||
                  strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
+        else if (strstr(pathname, "/proc/net/if_inet6"))   type = PROC_NET_IF_INET6;
+        else if (strstr(pathname, "/proc/net/ipv6_route")) type = PROC_NET_IPV6_ROUTE;
         // PR37: Nuevos VFS handlers
         else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
         else if (strcmp(pathname, "/proc/self/cgroup") == 0)               type = PROC_SELF_CGROUP;
@@ -992,6 +1122,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     else if (plat.find("bengal")!=std::string::npos||plat.find("holi")!=std::string::npos||
                              plat.find("sm6350")!=std::string::npos) kv="4.19.157-perf+";
                     else if (plat.find("sm7325")!=std::string::npos) kv="5.4.61-perf+";
+                    // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+                    else if (plat.find("exynos9611")!=std::string::npos) kv="4.14.113-25145160";
+                    else if (plat.find("exynos9825")!=std::string::npos) kv="4.14.113-22911262";
+                    else if (plat.find("exynos850")!=std::string::npos) kv="4.19.113-25351273";
 
                     long dateUtc = 0;
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
@@ -1000,7 +1134,21 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     struct tm* tm_info = gmtime(&t);
                     strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", tm_info);
 
-                    content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(dateBuf) + "\n";
+                    // PR42: Compiler y build user coherentes con la marca del perfil
+                    std::string compilerStr;
+                    std::string platLow = toLowerStr(fp.boardPlatform);
+                    std::string brdLow  = toLowerStr(fp.brand);
+                    if (platLow.find("exynos") != std::string::npos) {
+                        // Samsung Exynos usa GCC en producción (no clang)
+                        compilerStr = "(" + std::string(fp.buildUser) + "@" + std::string(fp.buildHost) + ") (gcc version 4.9.x (GCC))";
+                    } else if (brdLow == "google") {
+                        // Pixel usa android-build con clang de Google
+                        compilerStr = "(android-build@" + std::string(fp.buildHost) + ") (Android clang version 12.0.5)";
+                    } else {
+                        // Qualcomm y MediaTek (Xiaomi, OnePlus, Realme, Nokia, etc.)
+                        compilerStr = "(" + std::string(fp.buildUser) + "@" + std::string(fp.buildHost) + ") (clang version 12.0.5)";
+                    }
+                    content = "Linux version " + kv + " " + compilerStr + " #1 SMP PREEMPT " + std::string(dateBuf) + "\n";
                 } else if (type == PROC_CPUINFO) {
                     content = generateMulticoreCpuInfo(fp);
                 } else if (type == USB_SERIAL) {
@@ -1017,6 +1165,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
                 } else if (type == BATTERY_STATUS) {
                     content = "Discharging\n";
+                } else if (type == BATTERY_CHARGE_FULL) {
+                    // PR42: Capacidad fake coherente con el perfil (4000-5000 mAh)
+                    // Determinística por seed — misma identidad, misma "capacidad de diseño"
+                    long fakeCapacityUah = 4000000L + ((g_masterSeed % 1000L) * 1000L);
+                    content = std::to_string(fakeCapacityUah) + "\n";
                 } else if (type == PROC_HOSTNAME) {
                     // RFC 952: hostname estándar. "localhost" es el valor universal
                     // en AOSP stock. Cualquier hostname personalizado MIUI es detectable.
@@ -1077,6 +1230,14 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         kv = "4.19.157-perf+";
                     } else if (plat.find("sm7325") != std::string::npos) {
                         kv = "5.4.61-perf+";
+                    }
+                    // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+                    else if (plat.find("exynos9611") != std::string::npos) {
+                        kv = "4.14.113-25145160";
+                    } else if (plat.find("exynos9825") != std::string::npos) {
+                        kv = "4.14.113-22911262";
+                    } else if (plat.find("exynos850") != std::string::npos) {
+                        kv = "4.19.113-25351273";
                     }
                     content = kv + "\n";
                 } else if (type == PROC_UPTIME) {
@@ -1220,14 +1381,19 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                                   "B: KEY=10000000000000 0\n\n";
                     }
                 } else if (type == SYS_THERMAL) {
-                    std::string plat = toLowerStr(fp.boardPlatform);
-                    if (plat.find("mt") != std::string::npos) {
-                        char tmpBuf[128]; ssize_t r;
-                        if ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
-                    } else if (plat.find("exynos") != std::string::npos) {
-                        content = "exynos-therm\n";
+                    if (strstr(pathname, "temp")) {
+                         // Temperature in millicelsius (30C - 45C)
+                         content = std::to_string(30000 + (g_masterSeed % 15000)) + "\n";
                     } else {
-                        content = "tsens_tz_sensor\n";
+                        std::string plat = toLowerStr(fp.boardPlatform);
+                        if (plat.find("mt") != std::string::npos) {
+                            char tmpBuf[128]; ssize_t r;
+                            if ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                        } else if (plat.find("exynos") != std::string::npos) {
+                            content = "exynos-therm\n";
+                        } else {
+                            content = "tsens_tz_sensor\n";
+                        }
                     }
                 // Sincronización btime (Evita detección de manipulación de uptime)
                 } else if (type == PROC_STAT) {
@@ -1319,6 +1485,26 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == PROC_NET_UDP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
 
+                } else if (type == PROC_NET_IPV6_ROUTE) {
+                    if (g_spoofMobileNetwork) {
+                        content = ""; // Ocultar rutas IPv6 en modo LTE
+                    } else {
+                        char tmpBuf[4096]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    }
+
+                } else if (type == PROC_NET_IF_INET6) {
+                    // PR42: En modo LTE, ocultar wlan0 de IPv6.
+                    // En modo WiFi real, pasar el contenido original.
+                    if (g_spoofMobileNetwork) {
+                        // Solo mostrar la interfaz LTE (rmnet_data0) sin IPv6 real
+                        content = "";  // Interfaz LTE no tiene IPv6 en configuración estándar
+                    } else {
+                        // Pasar contenido real del kernel
+                        char tmpBuf[4096]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    }
+
                 // PR37: boot_id — UUID determinístico desde seed (Firebase/AppsFlyer lo correlacionan)
                 } else if (type == PROC_BOOT_ID) {
                     content = generateBootId(g_masterSeed) + "\n";
@@ -1348,6 +1534,13 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                              plat.find("mt6833")   != std::string::npos) content = "500000 718750 1000000 1218750 1343750 1500000 1671875 1843750 2062500\n";
                     else if (plat.find("mt6765")   != std::string::npos) content = "500000 625000 750000 875000 1000000 1125000 1250000 1350000\n";
                     else if (plat.find("mt6")      != std::string::npos) content = "500000 718750 1078750 1418750 1756250 1900000\n";
+                    // PR42: Samsung Exynos — devolvían archivo vacío, ahora con frecuencias reales
+                    else if (plat.find("exynos9611") != std::string::npos)
+                        content = "182000 273000 546000 818000 1144000 1365000 1547000 1768000\n";
+                    else if (plat.find("exynos9825") != std::string::npos)
+                        content = "403000 845000 1274000 1690000 1937000 2210000 2613000\n";
+                    else if (plat.find("exynos850")  != std::string::npos)
+                        content = "208000 416000 625000 833000 1042000 1250000 1458000 1616000\n";
                     else                                                  content = "300000 576000 768000 1248000 1574400 1766400\n";
 
                 // SYS_CPU_TOPOLOGY (existente, no mover)
@@ -1561,6 +1754,72 @@ ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
 }
 
 // -----------------------------------------------------------------------------
+// PR41: Hooks: dup family (VFS cache bypass prevention)
+// Si un SDK clona un FD virtualizado con dup(), el nuevo FD debe heredar la caché.
+// Sin esto, read(dup(fd)) leería el hardware real (MediaTek) en lugar del emulado.
+// -----------------------------------------------------------------------------
+int my_dup(int oldfd) {
+    int newfd = orig_dup(oldfd);
+    if (newfd >= 0) {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(oldfd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[newfd] = it->second;
+            g_fdOffsetMap[newfd] = 0;
+            auto cache_it = g_fdContentCache.find(oldfd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[newfd] = cache_it->second;
+        }
+    }
+    return newfd;
+}
+
+int my_dup2(int oldfd, int newfd) {
+    // Si newfd ya está en nuestra caché, limpiarlo primero
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        g_fdMap.erase(newfd);
+        g_fdOffsetMap.erase(newfd);
+        g_fdContentCache.erase(newfd);
+    }
+    int ret = orig_dup2(oldfd, newfd);
+    if (ret >= 0) {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(oldfd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[ret] = it->second;
+            g_fdOffsetMap[ret] = 0;
+            auto cache_it = g_fdContentCache.find(oldfd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[ret] = cache_it->second;
+        }
+    }
+    return ret;
+}
+
+int my_dup3(int oldfd, int newfd, int flags) {
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        g_fdMap.erase(newfd);
+        g_fdOffsetMap.erase(newfd);
+        g_fdContentCache.erase(newfd);
+    }
+    int ret = orig_dup3(oldfd, newfd, flags);
+    if (ret >= 0) {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        auto it = g_fdMap.find(oldfd);
+        if (it != g_fdMap.end()) {
+            g_fdMap[ret] = it->second;
+            g_fdOffsetMap[ret] = 0;
+            auto cache_it = g_fdContentCache.find(oldfd);
+            if (cache_it != g_fdContentCache.end())
+                g_fdContentCache[ret] = cache_it->second;
+        }
+    }
+    return ret;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
 int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
@@ -1729,9 +1988,9 @@ unsigned long my_getauxval(unsigned long type) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         std::string plat = toLowerStr(fp.boardPlatform);
 
-        // Si el perfil es Cortex-A53 puro (ARMv8.0), apagamos las flags ARMv8.2+
+        // Si el perfil es Cortex-A53 puro (ARMv8.0) o Exynos 9611, apagamos las flags ARMv8.2+
         // del kernel físico para no contradecir el cpuinfo falso.
-        if (plat.find("mt6765") != std::string::npos) {
+        if (plat.find("mt6765") != std::string::npos || plat.find("exynos9611") != std::string::npos) {
             if (type == AT_HWCAP) {
                 val &= ~(HWCAP_ATOMICS | HWCAP_FPHP | HWCAP_ASIMDHP | HWCAP_ASIMDDP | HWCAP_LRCPC);
             } else if (type == AT_HWCAP2) {
@@ -1821,6 +2080,172 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 
 
 // -----------------------------------------------------------------------------
+// PR44: Camera2 — auxiliar LENS_FACING oracle
+// -----------------------------------------------------------------------------
+// Consulta ANDROID_LENS_FACING (0x00050006) en el propio objeto CameraMetadataNative.
+// Devuelve true si la cámara es frontal (valor 0 = LENS_FACING_FRONT).
+//
+// DISEÑO: orig_nativeReadValues apunta al C++ del framework, NO al hook.
+// No hay recursión. El tag 0x00050006 cae en el default: del switch principal
+// intencionalmente — si se añade un case para ese tag en el futuro, refactorizar
+// este helper primero para evitar recursión circular.
+//
+// LENS_FACING values: 0 = FRONT, 1 = BACK, 2 = EXTERNAL
+// Sección ANDROID_LENS = 0x05, index 6 → tag = 0x00050006, tipo: byte (1 byte)
+// -----------------------------------------------------------------------------
+static bool isFrontCameraMetadata(JNIEnv* env, jobject thiz) {
+    if (!orig_nativeReadValues || !env || !thiz) return false;
+    jbyteArray facing = orig_nativeReadValues(env, thiz, 0x00050006);
+    // Guard: drivers MediaTek mal implementados pueden lanzar excepción y retornar
+    // puntero no-nulo simultáneamente. Con excepción pendiente, cualquier llamada JNI
+    // posterior (GetArrayLength) viola la spec y crashea. Limpiar antes de continuar.
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    if (!facing) return false;
+    jsize len = env->GetArrayLength(facing);
+    if (len < 1) { env->DeleteLocalRef(facing); return false; }
+    jbyte val = 0;
+    env->GetByteArrayRegion(facing, 0, 1, &val);
+    env->DeleteLocalRef(facing);
+    return (val == 0);  // 0 = LENS_FACING_FRONT
+}
+
+// -----------------------------------------------------------------------------
+// PR44: Camera2 — my_nativeReadValues (camera-aware, rear + front)
+// -----------------------------------------------------------------------------
+// Intercepta los 6 tags de geometría/óptica del sensor. Para cada tag, detecta
+// si el objeto pertenece a la cámara frontal via isFrontCameraMetadata() y
+// selecciona los globals correspondientes (g_cam* vs g_camFront*).
+//
+// TAGS INTERCEPTADOS (verificados vs AOSP Android 11 camera_metadata_tags.h):
+//   Sección ANDROID_SENSOR_INFO = 15 = 0x0F:
+//     0x000F0005  PHYSICAL_SIZE              float[2]  8B   {width_mm, height_mm}
+//     0x000F0006  PIXEL_ARRAY_SIZE           int32[2]  8B   {width_px, height_px}
+//     0x000F0000  ACTIVE_ARRAY_SIZE          int32[4] 16B   {0, 0, w, h}
+//     0x000F000A  PRE_CORRECTION_ACTIVE_ARRAY int32[4] 16B  {0, 0, w, h}
+//   Sección ANDROID_LENS_INFO = 9 = 0x09:
+//     0x00090002  AVAILABLE_FOCAL_LENGTHS    float[1]  4B   {focal_mm}
+//     0x00090000  AVAILABLE_APERTURES        float[1]  4B   {f-number}
+//       ⚠️  0x00090000 = APERTURES ≠ 0x00090001 = FILTER_DENSITIES (distinto)
+//
+// TAG ORÁCULO (NO interceptado, usado por isFrontCameraMetadata):
+//   0x00050006  LENS_FACING — cae en default:, pasa al original
+// -----------------------------------------------------------------------------
+static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
+    if (!G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        return orig_nativeReadValues(env, thiz, tag);
+    }
+
+    const bool isGeometricTag = (tag == 0x000F0005 || tag == 0x000F0006 ||
+                                  tag == 0x000F0000 || tag == 0x000F000A ||
+                                  tag == 0x00090002 || tag == 0x00090000);
+    const bool isFront = isGeometricTag && isFrontCameraMetadata(env, thiz);
+
+    switch (tag) {
+        case 0x000F0005: {
+            float vals[2] = {
+                isFront ? g_camFrontPhysWidth  : g_camPhysicalWidth,
+                isFront ? g_camFrontPhysHeight : g_camPhysicalHeight
+            };
+            jbyteArray arr = env->NewByteArray(8);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 8, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x000F0006: {
+            int32_t vals[2] = {
+                isFront ? g_camFrontPixWidth  : g_camPixelWidth,
+                isFront ? g_camFrontPixHeight : g_camPixelHeight
+            };
+            jbyteArray arr = env->NewByteArray(8);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 8, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x000F0000:
+        case 0x000F000A: {
+            int32_t pw = isFront ? g_camFrontPixWidth  : g_camPixelWidth;
+            int32_t ph = isFront ? g_camFrontPixHeight : g_camPixelHeight;
+            int32_t vals[4] = { 0, 0, pw, ph };
+            jbyteArray arr = env->NewByteArray(16);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 16, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x00090002: {
+            float vals[1] = { isFront ? g_camFrontFocLen : g_camFocalLength };
+            jbyteArray arr = env->NewByteArray(4);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 4, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x00090000: {
+            float vals[1] = { isFront ? g_camFrontAperture : g_camAperture };
+            jbyteArray arr = env->NewByteArray(4);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 4, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        default:
+            // LENS_FACING (0x00050006) cae aquí intencionalmente.
+            // Es el oráculo de isFrontCameraMetadata — no interceptar.
+            return orig_nativeReadValues(env, thiz, tag);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PR44: MediaCodec — crash guard en native_setup (lado de creación)
+// -----------------------------------------------------------------------------
+// Traduce nombres de codec falsos a nombres MTK reales antes de que el framework
+// intente instanciar un codec que no existe en el hardware físico.
+// Solo activo cuando nameIsType=false (nombre explícito, no MIME type).
+// nameIsType=true → MIME type ("video/avc") → pasar sin modificar.
+// -----------------------------------------------------------------------------
+static std::string translateCodecToReal(const std::string& name) {
+    struct Rule { const char* from; const char* to; };
+    static const Rule rules[] = {
+        {"c2.qti.avc.",    "c2.mtk.avc."},
+        {"c2.qti.hevc.",   "c2.mtk.hevc."},
+        {"c2.qti.vp8.",    "c2.mtk.vp8."},
+        {"c2.qti.vp9.",    "c2.mtk.vp9."},
+        {"c2.qti.av1.",    "c2.mtk.av1."},
+        {"c2.qti.mpeg4.",  "c2.mtk.mpeg4."},
+        {"c2.qti.h263.",   "c2.mtk.h263."},
+        {"c2.sec.avc.",    "c2.mtk.avc."},
+        {"c2.sec.hevc.",   "c2.mtk.hevc."},
+        {"c2.sec.vp8.",    "c2.mtk.vp8."},
+        {"c2.sec.vp9.",    "c2.mtk.vp9."},
+        {"c2.sec.av1.",    "c2.mtk.av1."},
+        {"c2.sec.mpeg4.",  "c2.mtk.mpeg4."},
+        {"c2.sec.h263.",   "c2.mtk.h263."},
+        {"OMX.qcom.video.", "OMX.MTK.VIDEO."},
+        {"OMX.Exynos.",     "OMX.MTK."},
+    };
+    for (const auto& r : rules) {
+        if (name.compare(0, strlen(r.from), r.from) == 0)
+            return r.to + name.substr(strlen(r.from));
+    }
+    return name;
+}
+
+static void my_native_setup(JNIEnv* env, jobject thiz,
+                             jstring name, jboolean nameIsType, jboolean encoder) {
+    if (nameIsType == JNI_FALSE && name != nullptr) {
+        const char* cname = env->GetStringUTFChars(name, nullptr);
+        if (cname) {
+            std::string originalName(cname);              // Copiar a memoria C++ segura
+            env->ReleaseStringUTFChars(name, cname);      // Liberar puntero JNI — cname es dangling a partir de aquí
+            std::string translated = translateCodecToReal(originalName);
+            if (translated != originalName)               // Comparar strings C++, no punteros liberados
+                name = env->NewStringUTF(translated.c_str());
+        }
+    }
+    orig_native_setup(env, thiz, name, nameIsType, encoder);
+}
+
+// -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
 class OmniModule : public zygisk::Module {
@@ -1844,6 +2269,19 @@ public:
             g_sensorMagMax        = sp.magMaxRange;
             g_sensorHasHeartRate  = sp.hasHeartRateSensor;
             g_sensorHasBarometer  = sp.hasBarometerSensor;
+            // PR44: datos ópticos del perfil activo
+            g_camPhysicalWidth    = sp.sensorPhysicalWidth;
+            g_camPhysicalHeight   = sp.sensorPhysicalHeight;
+            g_camPixelWidth       = sp.pixelArrayWidth;
+            g_camPixelHeight      = sp.pixelArrayHeight;
+            g_camFocalLength      = sp.focalLength;
+            g_camAperture         = sp.aperture;
+            g_camFrontPhysWidth   = sp.frontSensorPhysicalWidth;
+            g_camFrontPhysHeight  = sp.frontSensorPhysicalHeight;
+            g_camFrontPixWidth    = sp.frontPixelArrayWidth;
+            g_camFrontPixHeight   = sp.frontPixelArrayHeight;
+            g_camFrontFocLen      = sp.frontFocalLength;
+            g_camFrontAperture    = sp.frontAperture;
         }
 
         // Libc Hooks (Phase 1)
@@ -1898,6 +2336,23 @@ public:
         void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
+        // PR41: dup family hooks — prevenir bypass de caché VFS
+        DobbyHook((void*)dup, (void*)my_dup, (void**)&orig_dup);
+        void* dup2_func = DobbySymbolResolver(nullptr, "dup2");
+        if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
+        void* dup3_func = DobbySymbolResolver(nullptr, "dup3");
+        if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
+
+        // PR43: fcntl hook (F_DUPFD)
+        void* fcntl_func = DobbySymbolResolver(nullptr, "fcntl");
+        if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
+
+        // PR42: ioctl hook — MAC real bypass via syscall directo
+        // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
+        void* ioctl_sym = DobbySymbolResolver(nullptr, "__ioctl");
+        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver(nullptr, "ioctl");
+        if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
+
         // -----------------------------------------------------------------------------
         // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote
         // -----------------------------------------------------------------------------
@@ -1927,7 +2382,8 @@ public:
                 if (fid_cpu_abi) env->SetStaticObjectField(build_class, fid_cpu_abi, abi64);
 
                 jfieldID fid_cpu_abi2 = env->GetStaticFieldID(build_class, "CPU_ABI2", "Ljava/lang/String;");
-                if (fid_cpu_abi2) env->SetStaticObjectField(build_class, fid_cpu_abi2, abi_legacy);
+                if (fid_cpu_abi2) env->SetStaticObjectField(build_class, fid_cpu_abi2, abi32);
+                // PR41: CPU_ABI2 = "armeabi-v7a" (ARMv7), NO "armeabi" (ARMv5 legacy de 2003)
 
                 jfieldID fid_supp_abis = env->GetStaticFieldID(build_class, "SUPPORTED_ABIS", "[Ljava/lang/String;");
                 if (fid_supp_abis) env->SetStaticObjectField(build_class, fid_supp_abis, supp_abis_arr);
@@ -1962,6 +2418,22 @@ public:
                     setStr("ID",           bfp.buildId);
                     setStr("DISPLAY",      bfp.display);
 
+                    // PR40 (Gemini BUG-C1-02): Ocultar firmas de Custom ROMs.
+                    // LineageOS/PixelOS reportan "test-keys"/"userdebug" en Zygote static fields.
+                    // Nota: bfp.tags y bfp.type ya existen en el struct (posiciones 11 y 12)
+                    // y tienen "release-keys"/"user" en todos los 40 perfiles, pero el JNI
+                    // sync anterior no los incluía — esta es la brecha que se cierra aquí.
+                    setStr("TAGS",         "release-keys");
+                    setStr("TYPE",         "user");
+
+                    // PR40: Sincronizar Build.TIME con el perfil (tipo long J, en milisegundos).
+                    // Build.TIME del ROM físico puede diferir del perfil emulado.
+                    jfieldID fid_time = env->GetStaticFieldID(build_class, "TIME", "J");
+                    if (fid_time) {
+                        jlong build_time = std::stoll(bfp.buildDateUtc) * 1000LL;
+                        env->SetStaticLongField(build_class, fid_time, build_time);
+                    }
+
                     // Build.SERIAL (API 28+ requiere permiso, pero el campo estático existe)
                     jfieldID fid_serial = env->GetStaticFieldID(build_class, "SERIAL", "Ljava/lang/String;");
                     if (fid_serial) {
@@ -1983,6 +2455,13 @@ public:
                         jfieldID fid_incr = env->GetStaticFieldID(build_version_class, "INCREMENTAL", "Ljava/lang/String;");
                         if (fid_incr) env->SetStaticObjectField(build_version_class, fid_incr,
                             env->NewStringUTF(bfp.incremental));
+
+                        // PR40 (Gemini BUG-C1-03): Forzar SDK_INT=30 (Android 11).
+                        // Sin este fix, Android 12+ físico reporta SDK_INT=31 mientras el
+                        // fingerprint del perfil declara Android 11 → detección garantizada.
+                        // Nota: signature "I" = int. NO confundir con "J" (long) de Build.TIME.
+                        jfieldID fid_sdk = env->GetStaticFieldID(build_version_class, "SDK_INT", "I");
+                        if (fid_sdk) env->SetStaticIntField(build_version_class, fid_sdk, 30);
                     }
                 }
             }
@@ -2207,7 +2686,7 @@ public:
         {
             struct SensorListHook {
                 static jobject getSensorList(JNIEnv* e, jobject, jint type) {
-                    // TYPE_HEART_RATE=21: solo Galaxy S20 FE lo tiene en el catálogo
+                    // TYPE_HEART_RATE=21: ningún perfil del catálogo tiene sensor HR (PR40 fix)
                     if (type == 21 && !g_sensorHasHeartRate) {
                         jclass cls = e->FindClass("java/util/ArrayList");
                         if (cls) {
@@ -2233,6 +2712,31 @@ public:
             };
             api->hookJniNativeMethods(env, "android/hardware/SensorManager",
                                       sensorListMethods, 1);
+        }
+
+        // PR44: Camera2 — nativeReadValues hook
+        // AOSP Android 11: private native byte[] nativeReadValues(int tag)
+        // Firma JNI: (I)[B — instance method, sin parámetro ptr
+        // Discrimina frontal/trasera vía LENS_FACING oracle (isFrontCameraMetadata).
+        {
+            JNINativeMethod cameraMethods[] = {
+                {"nativeReadValues", "(I)[B", (void*)my_nativeReadValues},
+            };
+            api->hookJniNativeMethods(env,
+                "android/hardware/camera2/impl/CameraMetadataNative",
+                cameraMethods, 1);
+        }
+
+        // PR44: MediaCodec — crash guard en native_setup (lado de creación)
+        // AOSP Android 11: private native void native_setup(String, boolean, boolean)
+        // Firma JNI: (Ljava/lang/String;ZZ)V — instance method
+        // Traduce c2.qti.*/c2.sec.* → c2.mtk.* antes de pasarlo al framework.
+        {
+            JNINativeMethod codecMethods[] = {
+                {"native_setup", "(Ljava/lang/String;ZZ)V", (void*)my_native_setup},
+            };
+            api->hookJniNativeMethods(env, "android/media/MediaCodec",
+                                      codecMethods, 1);
         }
 
     }

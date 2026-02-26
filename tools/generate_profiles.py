@@ -34,7 +34,11 @@ def parse_profiles(content):
         # PR38+39: Extracción de campos float y bool (sensor metadata)
         # Valores como: accelMaxRange = 78.4532f, hasHeartRateSensor = false
         float_fields = ["accelMaxRange", "accelResolution", "gyroMaxRange",
-                        "gyroResolution", "magMaxRange"]
+                        "gyroResolution", "magMaxRange",
+                        "sensorPhysicalWidth", "sensorPhysicalHeight",
+                        "focalLength", "aperture",
+                        "frontSensorPhysicalWidth", "frontSensorPhysicalHeight",
+                        "frontFocalLength", "frontAperture"]
         for ff in float_fields:
             # Match: field = 123.456f (opcional f)
             match = re.search(fr'{ff}\s*=\s*([\d\.]+f?)', body)
@@ -80,16 +84,26 @@ def generate_header(input_file, output_file):
             "screenDensity"
         ]
 
-        int_fields = ["core_count", "ram_gb"]
+        int_fields = ["core_count", "ram_gb",
+                      "pixelArrayWidth", "pixelArrayHeight",
+                      "frontPixelArrayWidth", "frontPixelArrayHeight"]
         float_fields = ["accelMaxRange", "accelResolution", "gyroMaxRange",
-                        "gyroResolution", "magMaxRange"]
+                        "gyroResolution", "magMaxRange",
+                        "sensorPhysicalWidth", "sensorPhysicalHeight",
+                        "focalLength", "aperture",
+                        "frontSensorPhysicalWidth", "frontSensorPhysicalHeight",
+                        "frontFocalLength", "frontAperture"]
         bool_fields = ["hasHeartRateSensor", "hasBarometerSensor",
                        "hasFingerprintWakeupSensor"]
 
         for field in ordered_fields:
             f.write(f"    const char* {field};\n")
         for field in int_fields:
-            f.write(f"    int {field};\n")
+            if field in ("pixelArrayWidth", "pixelArrayHeight",
+                         "frontPixelArrayWidth", "frontPixelArrayHeight"):
+                f.write(f"    int32_t {field};\n")  # int32_t requerido por Camera2 byte encoding
+            else:
+                f.write(f"    int {field};\n")
         for field in float_fields:
             f.write(f"    float {field};\n")
         for field in bool_fields:

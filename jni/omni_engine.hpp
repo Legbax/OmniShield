@@ -78,16 +78,8 @@ public:
 };
 
 inline std::string getRegionForProfile(const std::string& profileName) {
-    auto it = G_DEVICE_PROFILES.find(profileName);
-    if (it != G_DEVICE_PROFILES.end()) {
-        std::string p = toLower(std::string(it->second.product));
-        // "global" priority: must return "usa"
-        if (p.find("global") != std::string::npos) return "usa";
-        if (p.find("eea") != std::string::npos) return "europe";
-        // Removed India logic
-        if (p.size() >= 3 && (p.substr(p.size()-3) == "_us" || p.substr(p.size()-4) == "_usa")) return "usa";
-    }
-    return "usa"; // Safe default
+    (void)profileName;  // Todos los perfiles operan exclusivamente en USA
+    return "usa";
 }
 
 inline std::string generateValidImei(const std::string& profileName, long seed) {
@@ -119,10 +111,9 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
 
 // ICCID: Estándar ITU-T E.118 (89...)
 inline std::string generateValidIccid(const std::string& profileName, long seed) {
+    // PR41: Solo USA — country code 1
     static const std::map<std::string, std::string> ICCID_PREFIX = {
-        {"usa",    "89101"},   // Country code 1 (USA/Canada)
-        {"europe", "89440"},   // Country code 44 (UK base)
-        {"latam",  "89520"},   // Country code 52 (México/LATAM)
+        {"usa", "89101"},
     };
     Random rng(seed);
     std::string region = getRegionForProfile(profileName);
@@ -134,13 +125,14 @@ inline std::string generateValidIccid(const std::string& profileName, long seed)
 }
 
 inline std::string generateValidImsi(const std::string& profileName, long seed) {
+    // PR41: Pool USA expandido — 5 carriers cubren >98% del mercado real
     static const std::map<std::string, std::vector<std::string>> IMSI_POOLS = {
-        {"europe", {"23420", "26201", "20801"}}, {"india", {"40420", "40401", "40486"}},
-        {"latam", {"72406", "72410"}}, {"usa", {"310260", "310410"}}
+        {"usa", {"310260", "310410", "311480", "310120", "311580"}}
+        //       T-Mobile   AT&T      Verizon   Sprint    US Cellular
     };
     Random rng(seed);
     std::string region = getRegionForProfile(profileName);
-    const auto& pool = IMSI_POOLS.count(region) ? IMSI_POOLS.at(region) : IMSI_POOLS.at("europe");
+    const auto& pool = IMSI_POOLS.count(region) ? IMSI_POOLS.at(region) : IMSI_POOLS.at("usa");
     std::string mccMnc = pool[rng.nextInt(pool.size())];
     int remaining = 15 - mccMnc.length();
     std::string rest = std::to_string(2 + rng.nextInt(8));
@@ -149,19 +141,37 @@ inline std::string generateValidImsi(const std::string& profileName, long seed) 
 }
 
 inline std::string generatePhoneNumber(const std::string& profileName, long seed) {
-    static const std::map<std::string,std::string> CC={{"europe","+44"},{"latam","+55"},{"usa","+1"}};
+    // PR41: Solo USA NANP
+    static const std::map<std::string,std::string> CC={{"usa","+1"}};
     Random rng(seed+777);
     std::string region=getRegionForProfile(profileName);
     std::string cc=CC.count(region)?CC.at(region):"+1";
 
-    // NANP (USA): exactamente 10 dígitos locales (3 area + 7 subscriber)
-    // UK/LATAM: longitud variable 9-11
-    int targetLen = (region == "usa") ? 10 : 8 + rng.nextInt(3);
+    // PR42: NANP completo — estructura NPA-NXX-XXXX
+    // NPA (área code, dígitos 1-3): primer dígito 2-9, excluir N11 y 555
+    // NXX (exchange, dígitos 4-6): primer dígito también 2-9 (regla NANP)
+    // XXXX (subscriber, dígitos 7-10): libre 0-9
+    std::string npa, nxx;
 
-    // Primer dígito 2-9 (NANP: nunca 0 ni 1 en área code)
-    std::string local = std::to_string(2 + rng.nextInt(8));
-    for(int i = 1; i < targetLen; ++i) local += std::to_string(rng.nextInt(10));
-    return cc + local;
+    // Generar NPA válido (excluir N11: d2==1&&d3==1, y 555)
+    do {
+        npa  = std::to_string(2 + rng.nextInt(8));   // d1: 2-9
+        npa += std::to_string(rng.nextInt(10));        // d2: 0-9
+        npa += std::to_string(rng.nextInt(10));        // d3: 0-9
+    } while ((npa[1] == '1' && npa[2] == '1') || npa == "555");
+
+    // Generar NXX válido (d4 también debe ser 2-9, excluir N11)
+    do {
+        nxx  = std::to_string(2 + rng.nextInt(8));   // d4: 2-9
+        nxx += std::to_string(rng.nextInt(10));        // d5: 0-9
+        nxx += std::to_string(rng.nextInt(10));        // d6: 0-9
+    } while (nxx[1] == '1' && nxx[2] == '1');
+
+    // XXXX subscriber (dígitos 7-10): libre
+    std::string sub = "";
+    for (int i = 0; i < 4; ++i) sub += std::to_string(rng.nextInt(10));
+
+    return cc + npa + nxx + sub;
 }
 
 inline std::string generateRandomMac(const std::string& brandIn, long seed) {
@@ -287,12 +297,18 @@ inline void generateLocationForRegion(const std::string& profileName, long seed,
     Random rng(seed + 9999LL);
     std::string region = getRegionForProfile(profileName);
 
-    double baseLat, baseLon;
-    // Ciudades base coherentes con MCC/timezone/locale del perfil
-    if      (region == "europe") { baseLat = 51.5074;  baseLon = -0.1278;  }  // Londres
-    else if (region == "latam")  { baseLat = -23.5505; baseLon = -46.6333; }  // São Paulo
-    else if (region == "india")  { baseLat = 19.0760;  baseLon = 72.8777;  }  // Mumbai
-    else                         { baseLat = 40.7128;  baseLon = -74.0060; }  // Nueva York
+    // PR41: Pool de 5 ciudades USA — selección determinística por seed
+    static const double US_CITIES[][2] = {
+        {40.7128, -74.0060},   // New York
+        {34.0522, -118.2437},  // Los Angeles
+        {41.8781, -87.6298},   // Chicago
+        {29.7604, -95.3698},   // Houston
+        {33.4484, -112.0740},  // Phoenix
+    };
+    Random cityRng(seed + 7777LL);
+    int cityIdx = cityRng.nextInt(5);
+    double baseLat = US_CITIES[cityIdx][0];
+    double baseLon = US_CITIES[cityIdx][1];
 
     // Jitter determinístico ±0.02° (≈ 2km de radio) — simula posición específica
     double jitterLat = (rng.nextInt(4000) - 2000) / 100000.0;
@@ -304,11 +320,64 @@ inline void generateLocationForRegion(const std::string& profileName, long seed,
 // PR38+39: Altitud determinística realista por región (metros sobre nivel del mar)
 inline double generateAltitudeForRegion(const std::string& profileName, long seed) {
     Random rng(seed + 8888LL);
-    std::string region = getRegionForProfile(profileName);
-    if (region == "latam")  return 760.0 + (rng.nextInt(40));  // São Paulo ~760-800m
-    if (region == "europe") return 5.0   + (rng.nextInt(20));  // Londres ~5-25m
-    if (region == "india")  return 8.0   + (rng.nextInt(25));  // Mumbai ~8-33m
-    return 10.0 + (rng.nextInt(25));                           // NYC ~10-35m
+    (void)profileName;
+    // PR41: Altitudes USA realistas — varía según ciudad (seed-deterministic)
+    // NYC ~10-35m, LA ~50-120m, Chicago ~180-200m, Houston ~10-25m, Phoenix ~330-360m
+    static const double US_ALT_BASE[] = {10.0, 50.0, 180.0, 10.0, 330.0};
+    static const int    US_ALT_RANGE[] = {25, 70, 20, 15, 30};
+    Random cityRng(seed + 7777LL);  // Mismo seed que GPS → misma ciudad
+    int idx = cityRng.nextInt(5);
+    return US_ALT_BASE[idx] + (rng.nextInt(US_ALT_RANGE[idx]));
+}
+
+// PR42: Timezone coherente con ciudad GPS — mismo seed que cityRng (seed+7777)
+// Houston usa Central Time (America/Chicago). Phoenix es MST sin DST (America/Phoenix).
+inline std::string getTimezoneForProfile(long seed) {
+    static const std::string US_CITY_TZ[5] = {
+        "America/New_York",    // idx=0: New York
+        "America/Los_Angeles", // idx=1: Los Angeles
+        "America/Chicago",     // idx=2: Chicago
+        "America/Chicago",     // idx=3: Houston (Central Time = Chicago)
+        "America/Phoenix"      // idx=4: Phoenix (MST, no DST)
+    };
+    Random cityRng(seed + 7777LL);  // MISMO seed+offset que generateLocationForRegion
+    return US_CITY_TZ[cityRng.nextInt(5)];
+}
+
+// PR41: Mapeo MCC/MNC → nombre comercial del carrier USA
+// Usado por main.cpp para gsm.sim.operator.alpha
+inline std::string getCarrierNameForImsi(const std::string& profileName, long seed) {
+    static const std::map<std::string, std::string> CARRIER_NAMES = {
+        {"310260", "T-Mobile"},
+        {"310410", "AT&T"},
+        {"311480", "Verizon Wireless"},
+        {"310120", "T-Mobile"},       // Sprint fusionado → reporta T-Mobile en red
+        {"311580", "U.S. Cellular"},
+    };
+    std::string imsi = generateValidImsi(profileName, seed);
+    std::string mccMnc = (imsi.substr(0,3) == "310" || imsi.substr(0,3) == "311")
+                         ? imsi.substr(0,6) : imsi.substr(0,5);
+    auto it = CARRIER_NAMES.find(mccMnc);
+    return (it != CARRIER_NAMES.end()) ? it->second : "T-Mobile";
+}
+
+// PR42: Samsung Qualcomm recibe RIL Qualcomm, no Samsung
+// Afectados: Galaxy A52 (atoll), A72 (atoll), S20 FE (kona), A52s (sm7325)
+// Samsung Exynos siguen con "Samsung RIL v3.0"
+inline std::string getRilVersionForProfile(const std::string& profileName) {
+    auto it = G_DEVICE_PROFILES.find(profileName);
+    if (it != G_DEVICE_PROFILES.end()) {
+        std::string plat = toLower(std::string(it->second.boardPlatform));
+        std::string brand = toLower(std::string(it->second.brand));
+        // MediaTek — cualquier marca
+        if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos)
+            return "android mtk-ril 1.0";
+        // Samsung Exynos exclusivamente → RIL Samsung
+        if (brand == "samsung" && plat.find("exynos") != std::string::npos)
+            return "Samsung RIL v3.0";
+        // Todo lo demás (Qualcomm, incluido Samsung Qualcomm) → AOSP RIL
+    }
+    return "android qualcomm ril 1.0";
 }
 
 // PR38+39: Seed version tracking — permite detectar rotación de seed desde la UI.
