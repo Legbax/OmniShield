@@ -25,6 +25,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <linux/if_arp.h>
 #include <errno.h>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
@@ -421,6 +422,11 @@ int my_uname(struct utsname *buf) {
 // PR42: Intercepta ioctl SIOCGIFHWADDR para wlan0/eth0
 // Las apps nativas en C/C++ evitan getifaddrs y leen la MAC directamente del kernel.
 // Este hook retorna 02:00:00:00:00:00 (MAC de privacidad AOSP) en ambas interfaces.
+
+#ifndef ARPHRD_ETHER
+#define ARPHRD_ETHER 1
+#endif
+
 int my_ioctl(int fd, unsigned long request, void* arg) {
     int ret = orig_ioctl(fd, request, arg);
     if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {

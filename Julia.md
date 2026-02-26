@@ -689,3 +689,17 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - MediaCodec fingerprinting y Camera2 sensor info quedan documentados para PR43. Son los vectores de mayor complejidad — requieren hooks a nivel Binder/HAL.
 - La lista de 11 dispositivos con barómetro=true NO cambia en este PR.
 - Los 3 handlers de kernel (my_uname + PROC_VERSION + PROC_OSRELEASE) conservan sus branches Exynos de PR41. FIX-09 solo modifica el compiler string, no los números de versión.
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR42-Hotfix — Compilation Rescue)
+**Resumen de cambios:** v12.9.23 — Fix crítico de compilación en .
+- **NDK Dependency Fix:** Añadido  y definición de seguridad  para resolver el identificador  no declarado en el hook .
+- **Version bump:** module.prop + build.yml → v12.9.23.
+
+**Prompt del usuario:** "Misión Crítica: Hotfix de compilación... identificador no declarado 'ARPHRD_ETHER'..."
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR42-Hotfix — Compilation Rescue)
+**Resumen de cambios:** v12.9.23 — Fix crítico de compilación en `jni/main.cpp`.
+- **NDK Dependency Fix:** Añadido `#include <linux/if_arp.h>` y definición de seguridad `#ifndef ARPHRD_ETHER` para resolver el identificador `ARPHRD_ETHER` no declarado en el hook `my_ioctl`.
+- **Version bump:** module.prop + build.yml → v12.9.23.
+
+**Prompt del usuario:** "Misión Crítica: Hotfix de compilación... identificador no declarado 'ARPHRD_ETHER'..."
