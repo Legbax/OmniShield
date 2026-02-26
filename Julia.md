@@ -725,3 +725,44 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - **FIX-09 (main.cpp):** `SYS_THERMAL` virtualización de temperatura (`/temp`) en rango 30-45°C.
 - **Skipped:** Fixes de datos (mapas de carrier, batería, perfiles) omitidos por falta de tablas fuente.
 **Prompt del usuario:** "Ejecuta los cambio en el ultimo prompt, manten la versión" (Contexto de Code Review).
+
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR44 — Camera2 Physical Seal, MediaCodec Crash Guard & Front/Rear Discrimination)
+**Resumen de cambios:** v12.9.24
+
+- **Camera2 Seal (CRÍTICO):** Hook de `nativeReadValues(int tag)` en
+  `android/hardware/camera2/impl/CameraMetadataNative`. Firma JNI: `(I)[B` (instance,
+  sin ptr). Intercepta 6 tags verificados vs AOSP Android 11 `camera_metadata_tags.h`:
+  `0x000F0005` PHYSICAL_SIZE, `0x000F0006` PIXEL_ARRAY_SIZE, `0x000F0000` ACTIVE_ARRAY,
+  `0x000F000A` PRE_CORRECTION_ACTIVE_ARRAY, `0x00090002` FOCAL_LENGTHS,
+  `0x00090000` APERTURES (⚠️ ≠ `0x00090001` FILTER_DENSITIES).
+- **Front/Rear Discrimination (CRÍTICO):** `isFrontCameraMetadata()` consulta
+  `ANDROID_LENS_FACING` (tag `0x00050006`) en el propio objeto via `orig_nativeReadValues`
+  — sin recursión. Valor 0=FRONT activa globals `g_camFront*`. Snapchat abre cámara
+  frontal por defecto: sin esta discriminación recibiría specs traseras (p.ej. 108MP
+  1/1.33" en una frontal) → detección inmediata.
+- **DeviceFingerprint expandido:** 12 nuevos campos (6 rear + 6 front):
+  `sensorPhysicalWidth/Height`, `pixelArrayWidth/Height` (int32_t), `focalLength`,
+  `aperture`, más sus equivalentes `front*`. 40 perfiles actualizados con datos reales.
+- **MediaCodec Crash Guard (ALTO):** Hook de `native_setup` en `android/media/MediaCodec`.
+  Firma: `(Ljava/lang/String;ZZ)V`. Solo activo cuando `nameIsType=false`.
+  Traduce `c2.qti.*`/ `c2.sec.*`/ `OMX.qcom.*`/ `OMX.Exynos.*`/ → equivalente `c2.mtk.*`/
+  `OMX.MTK.*`. Previene `IllegalStateException` en hardware MTK con perfil Qualcomm/Samsung.
+- **generate_profiles.py sync:** Nuevos float/int32_t fields añadidos al toolchain.
+
+**Prompt del usuario:** "Combina el PR44 y 45 en uno solo de manera quirúrgica para Jules."
+
+**Nota personal para el siguiente agente:**
+- El tag `0x00050006` (LENS_FACING) NO tiene `case` en el switch de `my_nativeReadValues`
+  intencionalmente. Si se añade en el futuro, `isFrontCameraMetadata()` entraría en
+  recursión infinita. No añadir ese case sin refactorizar el helper primero.
+- `DeleteLocalRef(facing)` en el helper es obligatorio — los frames JNI de hooks
+  acumulan LocalRefs si no se limpian, agotando el frame en sesiones largas de cámara.
+- `pixelArrayWidth/Height` y sus `front*` son `int32_t`, no `int`. El cast
+  `reinterpret_cast<const jbyte*>` para `SetByteArrayRegion` requiere tipos de tamaño
+  fijo de 4 bytes. `core_count` y `ram_gb` permanecen como `int`.
+- Los tags de apertura: `0x00090000` = APERTURES (correcto). `0x00090001` = FILTER_DENSITIES
+  (incorrecto). Este error ha aparecido en tres propuestas externas consecutivas.
+- ASUS ZenFone 7: `front* == rear*` es correcto — diseño flip, misma unidad física.
+- Scope de este PR: solo lado de CREACIÓN de MediaCodec. El listing de codecs
+  (`MediaCodecList.getCodecInfos()`) sigue mostrando `c2.mtk.*`/ pero Snapchat
+  no usa esa API para fingerprinting — usa `createEncoderByType(MIME)`.

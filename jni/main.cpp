@@ -71,6 +71,22 @@ static long   g_seedVersion        = 0;
 static bool   g_sensorHasHeartRate = false;
 static bool   g_sensorHasBarometer = false;
 
+// PR44: Camera2 — globals ópticos cargados desde G_DEVICE_PROFILES en postAppSpecialize
+// Rear camera (siempre activo)
+static float   g_camPhysicalWidth   = 6.40f;
+static float   g_camPhysicalHeight  = 4.80f;
+static int32_t g_camPixelWidth      = 8000;
+static int32_t g_camPixelHeight     = 6000;
+static float   g_camFocalLength     = 4.74f;
+static float   g_camAperture        = 1.8f;
+// Front camera (activo vía isFrontCameraMetadata — LENS_FACING oracle)
+static float   g_camFrontPhysWidth  = 3.84f;
+static float   g_camFrontPhysHeight = 2.88f;
+static int32_t g_camFrontPixWidth   = 6528;
+static int32_t g_camFrontPixHeight  = 4896;
+static float   g_camFrontFocLen     = 2.20f;
+static float   g_camFrontAperture   = 2.2f;
+
 // PR38+39: Inicializar caché de GPS (llamar en postAppSpecialize tras readConfig)
 static void initLocationCache() {
     if (!g_locationCached && !g_currentProfileName.empty() && g_masterSeed != 0) {
@@ -140,6 +156,14 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+
+// PR44: Camera2 — CameraMetadataNative.nativeReadValues(int tag) : byte[]
+// Firma AOSP Android 11: instance method, (I)[B — SIN parámetro ptr explícito
+static jbyteArray (*orig_nativeReadValues)(JNIEnv*, jobject, jint);
+
+// PR44: MediaCodec — native_setup(String name, boolean nameIsType, boolean encoder)
+// Firma AOSP Android 11: instance method, (Ljava/lang/String;ZZ)V
+static void (*orig_native_setup)(JNIEnv*, jobject, jstring, jboolean, jboolean);
 
 // Phase 4 Originals (v11.9.9)
 static int (*orig_sysinfo)(struct sysinfo *info);
@@ -2056,6 +2080,172 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 
 
 // -----------------------------------------------------------------------------
+// PR44: Camera2 — auxiliar LENS_FACING oracle
+// -----------------------------------------------------------------------------
+// Consulta ANDROID_LENS_FACING (0x00050006) en el propio objeto CameraMetadataNative.
+// Devuelve true si la cámara es frontal (valor 0 = LENS_FACING_FRONT).
+//
+// DISEÑO: orig_nativeReadValues apunta al C++ del framework, NO al hook.
+// No hay recursión. El tag 0x00050006 cae en el default: del switch principal
+// intencionalmente — si se añade un case para ese tag en el futuro, refactorizar
+// este helper primero para evitar recursión circular.
+//
+// LENS_FACING values: 0 = FRONT, 1 = BACK, 2 = EXTERNAL
+// Sección ANDROID_LENS = 0x05, index 6 → tag = 0x00050006, tipo: byte (1 byte)
+// -----------------------------------------------------------------------------
+static bool isFrontCameraMetadata(JNIEnv* env, jobject thiz) {
+    if (!orig_nativeReadValues || !env || !thiz) return false;
+    jbyteArray facing = orig_nativeReadValues(env, thiz, 0x00050006);
+    // Guard: drivers MediaTek mal implementados pueden lanzar excepción y retornar
+    // puntero no-nulo simultáneamente. Con excepción pendiente, cualquier llamada JNI
+    // posterior (GetArrayLength) viola la spec y crashea. Limpiar antes de continuar.
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    if (!facing) return false;
+    jsize len = env->GetArrayLength(facing);
+    if (len < 1) { env->DeleteLocalRef(facing); return false; }
+    jbyte val = 0;
+    env->GetByteArrayRegion(facing, 0, 1, &val);
+    env->DeleteLocalRef(facing);
+    return (val == 0);  // 0 = LENS_FACING_FRONT
+}
+
+// -----------------------------------------------------------------------------
+// PR44: Camera2 — my_nativeReadValues (camera-aware, rear + front)
+// -----------------------------------------------------------------------------
+// Intercepta los 6 tags de geometría/óptica del sensor. Para cada tag, detecta
+// si el objeto pertenece a la cámara frontal via isFrontCameraMetadata() y
+// selecciona los globals correspondientes (g_cam* vs g_camFront*).
+//
+// TAGS INTERCEPTADOS (verificados vs AOSP Android 11 camera_metadata_tags.h):
+//   Sección ANDROID_SENSOR_INFO = 15 = 0x0F:
+//     0x000F0005  PHYSICAL_SIZE              float[2]  8B   {width_mm, height_mm}
+//     0x000F0006  PIXEL_ARRAY_SIZE           int32[2]  8B   {width_px, height_px}
+//     0x000F0000  ACTIVE_ARRAY_SIZE          int32[4] 16B   {0, 0, w, h}
+//     0x000F000A  PRE_CORRECTION_ACTIVE_ARRAY int32[4] 16B  {0, 0, w, h}
+//   Sección ANDROID_LENS_INFO = 9 = 0x09:
+//     0x00090002  AVAILABLE_FOCAL_LENGTHS    float[1]  4B   {focal_mm}
+//     0x00090000  AVAILABLE_APERTURES        float[1]  4B   {f-number}
+//       ⚠️  0x00090000 = APERTURES ≠ 0x00090001 = FILTER_DENSITIES (distinto)
+//
+// TAG ORÁCULO (NO interceptado, usado por isFrontCameraMetadata):
+//   0x00050006  LENS_FACING — cae en default:, pasa al original
+// -----------------------------------------------------------------------------
+static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
+    if (!G_DEVICE_PROFILES.count(g_currentProfileName)) {
+        return orig_nativeReadValues(env, thiz, tag);
+    }
+
+    const bool isGeometricTag = (tag == 0x000F0005 || tag == 0x000F0006 ||
+                                  tag == 0x000F0000 || tag == 0x000F000A ||
+                                  tag == 0x00090002 || tag == 0x00090000);
+    const bool isFront = isGeometricTag && isFrontCameraMetadata(env, thiz);
+
+    switch (tag) {
+        case 0x000F0005: {
+            float vals[2] = {
+                isFront ? g_camFrontPhysWidth  : g_camPhysicalWidth,
+                isFront ? g_camFrontPhysHeight : g_camPhysicalHeight
+            };
+            jbyteArray arr = env->NewByteArray(8);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 8, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x000F0006: {
+            int32_t vals[2] = {
+                isFront ? g_camFrontPixWidth  : g_camPixelWidth,
+                isFront ? g_camFrontPixHeight : g_camPixelHeight
+            };
+            jbyteArray arr = env->NewByteArray(8);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 8, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x000F0000:
+        case 0x000F000A: {
+            int32_t pw = isFront ? g_camFrontPixWidth  : g_camPixelWidth;
+            int32_t ph = isFront ? g_camFrontPixHeight : g_camPixelHeight;
+            int32_t vals[4] = { 0, 0, pw, ph };
+            jbyteArray arr = env->NewByteArray(16);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 16, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x00090002: {
+            float vals[1] = { isFront ? g_camFrontFocLen : g_camFocalLength };
+            jbyteArray arr = env->NewByteArray(4);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 4, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        case 0x00090000: {
+            float vals[1] = { isFront ? g_camFrontAperture : g_camAperture };
+            jbyteArray arr = env->NewByteArray(4);
+            if (!arr) return orig_nativeReadValues(env, thiz, tag);
+            env->SetByteArrayRegion(arr, 0, 4, reinterpret_cast<const jbyte*>(vals));
+            return arr;
+        }
+        default:
+            // LENS_FACING (0x00050006) cae aquí intencionalmente.
+            // Es el oráculo de isFrontCameraMetadata — no interceptar.
+            return orig_nativeReadValues(env, thiz, tag);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PR44: MediaCodec — crash guard en native_setup (lado de creación)
+// -----------------------------------------------------------------------------
+// Traduce nombres de codec falsos a nombres MTK reales antes de que el framework
+// intente instanciar un codec que no existe en el hardware físico.
+// Solo activo cuando nameIsType=false (nombre explícito, no MIME type).
+// nameIsType=true → MIME type ("video/avc") → pasar sin modificar.
+// -----------------------------------------------------------------------------
+static std::string translateCodecToReal(const std::string& name) {
+    struct Rule { const char* from; const char* to; };
+    static const Rule rules[] = {
+        {"c2.qti.avc.",    "c2.mtk.avc."},
+        {"c2.qti.hevc.",   "c2.mtk.hevc."},
+        {"c2.qti.vp8.",    "c2.mtk.vp8."},
+        {"c2.qti.vp9.",    "c2.mtk.vp9."},
+        {"c2.qti.av1.",    "c2.mtk.av1."},
+        {"c2.qti.mpeg4.",  "c2.mtk.mpeg4."},
+        {"c2.qti.h263.",   "c2.mtk.h263."},
+        {"c2.sec.avc.",    "c2.mtk.avc."},
+        {"c2.sec.hevc.",   "c2.mtk.hevc."},
+        {"c2.sec.vp8.",    "c2.mtk.vp8."},
+        {"c2.sec.vp9.",    "c2.mtk.vp9."},
+        {"c2.sec.av1.",    "c2.mtk.av1."},
+        {"c2.sec.mpeg4.",  "c2.mtk.mpeg4."},
+        {"c2.sec.h263.",   "c2.mtk.h263."},
+        {"OMX.qcom.video.", "OMX.MTK.VIDEO."},
+        {"OMX.Exynos.",     "OMX.MTK."},
+    };
+    for (const auto& r : rules) {
+        if (name.compare(0, strlen(r.from), r.from) == 0)
+            return r.to + name.substr(strlen(r.from));
+    }
+    return name;
+}
+
+static void my_native_setup(JNIEnv* env, jobject thiz,
+                             jstring name, jboolean nameIsType, jboolean encoder) {
+    if (nameIsType == JNI_FALSE && name != nullptr) {
+        const char* cname = env->GetStringUTFChars(name, nullptr);
+        if (cname) {
+            std::string originalName(cname);              // Copiar a memoria C++ segura
+            env->ReleaseStringUTFChars(name, cname);      // Liberar puntero JNI — cname es dangling a partir de aquí
+            std::string translated = translateCodecToReal(originalName);
+            if (translated != originalName)               // Comparar strings C++, no punteros liberados
+                name = env->NewStringUTF(translated.c_str());
+        }
+    }
+    orig_native_setup(env, thiz, name, nameIsType, encoder);
+}
+
+// -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
 class OmniModule : public zygisk::Module {
@@ -2079,6 +2269,19 @@ public:
             g_sensorMagMax        = sp.magMaxRange;
             g_sensorHasHeartRate  = sp.hasHeartRateSensor;
             g_sensorHasBarometer  = sp.hasBarometerSensor;
+            // PR44: datos ópticos del perfil activo
+            g_camPhysicalWidth    = sp.sensorPhysicalWidth;
+            g_camPhysicalHeight   = sp.sensorPhysicalHeight;
+            g_camPixelWidth       = sp.pixelArrayWidth;
+            g_camPixelHeight      = sp.pixelArrayHeight;
+            g_camFocalLength      = sp.focalLength;
+            g_camAperture         = sp.aperture;
+            g_camFrontPhysWidth   = sp.frontSensorPhysicalWidth;
+            g_camFrontPhysHeight  = sp.frontSensorPhysicalHeight;
+            g_camFrontPixWidth    = sp.frontPixelArrayWidth;
+            g_camFrontPixHeight   = sp.frontPixelArrayHeight;
+            g_camFrontFocLen      = sp.frontFocalLength;
+            g_camFrontAperture    = sp.frontAperture;
         }
 
         // Libc Hooks (Phase 1)
@@ -2509,6 +2712,31 @@ public:
             };
             api->hookJniNativeMethods(env, "android/hardware/SensorManager",
                                       sensorListMethods, 1);
+        }
+
+        // PR44: Camera2 — nativeReadValues hook
+        // AOSP Android 11: private native byte[] nativeReadValues(int tag)
+        // Firma JNI: (I)[B — instance method, sin parámetro ptr
+        // Discrimina frontal/trasera vía LENS_FACING oracle (isFrontCameraMetadata).
+        {
+            JNINativeMethod cameraMethods[] = {
+                {"nativeReadValues", "(I)[B", (void*)my_nativeReadValues},
+            };
+            api->hookJniNativeMethods(env,
+                "android/hardware/camera2/impl/CameraMetadataNative",
+                cameraMethods, 1);
+        }
+
+        // PR44: MediaCodec — crash guard en native_setup (lado de creación)
+        // AOSP Android 11: private native void native_setup(String, boolean, boolean)
+        // Firma JNI: (Ljava/lang/String;ZZ)V — instance method
+        // Traduce c2.qti.*/c2.sec.* → c2.mtk.* antes de pasarlo al framework.
+        {
+            JNINativeMethod codecMethods[] = {
+                {"native_setup", "(Ljava/lang/String;ZZ)V", (void*)my_native_setup},
+            };
+            api->hookJniNativeMethods(env, "android/media/MediaCodec",
+                                      codecMethods, 1);
         }
 
     }
