@@ -147,14 +147,31 @@ inline std::string generatePhoneNumber(const std::string& profileName, long seed
     std::string region=getRegionForProfile(profileName);
     std::string cc=CC.count(region)?CC.at(region):"+1";
 
-    // NANP (USA): exactamente 10 dígitos locales (3 area + 7 subscriber)
-    // UK/LATAM: longitud variable 9-11
-    int targetLen = (region == "usa") ? 10 : 8 + rng.nextInt(3);
+    // PR42: NANP completo — estructura NPA-NXX-XXXX
+    // NPA (área code, dígitos 1-3): primer dígito 2-9, excluir N11 y 555
+    // NXX (exchange, dígitos 4-6): primer dígito también 2-9 (regla NANP)
+    // XXXX (subscriber, dígitos 7-10): libre 0-9
+    std::string npa, nxx;
 
-    // Primer dígito 2-9 (NANP: nunca 0 ni 1 en área code)
-    std::string local = std::to_string(2 + rng.nextInt(8));
-    for(int i = 1; i < targetLen; ++i) local += std::to_string(rng.nextInt(10));
-    return cc + local;
+    // Generar NPA válido (excluir N11: d2==1&&d3==1, y 555)
+    do {
+        npa  = std::to_string(2 + rng.nextInt(8));   // d1: 2-9
+        npa += std::to_string(rng.nextInt(10));        // d2: 0-9
+        npa += std::to_string(rng.nextInt(10));        // d3: 0-9
+    } while ((npa[1] == '1' && npa[2] == '1') || npa == "555");
+
+    // Generar NXX válido (d4 también debe ser 2-9, excluir N11)
+    do {
+        nxx  = std::to_string(2 + rng.nextInt(8));   // d4: 2-9
+        nxx += std::to_string(rng.nextInt(10));        // d5: 0-9
+        nxx += std::to_string(rng.nextInt(10));        // d6: 0-9
+    } while (nxx[1] == '1' && nxx[2] == '1');
+
+    // XXXX subscriber (dígitos 7-10): libre
+    std::string sub = "";
+    for (int i = 0; i < 4; ++i) sub += std::to_string(rng.nextInt(10));
+
+    return cc + npa + nxx + sub;
 }
 
 inline std::string generateRandomMac(const std::string& brandIn, long seed) {
@@ -313,6 +330,20 @@ inline double generateAltitudeForRegion(const std::string& profileName, long see
     return US_ALT_BASE[idx] + (rng.nextInt(US_ALT_RANGE[idx]));
 }
 
+// PR42: Timezone coherente con ciudad GPS — mismo seed que cityRng (seed+7777)
+// Houston usa Central Time (America/Chicago). Phoenix es MST sin DST (America/Phoenix).
+inline std::string getTimezoneForProfile(long seed) {
+    static const std::string US_CITY_TZ[5] = {
+        "America/New_York",    // idx=0: New York
+        "America/Los_Angeles", // idx=1: Los Angeles
+        "America/Chicago",     // idx=2: Chicago
+        "America/Chicago",     // idx=3: Houston (Central Time = Chicago)
+        "America/Phoenix"      // idx=4: Phoenix (MST, no DST)
+    };
+    Random cityRng(seed + 7777LL);  // MISMO seed+offset que generateLocationForRegion
+    return US_CITY_TZ[cityRng.nextInt(5)];
+}
+
 // PR41: Mapeo MCC/MNC → nombre comercial del carrier USA
 // Usado por main.cpp para gsm.sim.operator.alpha
 inline std::string getCarrierNameForImsi(const std::string& profileName, long seed) {
@@ -330,16 +361,21 @@ inline std::string getCarrierNameForImsi(const std::string& profileName, long se
     return (it != CARRIER_NAMES.end()) ? it->second : "T-Mobile";
 }
 
-// PR41: Versión RIL coherente con plataforma del perfil
+// PR42: Samsung Qualcomm recibe RIL Qualcomm, no Samsung
+// Afectados: Galaxy A52 (atoll), A72 (atoll), S20 FE (kona), A52s (sm7325)
+// Samsung Exynos siguen con "Samsung RIL v3.0"
 inline std::string getRilVersionForProfile(const std::string& profileName) {
     auto it = G_DEVICE_PROFILES.find(profileName);
     if (it != G_DEVICE_PROFILES.end()) {
         std::string plat = toLower(std::string(it->second.boardPlatform));
         std::string brand = toLower(std::string(it->second.brand));
+        // MediaTek — cualquier marca
         if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos)
             return "android mtk-ril 1.0";
-        if (brand == "samsung")
+        // Samsung Exynos exclusivamente → RIL Samsung
+        if (brand == "samsung" && plat.find("exynos") != std::string::npos)
             return "Samsung RIL v3.0";
+        // Todo lo demás (Qualcomm, incluido Samsung Qualcomm) → AOSP RIL
     }
     return "android qualcomm ril 1.0";
 }

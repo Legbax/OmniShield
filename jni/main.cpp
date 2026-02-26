@@ -23,6 +23,8 @@
 #include <ifaddrs.h>
 #include <linux/if_packet.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 #include <errno.h>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
@@ -101,7 +103,9 @@ enum FileType {
     SYS_BLOCK_SIZE, PROC_NET_TCP, PROC_NET_UDP,
     PROC_BOOT_ID,         // /proc/sys/kernel/random/boot_id — UUID único por device
     SYS_CPU_FREQ_AVAIL,   // scaling_available_frequencies — firma de plataforma CPU
-    PROC_SELF_CGROUP      // /proc/self/cgroup — puede revelar namespace KernelSU
+    PROC_SELF_CGROUP,     // /proc/self/cgroup — puede revelar namespace KernelSU
+    BATTERY_CHARGE_FULL,  // PR42: /sys/class/power_supply/battery/charge_full[_design]
+    PROC_NET_IF_INET6     // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -144,6 +148,9 @@ static unsigned long (*orig_getauxval)(unsigned long type);
 static int (*orig_dup)(int oldfd);
 static int (*orig_dup2)(int oldfd, int newfd);
 static int (*orig_dup3)(int oldfd, int newfd, int flags);
+
+// PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
+static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -411,6 +418,22 @@ int my_uname(struct utsname *buf) {
     return ret;
 }
 
+// PR42: Intercepta ioctl SIOCGIFHWADDR para wlan0/eth0
+// Las apps nativas en C/C++ evitan getifaddrs y leen la MAC directamente del kernel.
+// Este hook retorna 02:00:00:00:00:00 (MAC de privacidad AOSP) en ambas interfaces.
+int my_ioctl(int fd, unsigned long request, void* arg) {
+    int ret = orig_ioctl(fd, request, arg);
+    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
+        struct ifreq* ifr = static_cast<struct ifreq*>(arg);
+        if (strcmp(ifr->ifr_name, "wlan0") == 0 || strcmp(ifr->ifr_name, "eth0") == 0) {
+            unsigned char static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
+            ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+        }
+    }
+    return ret;
+}
+
 // 4. Deep VFS (Root Hiding)
 int my_access(const char *pathname, int mode) {
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
@@ -445,6 +468,8 @@ int my_getifaddrs(struct ifaddrs **ifap) {
 
 static std::string getArmFeatures(const std::string& platform) {
     if (platform.find("mt6768") != std::string::npos || platform.find("mt6765") != std::string::npos ||
+        platform.find("mt6769") != std::string::npos ||  // PR42: Cortex-A55, ARMv8.0
+        platform.find("exynos9611") != std::string::npos ||  // PR42: Cortex-A73, ARMv8.0
         platform.find("sdm670") != std::string::npos || platform.find("exynos850") != std::string::npos)
         return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm";
     return "fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp";
@@ -775,13 +800,9 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.opengles.version")          dynamic_buffer = fp.openGlEs;
         else if (k == "sys.usb.state" || k == "sys.usb.config") dynamic_buffer = "mtp";
         else if (k == "persist.sys.timezone") {
-            // PR41: Pool de zonas horarias USA — determinístico por seed
-            static const std::vector<std::string> US_TZ = {
-                "America/New_York", "America/Chicago", "America/Denver",
-                "America/Los_Angeles", "America/Phoenix"
-            };
-            omni::engine::Random tzRng(g_masterSeed + 555);
-            dynamic_buffer = US_TZ[tzRng.nextInt(US_TZ.size())];
+            // PR42: Timezone derivado de la MISMA ciudad que GPS (seed+7777)
+            // Coherencia garantizada: si GPS=Phoenix → TZ=America/Phoenix siempre
+            dynamic_buffer = omni::engine::getTimezoneForProfile(g_masterSeed);
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
@@ -820,6 +841,24 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "gsm.version.ril-impl") {
             // PR41: Formato RIL real (el valor anterior era un classpath Java, no un ril-impl)
             dynamic_buffer = omni::engine::getRilVersionForProfile(g_currentProfileName);
+        }
+        else if (k == "ro.carrier") {
+            // PR42: Carrier short name coherente con IMSI generado
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            std::string mccMnc = imsi.substr(0, 6);
+            if (mccMnc == "311480") dynamic_buffer = "vzw";         // Verizon
+            else if (mccMnc == "310410") dynamic_buffer = "att";    // AT&T
+            else dynamic_buffer = "tmo";                             // T-Mobile (310260/310120), Sprint→TMo, US Cellular→tmo
+        }
+        else if (k == "ro.cdma.home.operator.numeric") {
+            // PR42: Solo relevante para Verizon (CDMA legacy) — coherente con IMSI
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            dynamic_buffer = imsi.substr(0, 6);  // MCC+MNC = PLMN del carrier
+        }
+        else if (k == "telephony.lteOnCdmaDevice") {
+            // PR42: Verizon = 1 (red CDMA legacy + LTE), resto = 0
+            std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+            dynamic_buffer = (imsi.substr(0, 6) == "311480") ? "1" : "0";
         }
         else if (k == "ro.telephony.default_network")        dynamic_buffer = "9";
         else if (k == "ro.soc.manufacturer") {
@@ -931,6 +970,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                  strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_TOPOLOGY;
         else if (strstr(pathname, "/sys/class/power_supply/battery/technology")) type = BAT_TECHNOLOGY;
         else if (strstr(pathname, "/sys/class/power_supply/battery/present"))    type = BAT_PRESENT;
+        else if (strstr(pathname, "/sys/class/power_supply/battery/charge_full")) type = BATTERY_CHARGE_FULL;
         else if (strstr(pathname, "/sys/class/power_supply/battery/temp")) type = BATTERY_TEMP;
         else if (strstr(pathname, "/sys/class/power_supply/battery/voltage_now")) type = BATTERY_VOLT;
         else if (strstr(pathname, "/sys/class/power_supply/battery/capacity")) type = BATTERY_CAPACITY;
@@ -973,6 +1013,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                  strcmp(pathname, "/proc/net/tcp6") == 0)  type = PROC_NET_TCP;
         else if (strcmp(pathname, "/proc/net/udp") == 0 ||
                  strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
+        else if (strstr(pathname, "/proc/net/if_inet6"))   type = PROC_NET_IF_INET6;
         // PR37: Nuevos VFS handlers
         else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
         else if (strcmp(pathname, "/proc/self/cgroup") == 0)               type = PROC_SELF_CGROUP;
@@ -1013,7 +1054,21 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     struct tm* tm_info = gmtime(&t);
                     strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", tm_info);
 
-                    content = "Linux version " + kv + " (builder@android) (clang 12.0.5) #1 SMP PREEMPT " + std::string(dateBuf) + "\n";
+                    // PR42: Compiler y build user coherentes con la marca del perfil
+                    std::string compilerStr;
+                    std::string platLow = toLowerStr(fp.boardPlatform);
+                    std::string brdLow  = toLowerStr(fp.brand);
+                    if (platLow.find("exynos") != std::string::npos) {
+                        // Samsung Exynos usa GCC en producción (no clang)
+                        compilerStr = "(" + std::string(fp.buildUser) + "@" + std::string(fp.buildHost) + ") (gcc version 4.9.x (GCC))";
+                    } else if (brdLow == "google") {
+                        // Pixel usa android-build con clang de Google
+                        compilerStr = "(android-build@" + std::string(fp.buildHost) + ") (Android clang version 12.0.5)";
+                    } else {
+                        // Qualcomm y MediaTek (Xiaomi, OnePlus, Realme, Nokia, etc.)
+                        compilerStr = "(" + std::string(fp.buildUser) + "@" + std::string(fp.buildHost) + ") (clang version 12.0.5)";
+                    }
+                    content = "Linux version " + kv + " " + compilerStr + " #1 SMP PREEMPT " + std::string(dateBuf) + "\n";
                 } else if (type == PROC_CPUINFO) {
                     content = generateMulticoreCpuInfo(fp);
                 } else if (type == USB_SERIAL) {
@@ -1030,6 +1085,11 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = std::to_string(40 + (g_masterSeed % 60)) + "\n";
                 } else if (type == BATTERY_STATUS) {
                     content = "Discharging\n";
+                } else if (type == BATTERY_CHARGE_FULL) {
+                    // PR42: Capacidad fake coherente con el perfil (4000-5000 mAh)
+                    // Determinística por seed — misma identidad, misma "capacidad de diseño"
+                    long fakeCapacityUah = 4000000L + ((g_masterSeed % 1000L) * 1000L);
+                    content = std::to_string(fakeCapacityUah) + "\n";
                 } else if (type == PROC_HOSTNAME) {
                     // RFC 952: hostname estándar. "localhost" es el valor universal
                     // en AOSP stock. Cualquier hostname personalizado MIUI es detectable.
@@ -1340,6 +1400,18 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 } else if (type == PROC_NET_UDP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
 
+                } else if (type == PROC_NET_IF_INET6) {
+                    // PR42: En modo LTE, ocultar wlan0 de IPv6.
+                    // En modo WiFi real, pasar el contenido original.
+                    if (g_spoofMobileNetwork) {
+                        // Solo mostrar la interfaz LTE (rmnet_data0) sin IPv6 real
+                        content = "";  // Interfaz LTE no tiene IPv6 en configuración estándar
+                    } else {
+                        // Pasar contenido real del kernel
+                        char tmpBuf[4096]; ssize_t r;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                    }
+
                 // PR37: boot_id — UUID determinístico desde seed (Firebase/AppsFlyer lo correlacionan)
                 } else if (type == PROC_BOOT_ID) {
                     content = generateBootId(g_masterSeed) + "\n";
@@ -1369,6 +1441,13 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                              plat.find("mt6833")   != std::string::npos) content = "500000 718750 1000000 1218750 1343750 1500000 1671875 1843750 2062500\n";
                     else if (plat.find("mt6765")   != std::string::npos) content = "500000 625000 750000 875000 1000000 1125000 1250000 1350000\n";
                     else if (plat.find("mt6")      != std::string::npos) content = "500000 718750 1078750 1418750 1756250 1900000\n";
+                    // PR42: Samsung Exynos — devolvían archivo vacío, ahora con frecuencias reales
+                    else if (plat.find("exynos9611") != std::string::npos)
+                        content = "182000 273000 546000 818000 1144000 1365000 1547000 1768000\n";
+                    else if (plat.find("exynos9825") != std::string::npos)
+                        content = "403000 845000 1274000 1690000 1937000 2210000 2613000\n";
+                    else if (plat.find("exynos850")  != std::string::npos)
+                        content = "208000 416000 625000 833000 1042000 1250000 1458000 1616000\n";
                     else                                                  content = "300000 576000 768000 1248000 1574400 1766400\n";
 
                 // SYS_CPU_TOPOLOGY (existente, no mover)
@@ -1991,6 +2070,12 @@ public:
         if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
         void* dup3_func = DobbySymbolResolver(nullptr, "dup3");
         if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
+
+        // PR42: ioctl hook — MAC real bypass via syscall directo
+        // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
+        void* ioctl_sym = DobbySymbolResolver(nullptr, "__ioctl");
+        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver(nullptr, "ioctl");
+        if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // -----------------------------------------------------------------------------
         // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote

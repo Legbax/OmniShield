@@ -1,0 +1,5 @@
+
+# PR42: Artefactos compilados y caché
+*.o
+__pycache__/
+*.pyc
