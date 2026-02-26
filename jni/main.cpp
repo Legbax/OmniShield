@@ -276,6 +276,7 @@ bool shouldHide(const char* key) {
 // Hooks: OpenCL
 // -----------------------------------------------------------------------------
 cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    if (!orig_clGetDeviceInfo) return -1;
     cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
     if (ret == 0 && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
@@ -347,6 +348,7 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 #define EGL_EXTENSIONS_ENUM 0x3055
 
 const char* my_eglQueryString(void* display, int name) {
+    if (!orig_eglQueryString) return nullptr;
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
 
@@ -1822,10 +1824,11 @@ int my_dup3(int oldfd, int newfd, int flags) {
 // -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
-int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
-int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
-int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, omni::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { if (!orig_SSL_CTX_set_ciphersuites) return 0; return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { if (!orig_SSL_set1_tls13_ciphersuites) return 0; return orig_SSL_set1_tls13_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set_cipher_list(SSL *ssl, const char *str) { if (!orig_SSL_set_cipher_list) return 0; return orig_SSL_set_cipher_list(ssl, omni::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
 int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
+    if (!orig_SSL_set_ciphersuites) return 0;
     return orig_SSL_set_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str());
 }
 
@@ -1835,6 +1838,7 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 #define GL_EXTENSIONS 0x1F03
 
 const GLubyte* my_glGetString(GLenum name) {
+    if (!orig_glGetString) return nullptr;
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         if (name == GL_VENDOR)   return (const GLubyte*)fp.gpuVendor;
@@ -1880,6 +1884,7 @@ const GLubyte* my_glGetString(GLenum name) {
 // Hooks: Vulkan API
 // -----------------------------------------------------------------------------
 void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
+    if (!orig_vkGetPhysicalDeviceProperties) return;
     orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
     if (pProperties && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
@@ -1903,6 +1908,7 @@ void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysica
 // Hooks: SensorManager (Limpieza de firmas MTK/Xiaomi)
 // -----------------------------------------------------------------------------
 const char* my_Sensor_getName(void* sensor) {
+    if (!orig_Sensor_getName) return nullptr;
     const char* orig_name = orig_Sensor_getName(sensor);
     if (!orig_name) return nullptr;
 
@@ -1924,6 +1930,7 @@ const char* my_Sensor_getName(void* sensor) {
 }
 
 const char* my_Sensor_getVendor(void* sensor) {
+    if (!orig_Sensor_getVendor) return nullptr;
     const char* orig_vendor = orig_Sensor_getVendor(sensor);
     if (!orig_vendor) return nullptr;
 
@@ -2022,6 +2029,7 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
     env->ReleaseStringUTFChars(name, key);
 
     if (result) return result;
+    if (!orig_SettingsSecure_getString) return nullptr;
     return orig_SettingsSecure_getString(env, name);
 }
 
@@ -2045,6 +2053,7 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
         catch_ptr->serial = s;
     };
 
+    if (!orig_system_property_read_callback) { callback(cookie, "", "", 0); return; }
     orig_system_property_read_callback(pi, internal_cb, &catcher);
 
     if (shouldHide(catcher.name.c_str()) || shouldHide(catcher.real_val.c_str())) {
@@ -2134,6 +2143,7 @@ static bool isFrontCameraMetadata(JNIEnv* env, jobject thiz) {
 //   0x00050006  LENS_FACING — cae en default:, pasa al original
 // -----------------------------------------------------------------------------
 static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
+    if (!orig_nativeReadValues) return nullptr;
     if (!G_DEVICE_PROFILES.count(g_currentProfileName)) {
         return orig_nativeReadValues(env, thiz, tag);
     }
@@ -2243,6 +2253,7 @@ static void my_native_setup(JNIEnv* env, jobject thiz,
                 name = env->NewStringUTF(translated.c_str());
         }
     }
+    if (!orig_native_setup) return;
     orig_native_setup(env, thiz, name, nameIsType, encoder);
 }
 
@@ -2484,6 +2495,8 @@ public:
                 }
             }
         }
+        // PR47: Limpiar cualquier excepción JNI pendiente del Build sync
+        if (env->ExceptionCheck()) env->ExceptionClear();
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
@@ -2551,7 +2564,9 @@ public:
             {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
         };
         api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
+        if (env->ExceptionCheck()) env->ExceptionClear();
         api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
+        if (env->ExceptionCheck()) env->ExceptionClear();
 
         // PR38+39: Location spoofing hooks
         // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
@@ -2593,6 +2608,7 @@ public:
                 {"getTime",                   "()J", (void*)LocationHook::getTime},
             };
             api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // PR38+39: ConnectivityManager — NetworkInfo getters
@@ -2620,6 +2636,7 @@ public:
                 {"isRoaming",      "()Z",                  (void*)NetworkInfoHook::isRoaming},
             };
             api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
@@ -2693,6 +2710,7 @@ public:
                 {"getFifoReservedEventCount","()I", (void*)SensorMetaHook::getFifoReservedEventCount},
             };
             api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // PR38+39: SensorManager.getSensorList(int type) filter
@@ -2730,6 +2748,7 @@ public:
             };
             api->hookJniNativeMethods(env, "android/hardware/SensorManager",
                                       sensorListMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // PR44: Camera2 — nativeReadValues hook
@@ -2743,10 +2762,14 @@ public:
             api->hookJniNativeMethods(env,
                 "android/hardware/camera2/impl/CameraMetadataNative",
                 cameraMethods, 1);
-            // PR46: hookJniNativeMethods guarda el original en cameraMethods[0].fnPtr
-            orig_nativeReadValues =
-                reinterpret_cast<jbyteArray(*)(JNIEnv*, jobject, jint)>(
-                    cameraMethods[0].fnPtr);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            // PR47: Solo capturar orig si hookJniNativeMethods realmente lo reemplazó.
+            // Si falló, fnPtr sigue apuntando a my_nativeReadValues → dejamos orig en nullptr.
+            if (cameraMethods[0].fnPtr && cameraMethods[0].fnPtr != (void*)my_nativeReadValues) {
+                orig_nativeReadValues =
+                    reinterpret_cast<jbyteArray(*)(JNIEnv*, jobject, jint)>(
+                        cameraMethods[0].fnPtr);
+            }
         }
 
         // PR44: MediaCodec — crash guard en native_setup (lado de creación)
@@ -2759,10 +2782,13 @@ public:
             };
             api->hookJniNativeMethods(env, "android/media/MediaCodec",
                                       codecMethods, 1);
-            // PR46: capturar puntero original del codec
-            orig_native_setup =
-                reinterpret_cast<void(*)(JNIEnv*, jobject, jstring, jboolean, jboolean)>(
-                    codecMethods[0].fnPtr);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            // PR47: Solo capturar orig si hookJniNativeMethods realmente lo reemplazó.
+            if (codecMethods[0].fnPtr && codecMethods[0].fnPtr != (void*)my_native_setup) {
+                orig_native_setup =
+                    reinterpret_cast<void(*)(JNIEnv*, jobject, jstring, jboolean, jboolean)>(
+                        codecMethods[0].fnPtr);
+            }
         }
 
     }

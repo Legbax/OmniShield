@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.26
-versionCode=12926
+version=v12.9.27
+versionCode=12927
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR46 — Fix orig_nativeReadValues capture + FORCE_DENYLIST order
+description=Total Invisibility (The Void). Zygisk module. PR47 — Anti-crash: null guards, JNI exception clearing, self-reference protection
