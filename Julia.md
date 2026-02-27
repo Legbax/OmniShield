@@ -1234,3 +1234,39 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 **CSS sin cambios** — el CSS ya usa `max(env(safe-area-inset-bottom, 0px), var(--inset-bottom, 0px))`, así que en cuanto JS fija `--inset-bottom: 48px`, el bottom nav se desplaza automáticamente.
 
 **`module.prop`** — version bump `v12.9.45 → v12.9.46`, versionCode `12945 → 12946`.
+
+## PR67 — Hooks completos: Device Apply, IDs expandidos, Telephony expandido, Settings Load Apps
+
+**Fecha y agente:** 27 de febrero de 2026, Claude (PR67 — hooks completos UI)
+
+**Problemas reportados:**
+1. **Device tab** — faltaba botón "Apply Changes" para persistir el perfil seleccionado.
+2. **IDs tab** — faltaban 8 hooks: IMEI 2, SSAID, Media DRM ID, Advertising ID (GAID), Hardware Serial, Gmail Account, GPU Renderer, JA3/TLS.
+3. **Telephony tab** — faltaban 4 hooks: SIM Operator, MCC/MNC, Wi-Fi SSID, Wi-Fi BSSID.
+4. **Settings** — el dropdown "Select app to add" no mostraba las apps instaladas porque `onclick` en un `<select>` en Android WebView abre el picker nativo sin ejecutar el handler.
+
+**Cambios — `webroot/js/engine.js`:**
+- `generateUUID(seed)` — UUID v4 determinístico (para Media DRM ID y Advertising ID).
+- `generateWifiSsid(seed)` — SSIDs de red doméstica realistas (HOME-XXXX, NETGEAR-XXXX, etc.).
+- `generateGmail(seed)` — cuentas Gmail ficticias con nombre + apellido + número (ej. `alex.smith472@gmail.com`).
+
+**Cambios — `webroot/js/app.js`:**
+- Importados `generateUUID`, `generateWifiSsid`, `generateGmail` desde engine.js.
+- Constante `JA3_PRESETS` con 5 fingerprints TLS reales de navegadores Android populares.
+- `state` expandido con: `imei2, hwSerial, ssaid, mediaDrmId, advertisingId, gmailAccount, gpuRenderer, ja3, wifiSsid, wifiBssid, mccmnc, simOperator`.
+- `computeAll()` — genera todos los nuevos campos determinísticamente desde `seed` con offsets (+137, +99, +31, +57, etc.) para evitar colisiones. `ssaid = androidId` (son el mismo valor en Android 8+). `gpuRenderer` leído del perfil. `mccmnc` extraído de los primeros 6 dígitos del IMSI.
+- `loadState()` — restaura todos los overrides desde el config file (`override_imei2`, `override_hw_serial`, `override_media_drm_id`, etc.).
+- `saveConfig()` — persiste todos los overrides activos en el config file.
+- `renderIdsTab()` — renderiza los 14 campos de identidad (incluyendo JA3 con nombre + hash en dos líneas).
+- `renderTelephonyTab()` — renderiza los 11 campos de red.
+- `randomizeField()` — 20 handlers (todos los campos randomizables).
+- `window.applyDevice` — nueva función que llama `saveConfig()` para persistir perfil.
+- `loadInstalledApps()` — eliminado el early-return por `options.length > 1`; ahora siempre recarga la lista desde `pm list packages`.
+
+**Cambios — `webroot/index.html`:**
+- **Device tab** — botón "Apply Changes" añadido junto a "Random Profile".
+- **IDs tab** — 8 campos nuevos: IMEI 2, Hardware Serial, SSAID (display-only), Media DRM ID, Advertising ID, Gmail Account, GPU Renderer (display-only), JA3/TLS (2 líneas: nombre + hash con botón cycle). "IMEI" renombrado a "IMEI 1".
+- **Telephony tab** — 4 campos nuevos: SIM Operator, MCC/MNC (display-only), Wi-Fi SSID, Wi-Fi BSSID. Renombrado a "Wi-Fi MAC Address".
+- **Settings tab** — eliminado `onclick` del `<select>`; añadido botón "Load Apps" con ícono de descarga que llama `loadInstalledApps()` explícitamente.
+
+**`module.prop`** — version bump `v12.9.46 → v12.9.47`, versionCode `12946 → 12947`.

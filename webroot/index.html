@@ -123,6 +123,10 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
                 Random Profile
               </button>
+              <button class="btn btn-primary" onclick="applyDevice()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                Apply Changes
+              </button>
             </div>
           </div>
 
@@ -151,14 +155,26 @@
               Device Identifiers
             </div>
 
-            <!-- IMEI -->
+            <!-- IMEI 1 -->
             <div class="field-row">
               <div>
-                <div class="field-label">IMEI</div>
+                <div class="field-label">IMEI 1</div>
                 <div class="field-value mono" id="f-imei">–</div>
               </div>
               <span class="valid-badge" id="f-imei-badge">–</span>
-              <button class="btn-icon" onclick="randomizeField('f-imei')" title="Randomize IMEI">
+              <button class="btn-icon" onclick="randomizeField('f-imei')" title="Randomize IMEI 1">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
+            <!-- IMEI 2 -->
+            <div class="field-row">
+              <div>
+                <div class="field-label">IMEI 2 (SIM 2)</div>
+                <div class="field-value mono" id="f-imei2">–</div>
+              </div>
+              <span class="valid-badge" id="f-imei2-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-imei2')" title="Randomize IMEI 2">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
             </div>
@@ -175,10 +191,22 @@
               </button>
             </div>
 
+            <!-- Hardware Serial -->
+            <div class="field-row">
+              <div>
+                <div class="field-label">Hardware Serial</div>
+                <div class="field-value mono" id="f-hw-serial">–</div>
+              </div>
+              <span class="valid-badge" id="f-hw-serial-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-hw-serial')" title="Randomize Hardware Serial">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
             <!-- Android ID -->
             <div class="field-row">
               <div>
-                <div class="field-label">Android ID (SSAID)</div>
+                <div class="field-label">Android ID</div>
                 <div class="field-value mono" id="f-android-id">–</div>
               </div>
               <span class="valid-badge" id="f-android-id-badge">–</span>
@@ -187,14 +215,23 @@
               </button>
             </div>
 
+            <!-- SSAID (= Android ID on Android 8+, display only) -->
+            <div class="field-row" style="grid-template-columns:1fr auto">
+              <div>
+                <div class="field-label">SSAID</div>
+                <div class="field-value mono" id="f-ssaid">–</div>
+              </div>
+              <span class="valid-badge" id="f-ssaid-badge">–</span>
+            </div>
+
             <!-- GSF ID -->
             <div class="field-row">
               <div>
-                <div class="field-label">GSF ID (Google Services)</div>
+                <div class="field-label">GFS ID (Google Services)</div>
                 <div class="field-value mono" id="f-gsf-id">–</div>
               </div>
               <span class="valid-badge" id="f-gsf-id-badge">–</span>
-              <button class="btn-icon" onclick="randomizeField('f-gsf-id')" title="Randomize GSF ID">
+              <button class="btn-icon" onclick="randomizeField('f-gsf-id')" title="Randomize GFS ID">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
             </div>
@@ -211,6 +248,30 @@
               </button>
             </div>
 
+            <!-- Media DRM ID -->
+            <div class="field-row">
+              <div>
+                <div class="field-label">Media DRM ID</div>
+                <div class="field-value mono" id="f-media-drm" style="font-size:11px">–</div>
+              </div>
+              <span class="valid-badge" id="f-media-drm-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-media-drm')" title="Randomize Media DRM ID">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
+            <!-- Advertising ID (GAID) -->
+            <div class="field-row">
+              <div>
+                <div class="field-label">Advertising ID (GAID)</div>
+                <div class="field-value mono" id="f-adv-id" style="font-size:11px">–</div>
+              </div>
+              <span class="valid-badge" id="f-adv-id-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-adv-id')" title="Randomize Advertising ID">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
             <!-- Boot ID -->
             <div class="field-row">
               <div>
@@ -219,6 +280,40 @@
               </div>
               <span class="valid-badge" id="f-boot-id-badge">–</span>
               <button class="btn-icon" onclick="randomizeField('f-boot-id')" title="Randomize Boot ID">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
+            <!-- Gmail Account -->
+            <div class="field-row">
+              <div>
+                <div class="field-label">Gmail Account</div>
+                <div class="field-value" id="f-gmail">–</div>
+              </div>
+              <span class="valid-badge" id="f-gmail-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-gmail')" title="Randomize Gmail">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
+            <!-- GPU Renderer (from profile, display only) -->
+            <div class="field-row" style="grid-template-columns:1fr auto">
+              <div>
+                <div class="field-label">GPU Renderer</div>
+                <div class="field-value" id="f-gpu">–</div>
+              </div>
+              <span class="valid-badge ok" id="f-gpu-badge">VALID</span>
+            </div>
+
+            <!-- JA3/TLS Fingerprint -->
+            <div class="field-row">
+              <div style="min-width:0">
+                <div class="field-label">JA3/TLS Fingerprint</div>
+                <div class="field-value" id="f-ja3-name" style="font-size:11px;color:var(--text2)">–</div>
+                <div class="field-value mono" id="f-ja3" style="font-size:10px">–</div>
+              </div>
+              <span class="valid-badge ok" id="f-ja3-badge">VALID</span>
+              <button class="btn-icon" onclick="randomizeField('f-ja3')" title="Cycle JA3 preset">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
             </div>
@@ -327,6 +422,16 @@
               <div><div class="field-label">SIM Country</div><div class="field-value" id="f-sim-cc">–</div></div>
               <span class="valid-badge" id="f-sim-cc-badge">–</span>
             </div>
+
+            <div class="field-row" style="grid-template-columns:1fr auto">
+              <div><div class="field-label">SIM Operator</div><div class="field-value" id="f-sim-op">–</div></div>
+              <span class="valid-badge" id="f-sim-op-badge">–</span>
+            </div>
+
+            <div class="field-row" style="grid-template-columns:1fr auto">
+              <div><div class="field-label">MCC/MNC</div><div class="field-value mono" id="f-mccmnc">–</div></div>
+              <span class="valid-badge" id="f-mccmnc-badge">–</span>
+            </div>
           </div>
 
           <!-- MAC addresses -->
@@ -337,7 +442,7 @@
             </div>
 
             <div class="field-row">
-              <div><div class="field-label">WiFi MAC Address</div><div class="field-value mono" id="f-wifi-mac">–</div></div>
+              <div><div class="field-label">Wi-Fi MAC Address</div><div class="field-value mono" id="f-wifi-mac">–</div></div>
               <span class="valid-badge" id="f-wifi-mac-badge">–</span>
               <button class="btn-icon" onclick="randomizeField('f-wifi-mac')" title="Randomize WiFi MAC">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
@@ -348,6 +453,22 @@
               <div><div class="field-label">Bluetooth MAC Address</div><div class="field-value mono" id="f-bt-mac">–</div></div>
               <span class="valid-badge" id="f-bt-mac-badge">–</span>
               <button class="btn-icon" onclick="randomizeField('f-bt-mac')" title="Randomize BT MAC">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
+            <div class="field-row">
+              <div><div class="field-label">Wi-Fi SSID</div><div class="field-value mono" id="f-wifi-ssid">–</div></div>
+              <span class="valid-badge" id="f-wifi-ssid-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-wifi-ssid')" title="Randomize Wi-Fi SSID">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+              </button>
+            </div>
+
+            <div class="field-row">
+              <div><div class="field-label">Wi-Fi BSSID</div><div class="field-value mono" id="f-wifi-bssid">–</div></div>
+              <span class="valid-badge" id="f-wifi-bssid-badge">–</span>
+              <button class="btn-icon" onclick="randomizeField('f-wifi-bssid')" title="Randomize Wi-Fi BSSID">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
             </div>
@@ -493,12 +614,16 @@
               Module Scope
             </div>
             <div class="text-sm" style="margin-bottom:10px">Apps in scope will receive spoofed identity values. Use Force Stop to restart with new identity.</div>
-            <div class="input-row">
+            <div class="input-row" style="margin-bottom:6px">
               <div style="flex:1">
-                <select id="app-dropdown" class="select" onclick="loadInstalledApps()" onchange="document.getElementById('app-search-input').value=this.value">
-                  <option value="">Tap to load apps…</option>
+                <select id="app-dropdown" class="select" onchange="document.getElementById('app-search-input').value=this.value">
+                  <option value="">Click "Load Apps" first…</option>
                 </select>
               </div>
+              <button class="btn btn-secondary" onclick="loadInstalledApps()" style="flex-shrink:0">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;vertical-align:-2px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Load Apps
+              </button>
             </div>
             <div class="input-row" style="margin-top:6px">
               <input id="app-search-input" class="input" type="text" placeholder="Or type package name (e.g. com.snapchat.android)">

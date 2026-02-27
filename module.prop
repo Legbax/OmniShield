@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.46
-versionCode=12946
+version=v12.9.47
+versionCode=12947
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR66 — Fix: detectNavInset() Method 2 fallthrough + Method 4 Android UA 48px fallback
+description=Total Invisibility (The Void). Zygisk module. PR67 — Device Apply button, full ID/Telephony hooks (IMEI2, SSAID, DRM, GAID, HWSERIAL, Gmail, GPU, JA3, SSID, BSSID, MCC/MNC), Settings Load Apps fix

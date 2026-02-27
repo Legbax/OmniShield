@@ -6,9 +6,19 @@ import {
   getTimezone, getCarrierName, getSimCountry, computeCorrelation,
   validateIMEI, validateICCID, validateIMSI, validateMAC, validatePhone,
   validateAndroidId, validateGsfId, validateWidevineId, validateBootId, validateSerial,
+  generateUUID, generateWifiSsid, generateGmail,
   US_CITIES_100, CARRIER_NAMES, IMSI_POOLS
 } from './engine.js';
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
+
+// ─── JA3/TLS fingerprint presets ──────────────────────────────────────
+const JA3_PRESETS = [
+  { name: 'Chrome 120 Android',  hash: '0700a69a2db4c9c8e5dedc5a1d14e7ce' },
+  { name: 'Chrome 119 Android',  hash: 'bfbe57248732353af79a92ba6271b9d4' },
+  { name: 'Firefox 121 Android', hash: '839bbe3ed07fed922ded5aaf714d6842' },
+  { name: 'Samsung Browser 23',  hash: 'a0e9f5d64349fb13191bc781f81f42e1' },
+  { name: 'OkHttp/4.12.0',       hash: 'd4e5b18d6b55c71db63d10a11e90e667' },
+];
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
 // Uses dynamic import so the module loads even outside KernelSU WebView.
@@ -76,9 +86,13 @@ const state = {
   proxyPass: '',
   scopedApps: [],
   recentProfiles: [],
-  // computed
-  imei: '', iccid: '', imsi: '', phone: '', wifiMac: '', btMac: '',
-  serial: '', androidId: '', gsfId: '', widevineId: '', bootId: '',
+  // computed — primary identifiers
+  imei: '', imei2: '', iccid: '', imsi: '', phone: '', wifiMac: '', btMac: '',
+  serial: '', hwSerial: '', androidId: '', ssaid: '',
+  gsfId: '', widevineId: '', mediaDrmId: '', advertisingId: '',
+  bootId: '', gmailAccount: '', gpuRenderer: '', ja3: null,
+  // computed — telephony / network
+  wifiSsid: '', wifiBssid: '', mccmnc: '', simOperator: '',
   lat: 0, lon: 0, alt: 0, tz: '',
   carrier: '', simCountry: '', correlation: 0,
   deviceIp: '', deviceModel: ''
@@ -107,6 +121,28 @@ async function loadState() {
   state.scopedApps   = state.cfg.scoped_apps ? state.cfg.scoped_apps.split(',').filter(Boolean) : [];
   state.recentProfiles = loadRecentProfiles();
 
+  // Restore per-field overrides persisted in config
+  const ov = state.cfg;
+  if (ov.override_imei)           overrides.imei          = ov.override_imei;
+  if (ov.override_imei2)          overrides.imei2         = ov.override_imei2;
+  if (ov.override_serial)         overrides.serial        = ov.override_serial;
+  if (ov.override_hw_serial)      overrides.hwSerial      = ov.override_hw_serial;
+  if (ov.override_android_id)     overrides.androidId     = ov.override_android_id;
+  if (ov.override_gsf_id)         overrides.gsfId         = ov.override_gsf_id;
+  if (ov.override_widevine_id)    overrides.widevineId    = ov.override_widevine_id;
+  if (ov.override_media_drm_id)   overrides.mediaDrmId    = ov.override_media_drm_id;
+  if (ov.override_advertising_id) overrides.advertisingId = ov.override_advertising_id;
+  if (ov.override_boot_id)        overrides.bootId        = ov.override_boot_id;
+  if (ov.override_gmail)          overrides.gmailAccount  = ov.override_gmail;
+  if (ov.override_wifi_ssid)      overrides.wifiSsid      = ov.override_wifi_ssid;
+  if (ov.override_wifi_bssid)     overrides.wifiBssid     = ov.override_wifi_bssid;
+  if (ov.override_imsi)           overrides.imsi          = ov.override_imsi;
+  if (ov.override_iccid)          overrides.iccid         = ov.override_iccid;
+  if (ov.override_phone)          overrides.phone         = ov.override_phone;
+  if (ov.override_wifi_mac)       overrides.wifiMac       = ov.override_wifi_mac;
+  if (ov.override_bt_mac)         overrides.btMac         = ov.override_bt_mac;
+  if (ov.ja3_idx != null)         overrides.ja3Idx        = parseInt(ov.ja3_idx) || 0;
+
   computeAll();
   await loadSystemInfo();
 }
@@ -119,19 +155,31 @@ function computeAll() {
   const brand = (fp.brand || 'xiaomi').toLowerCase();
 
   state.imei       = overrides.imei       ?? generateIMEI(profile, seed);
+  state.imei2      = overrides.imei2      ?? generateIMEI(profile, seed + 137);
   state.iccid      = overrides.iccid      ?? generateICCID(profile, seed);
   state.imsi       = overrides.imsi       ?? generateIMSI(profile, seed);
   state.phone      = overrides.phone      ?? generatePhoneNumber(profile, seed);
   state.wifiMac    = overrides.wifiMac    ?? generateMAC(brand, seed);
   state.btMac      = overrides.btMac      ?? generateMAC(brand, seed + 1);
   state.serial     = overrides.serial     ?? generateSerial(brand, seed, fp.securityPatch || '');
+  state.hwSerial   = overrides.hwSerial   ?? generateSerial(brand, seed + 99, fp.securityPatch || '');
   state.androidId  = overrides.androidId  ?? generateAndroidId(seed);
+  state.ssaid      = state.androidId;    // SSAID = Android ID on Android 8+
   state.gsfId      = overrides.gsfId      ?? generateGsfId(seed);
   state.widevineId = overrides.widevineId ?? generateWidevineId(seed);
+  state.mediaDrmId = overrides.mediaDrmId ?? generateUUID(seed + 31);
+  state.advertisingId = overrides.advertisingId ?? generateUUID(seed + 57);
   state.bootId     = overrides.bootId     ?? generateBootId(seed);
+  state.gmailAccount = overrides.gmailAccount ?? generateGmail(seed);
+  state.gpuRenderer  = fp.gpuRenderer || 'Adreno 619';
+  state.ja3          = JA3_PRESETS[(seed + (overrides.ja3Idx || 0)) % JA3_PRESETS.length];
   state.carrier    = getCarrierName(profile, seed);
   state.simCountry = getSimCountry(profile, seed);
+  state.simOperator = state.carrier;
   state.tz         = getTimezone(seed);
+  state.wifiSsid   = overrides.wifiSsid   ?? generateWifiSsid(seed);
+  state.wifiBssid  = overrides.wifiBssid  ?? generateMAC('default', seed + 7);
+  state.mccmnc     = (state.imsi || '').substring(0, 6);
 
   if (state.locationLat !== null && state.locationLon !== null) {
     state.lat = state.locationLat;
@@ -178,6 +226,26 @@ async function saveConfig() {
   cfg.proxy_user    = state.proxyUser;
   cfg.proxy_pass    = state.proxyPass;
   if (state.scopedApps.length) cfg.scoped_apps = state.scopedApps.join(',');
+  // Persist per-field overrides so values survive app restarts
+  if (overrides.imei)          cfg.override_imei           = overrides.imei;
+  if (overrides.imei2)         cfg.override_imei2          = overrides.imei2;
+  if (overrides.serial)        cfg.override_serial         = overrides.serial;
+  if (overrides.hwSerial)      cfg.override_hw_serial      = overrides.hwSerial;
+  if (overrides.androidId)     cfg.override_android_id     = overrides.androidId;
+  if (overrides.gsfId)         cfg.override_gsf_id         = overrides.gsfId;
+  if (overrides.widevineId)    cfg.override_widevine_id    = overrides.widevineId;
+  if (overrides.mediaDrmId)    cfg.override_media_drm_id   = overrides.mediaDrmId;
+  if (overrides.advertisingId) cfg.override_advertising_id = overrides.advertisingId;
+  if (overrides.bootId)        cfg.override_boot_id        = overrides.bootId;
+  if (overrides.gmailAccount)  cfg.override_gmail          = overrides.gmailAccount;
+  if (overrides.wifiSsid)      cfg.override_wifi_ssid      = overrides.wifiSsid;
+  if (overrides.wifiBssid)     cfg.override_wifi_bssid     = overrides.wifiBssid;
+  if (overrides.imsi)          cfg.override_imsi           = overrides.imsi;
+  if (overrides.iccid)         cfg.override_iccid          = overrides.iccid;
+  if (overrides.phone)         cfg.override_phone          = overrides.phone;
+  if (overrides.wifiMac)       cfg.override_wifi_mac       = overrides.wifiMac;
+  if (overrides.btMac)         cfg.override_bt_mac         = overrides.btMac;
+  if (overrides.ja3Idx != null) cfg.ja3_idx               = String(overrides.ja3Idx);
   return await writeConfig(cfg);
 }
 
@@ -366,13 +434,28 @@ function setProfileCard(fp, name) {
 }
 
 function renderIdsTab() {
-  renderField('f-imei',       state.imei,       validateIMEI(state.imei));
-  renderField('f-serial',     state.serial,     validateSerial(state.serial));
-  renderField('f-android-id', state.androidId,  validateAndroidId(state.androidId));
-  renderField('f-gsf-id',     state.gsfId,      validateGsfId(state.gsfId));
-  renderField('f-widevine',   state.widevineId, validateWidevineId(state.widevineId));
-  renderField('f-boot-id',    state.bootId,     validateBootId(state.bootId));
+  renderField('f-imei',       state.imei,        validateIMEI(state.imei));
+  renderField('f-imei2',      state.imei2,       validateIMEI(state.imei2));
+  renderField('f-serial',     state.serial,      validateSerial(state.serial));
+  renderField('f-hw-serial',  state.hwSerial,    validateSerial(state.hwSerial));
+  renderField('f-android-id', state.androidId,   validateAndroidId(state.androidId));
+  renderField('f-ssaid',      state.ssaid,       validateAndroidId(state.ssaid));
+  renderField('f-gsf-id',     state.gsfId,       validateGsfId(state.gsfId));
+  renderField('f-widevine',   state.widevineId,  validateWidevineId(state.widevineId));
+  renderField('f-media-drm',  state.mediaDrmId,  validateBootId(state.mediaDrmId));
+  renderField('f-adv-id',     state.advertisingId, validateBootId(state.advertisingId));
+  renderField('f-boot-id',    state.bootId,      validateBootId(state.bootId));
+  renderField('f-gmail',      state.gmailAccount, /^[a-z][a-z0-9.]+@gmail\.com$/.test(state.gmailAccount));
+  renderField('f-gpu',        state.gpuRenderer, !!state.gpuRenderer);
   renderField('f-fingerprint', getProfileByName(state.profile).fingerprint || '', true);
+  // JA3/TLS — dual-line display (name + hash)
+  const ja3 = state.ja3 || JA3_PRESETS[0];
+  const ja3El   = document.getElementById('f-ja3');
+  const ja3Name = document.getElementById('f-ja3-name');
+  if (ja3El)   ja3El.textContent   = ja3.hash;
+  if (ja3Name) ja3Name.textContent = ja3.name;
+  const ja3Badge = document.getElementById('f-ja3-badge');
+  if (ja3Badge) { ja3Badge.className = 'valid-badge ok'; ja3Badge.textContent = 'VALID'; }
 }
 
 // ─── Network page ─────────────────────────────────────────────────────
@@ -383,13 +466,17 @@ function renderNetwork() {
 }
 
 function renderTelephonyTab() {
-  renderField('f-imsi',     state.imsi,    validateIMSI(state.imsi));
-  renderField('f-iccid',    state.iccid,   validateICCID(state.iccid));
-  renderField('f-phone',    state.phone,   validatePhone(state.phone));
-  renderField('f-wifi-mac', state.wifiMac, validateMAC(state.wifiMac));
-  renderField('f-bt-mac',   state.btMac,   validateMAC(state.btMac));
-  renderField('f-carrier',  state.carrier, !!state.carrier);
-  renderField('f-sim-cc',   state.simCountry, state.simCountry === 'US');
+  renderField('f-imsi',       state.imsi,       validateIMSI(state.imsi));
+  renderField('f-iccid',      state.iccid,      validateICCID(state.iccid));
+  renderField('f-phone',      state.phone,      validatePhone(state.phone));
+  renderField('f-carrier',    state.carrier,    !!state.carrier);
+  renderField('f-sim-cc',     state.simCountry, state.simCountry === 'US');
+  renderField('f-sim-op',     state.simOperator, !!state.simOperator);
+  renderField('f-mccmnc',     state.mccmnc,     /^\d{5,6}$/.test(state.mccmnc));
+  renderField('f-wifi-mac',   state.wifiMac,    validateMAC(state.wifiMac));
+  renderField('f-bt-mac',     state.btMac,      validateMAC(state.btMac));
+  renderField('f-wifi-ssid',  state.wifiSsid,   !!state.wifiSsid);
+  renderField('f-wifi-bssid', state.wifiBssid,  validateMAC(state.wifiBssid));
 
   // Network type toggle
   const lteToggle = document.getElementById('toggle-lte');
@@ -507,6 +594,11 @@ window.randomProfile = function() {
   selectProfile(n);
 };
 
+window.applyDevice = async function() {
+  if (await saveConfig()) toast('Device profile saved');
+  else toast('Save failed — check permissions', 'err');
+};
+
 window.randomizeAllIds = function() {
   rotateSeed();
   renderIdsTab();
@@ -524,17 +616,25 @@ window.randomizeField = function(field) {
   const fp = getProfileByName(state.profile);
   const brand = (fp.brand || 'xiaomi').toLowerCase();
   const actions = {
-    'f-imei':       () => { overrides.imei       = generateIMEI(state.profile, newSubSeed); state.imei = overrides.imei; },
-    'f-serial':     () => { overrides.serial     = generateSerial(brand, newSubSeed, fp.securityPatch||''); state.serial = overrides.serial; },
-    'f-android-id': () => { overrides.androidId  = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; },
-    'f-gsf-id':     () => { overrides.gsfId      = generateGsfId(newSubSeed); state.gsfId = overrides.gsfId; },
-    'f-widevine':   () => { overrides.widevineId = generateWidevineId(newSubSeed); state.widevineId = overrides.widevineId; },
-    'f-boot-id':    () => { overrides.bootId     = generateBootId(newSubSeed); state.bootId = overrides.bootId; },
-    'f-imsi':       () => { overrides.imsi       = generateIMSI(state.profile, newSubSeed); state.imsi = overrides.imsi; },
-    'f-iccid':      () => { overrides.iccid      = generateICCID(state.profile, newSubSeed); state.iccid = overrides.iccid; },
-    'f-phone':      () => { overrides.phone      = generatePhoneNumber(state.profile, newSubSeed); state.phone = overrides.phone; },
-    'f-wifi-mac':   () => { overrides.wifiMac    = generateMAC(brand, newSubSeed); state.wifiMac = overrides.wifiMac; },
-    'f-bt-mac':     () => { overrides.btMac      = generateMAC(brand, newSubSeed+1); state.btMac = overrides.btMac; },
+    'f-imei':       () => { overrides.imei          = generateIMEI(state.profile, newSubSeed); state.imei = overrides.imei; },
+    'f-imei2':      () => { overrides.imei2         = generateIMEI(state.profile, newSubSeed); state.imei2 = overrides.imei2; },
+    'f-serial':     () => { overrides.serial        = generateSerial(brand, newSubSeed, fp.securityPatch||''); state.serial = overrides.serial; },
+    'f-hw-serial':  () => { overrides.hwSerial      = generateSerial(brand, newSubSeed+1, fp.securityPatch||''); state.hwSerial = overrides.hwSerial; },
+    'f-android-id': () => { overrides.androidId     = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; state.ssaid = state.androidId; },
+    'f-gsf-id':     () => { overrides.gsfId         = generateGsfId(newSubSeed); state.gsfId = overrides.gsfId; },
+    'f-widevine':   () => { overrides.widevineId    = generateWidevineId(newSubSeed); state.widevineId = overrides.widevineId; },
+    'f-media-drm':  () => { overrides.mediaDrmId    = generateUUID(newSubSeed); state.mediaDrmId = overrides.mediaDrmId; },
+    'f-adv-id':     () => { overrides.advertisingId = generateUUID(newSubSeed+1); state.advertisingId = overrides.advertisingId; },
+    'f-boot-id':    () => { overrides.bootId        = generateBootId(newSubSeed); state.bootId = overrides.bootId; },
+    'f-gmail':      () => { overrides.gmailAccount  = generateGmail(newSubSeed); state.gmailAccount = overrides.gmailAccount; },
+    'f-ja3':        () => { overrides.ja3Idx = Math.floor(Math.random() * JA3_PRESETS.length); state.ja3 = JA3_PRESETS[overrides.ja3Idx]; },
+    'f-imsi':       () => { overrides.imsi          = generateIMSI(state.profile, newSubSeed); state.imsi = overrides.imsi; state.mccmnc = state.imsi.substring(0,6); state.simOperator = state.carrier; },
+    'f-iccid':      () => { overrides.iccid         = generateICCID(state.profile, newSubSeed); state.iccid = overrides.iccid; },
+    'f-phone':      () => { overrides.phone         = generatePhoneNumber(state.profile, newSubSeed); state.phone = overrides.phone; },
+    'f-wifi-mac':   () => { overrides.wifiMac       = generateMAC(brand, newSubSeed); state.wifiMac = overrides.wifiMac; },
+    'f-bt-mac':     () => { overrides.btMac         = generateMAC(brand, newSubSeed+1); state.btMac = overrides.btMac; },
+    'f-wifi-ssid':  () => { overrides.wifiSsid      = generateWifiSsid(newSubSeed); state.wifiSsid = overrides.wifiSsid; },
+    'f-wifi-bssid': () => { overrides.wifiBssid     = generateMAC('default', newSubSeed+7); state.wifiBssid = overrides.wifiBssid; },
   };
   if (actions[field]) {
     actions[field]();
@@ -658,11 +758,15 @@ window.wipeApp = async function(pkg) {
 
 window.loadInstalledApps = async function() {
   const dd = document.getElementById('app-dropdown');
-  if (!dd || dd.options.length > 1) return;
-  dd.innerHTML = '<option value="">Loading apps...</option>';
+  if (!dd) return;
+  dd.innerHTML = '<option value="">Loading apps…</option>';
   const {stdout} = await ksu_exec('pm list packages 2>/dev/null | sed "s/package://" | grep -v "^$" | sort | head -200');
   const pkgs = stdout ? stdout.split('\n').filter(Boolean) : [];
-  dd.innerHTML = '<option value="">Select app to add...</option>' +
+  if (!pkgs.length) {
+    dd.innerHTML = '<option value="">No apps found (KernelSU required)</option>';
+    return;
+  }
+  dd.innerHTML = '<option value="">Select app to add…</option>' +
     pkgs.map(p => `<option value="${escAttr(p)}">${escHtml(p)}</option>`).join('');
 };
 
