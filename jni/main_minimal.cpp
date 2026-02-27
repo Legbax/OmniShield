@@ -8,7 +8,7 @@
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "OmniMINIMAL", __VA_ARGS__)
 
-class MinimalModule : public zygisk::Module {
+class MinimalModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
         LOGD("MINIMAL: onLoad ejecutado — modulo cargado OK");

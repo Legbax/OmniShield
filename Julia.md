@@ -1071,3 +1071,62 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   `Api::registerModule` es siempre vtable[0] — crítico para el dispatch correcto.
   Si el módulo minimal con la nueva firma CARGA sin crash → PR62 es el fix definitivo.
   Si aún crashea → investigar si Zygisk Next en este dispositivo espera otro ABI.
+  → RESULTADO: aún crasheaba. Causa real: Api tenía virtual functions; el oficial usa api_table*.
+
+---
+
+## PR63 — FIX DEFINITIVO: zygisk.hpp oficial v4 (api_table* + function pointers planos)
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR63 — fix definitivo API contract)
+**Resumen de cambios:** v12.9.41 → v12.9.42
+
+- **Causa raíz de TODOS los crashes desde PR54:** nuestro `Api` declaraba virtual functions.
+  El `Api` real de Zygisk Next NO usa vtable — usa `api_table*` con function pointers planos.
+  Al llamar `api->registerModule()` con vtable dispatch → pc=0x0 SIGSEGV inmediato.
+  El crash `pc=0x0` que confirmó addr2line ocurría en `zygisk_module_entry` al primer
+  intento de despacho virtual sobre la estructura opaca que Zygisk nos pasaba.
+
+- **CAMBIO ÚNICO — `jni/include/zygisk.hpp`** reemplazado por el header oficial v4:
+  `https://github.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp`
+  Cambios clave vs todas nuestras versiones previas:
+  · `ModuleBase` en lugar de `Module` (renombre de clase)
+  · `Api` es una struct CON UN SOLO MIEMBRO `api_table *tbl` — SIN virtual functions
+  · Todos los métodos de `Api` son inline y delegan a `tbl->fnPtr(...)` (function pointers)
+  · `api_table` es una struct de function pointers plana: `{void *impl; bool (*registerModule)(...); void (*hookJniNativeMethods)(...); ...}`
+  · `REGISTER_ZYGISK_MODULE(clazz)` define `zygisk_module_entry(api_table*, JNIEnv*)`
+    que llama `entry_impl<clazz>(table, env)`:
+    — `static Api api; api.tbl = table;` (cero guard — Api es trivialmente constructible)
+    — `static T module;` (guard OK — se inicializa POST-FORK en proceso hijo)
+    — `static module_abi abi(m);` (guard OK — POST-FORK)
+    — `table->registerModule(table, &abi)` vía function pointer — NUNCA falla con pc=0x0
+    — `m->onLoad(&api, env)` vía vtable del módulo (correcto — es nuestra clase)
+  · `AppSpecializeArgs`: campos opcionales son `*const` punteros, no referencias
+    (fds_to_ignore, is_child_zygote, is_top_app, pkg_data_info_list, etc.)
+  · `ServerSpecializeArgs`: simplificado — solo 6 campos requeridos
+  · `exemptFd(int fd)` añadido
+  · `pltHookRegister` usa `(dev_t, ino_t, ...)` en lugar de `(const char* path, ...)`
+  · `StateFlag` enum añadido (PROCESS_GRANTED_ROOT, PROCESS_ON_DENYLIST)
+
+- **`jni/main.cpp`**: solo cambio `zygisk::Module` → `zygisk::ModuleBase` (línea 2308).
+  Ningún otro cambio necesario: no usamos pltHookRegister, no accedemos a campos opcionales
+  de AppSpecializeArgs directamente, hookJniNativeMethods compatible.
+
+- **`jni/main_minimal.cpp`**: `zygisk::Module` → `zygisk::ModuleBase`.
+
+- **Artifact reconstruido `libs/arm64-v8a/omnishield-minimal-pr61.so`** (67 KB):
+  · `zygisk_module_entry` exportado tipo T — confirmed ✅
+  · Guard variable para `entry_impl::abi` presente pero SAFE (POST-FORK) ✅
+  · Disasm: `ldr x8,[x0,#0x8]; blr x8` → llama `api_table->registerModule` vía function ptr ✅
+  · `DT_NEEDED`: `libc++.so` (para __cxa_guard_*) + `liblog.so` ✅
+
+- **Nota para el siguiente agente:**
+  El zygisk.hpp oficial es inmutable ("DO NOT MODIFY ANY CODE IN THIS HEADER").
+  Para añadir campos en AppSpecializeArgs (si una nueva versión de Android los tiene),
+  hay que actualizar el header oficial descargando la versión más reciente del repo.
+  Los guards en `entry_impl` (para `module`, `abi`) son SEGUROS porque `entry_impl`
+  solo se llama desde `zygisk_module_entry`, que Zygisk invoca en el proceso HIJO post-fork.
+  main.cpp no usa pltHookRegister — si se necesita en el futuro, la nueva firma es
+  `api->pltHookRegister(dev_t dev, ino_t inode, symbol, newFunc, oldFunc)`.
+  Verificación post-PR63:
+  `nm --demangle arm64-v8a.so | grep "zygisk_module_entry"` → tipo T (global).
+  `strings arm64-v8a.so | grep "zygisk"` → "zygisk_module_entry".

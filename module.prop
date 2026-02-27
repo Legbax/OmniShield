@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.41
-versionCode=12941
+version=v12.9.42
+versionCode=12942
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR62 — Fix entry point: firma (Api*,JNIEnv*)+registerModule para Zygisk Next
+description=Total Invisibility (The Void). Zygisk module. PR63 — FIX DEFINITIVO: zygisk.hpp oficial v4, api_table* function pointers, ModuleBase
