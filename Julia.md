@@ -933,3 +933,48 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   vacío en todos los archivos jni/. Ningún cambio necesario.
 - La verificación `grep -n "DLCLOSE" jni/main.cpp` retorna la línea del comentario
   (esperado). Lo relevante es que la llamada `setOption(DLCLOSE_MODULE_LIBRARY)` no existe.
+
+---
+
+## PR59 — Fix definitivo SIGSEGV: static local maps en omni_engine.hpp causan guard-variable deadlock post-fork
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR59 — Causa raíz confirmada por addr2line)
+**Resumen de cambios:** v12.9.38 → v12.9.39
+
+- **Causa raíz confirmada:** `addr2line` sobre `arm64-v8a.so` en `pc=0xb5b34` apunta a
+  `generatePhoneNumber()::CC` — la guard variable de ese static local map en `0x1589b8`
+  queda en estado "inicializando" durante el fork de zygote. El hijo hereda el mutex en
+  estado bloqueado → SIGSEGV al intentar inicializar la misma variable.
+- **FUNCIÓN 1 — `generatePhoneNumber`:** `static const std::map<std::string,std::string> CC`
+  eliminado. Reemplazado por `std::string cc = "+1";` directo (solo USA NANP, siempre +1).
+- **FUNCIÓN 2 — `generateValidImsi`:** `static const std::map<std::string,std::vector<std::string>> IMSI_POOLS`
+  eliminado. Reemplazado por `static const char* const IMSI_POOL[5]` + `IMSI_POOL_SIZE`.
+  `const char*` es trivialmente construible — sin guard variable.
+- **FUNCIÓN 3 — `generateValidIccid`:** `static const std::map<std::string,std::string> ICCID_PREFIX`
+  eliminado. Reemplazado por `struct IccidEntry` + `static const IccidEntry ICCID_TBL[]`
+  con centinela `{nullptr, nullptr}`. Struct aggregates no usan guard variables.
+- **FUNCIÓN 4 — `getCarrierNameForImsi`:** `static const std::map<std::string,std::string> CARRIER_NAMES`
+  eliminado. Reemplazado por `struct CarrierEntry` + `static const CarrierEntry CARRIERS[]`
+  con centinela `{nullptr, nullptr}`. Loop lineal sobre 5 entradas.
+- **FUNCIÓN 5 — `getTimezoneForProfile`:** `static const std::string US_CITY_TZ[5]`
+  convertido a `static const char* const US_CITY_TZ[5]`. `std::string` tiene constructor
+  no trivial → guard variable. `const char*` es un puntero — trivialmente construible.
+- **`getDeviceProfiles()` verificado:** `readConfig()` NO llama `getDeviceProfiles()`.
+  Las llamadas desde `shouldHide()` y hooks solo ocurren post-fork (después de que el
+  proceso hijo ya existe). Meyer's Singleton seguro en su posición actual.
+
+**Prompt del usuario:** "PR59: Eliminar TODAS las static locals con maps en omni_engine.hpp."
+
+**Nota personal para el siguiente agente:**
+- El patrón de crash: guard variable en estado "inicializando" + fork = el hijo hereda
+  el mutex bloqueado. Cualquier `static local` con tipo no-trivialmente-construible
+  (map, string, vector) dentro de una función que se llama antes del fork es peligroso.
+- `static const char* const` y `static const int` son tipos triviales — NO generan
+  guard variables. Arrays de structs con solo `const char*` y tipos primitivos tampoco.
+- Los statics de namespace (`TACS_BY_BRAND`, `OUIS` en omni_engine.hpp) se inicializan
+  via `.init_array` en tiempo de `dlopen` — antes del fork, pero de forma completa y
+  sin posibilidad de herencia de guard en estado parcial. Son un riesgo diferente
+  (SIGBUS en dlopen context) — no el mismo patrón que los static locals.
+- Verificación post-PR59:
+  `grep -n "static const std::map\|static const auto\|static.*map<" jni/omni_engine.hpp`
+  → debe retornar vacío (cero mapas con static local en funciones).

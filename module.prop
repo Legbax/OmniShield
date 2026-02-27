@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.38
-versionCode=12938
+version=v12.9.39
+versionCode=12939
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR58 — Remover "tombstones" de HIDDEN_TOKENS (crash_dump necesita /data/tombstones/)
+description=Total Invisibility (The Void). Zygisk module. PR59 — Fix definitivo SIGSEGV: static local maps en omni_engine.hpp causan guard-variable deadlock post-fork
