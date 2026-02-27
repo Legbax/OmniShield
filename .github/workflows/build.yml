@@ -41,6 +41,7 @@ jobs:
         cp module.prop dist/
         cp post-fs-data.sh dist/
         cp service.sh dist/
+        cp -r webroot dist/
         cd dist
         zip -r omnishield-${{ steps.version.outputs.VERSION }}-release.zip .
 

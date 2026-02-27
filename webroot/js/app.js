@@ -12,9 +12,9 @@ import {
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
-function ksu_exec(cmd) {
+async function ksu_exec(cmd) {
   try {
-    const r = exec(cmd);
+    const r = await exec(cmd);
     return { errno: r.errno || 0, stdout: (r.stdout || '').trim() };
   } catch(e) {
     return { errno: 1, stdout: '' };
@@ -24,8 +24,8 @@ function ksu_exec(cmd) {
 // ─── Config management ──────────────────────────────────────────────
 const CFG_PATH = '/data/adb/.omni_data/.identity.cfg';
 
-function readConfig() {
-  const { stdout } = ksu_exec(`cat "${CFG_PATH}" 2>/dev/null`);
+async function readConfig() {
+  const { stdout } = await ksu_exec(`cat "${CFG_PATH}" 2>/dev/null`);
   const cfg = {};
   (stdout || '').split('\n').forEach(line => {
     const eq = line.indexOf('=');
@@ -38,11 +38,11 @@ function readConfig() {
   return cfg;
 }
 
-function writeConfig(cfg) {
-  ksu_exec(`mkdir -p /data/adb/.omni_data`);
+async function writeConfig(cfg) {
+  await ksu_exec(`mkdir -p /data/adb/.omni_data`);
   const lines = Object.entries(cfg).map(([k,v]) => `${k}=${v}`).join('\n');
   const b64 = btoa(unescape(encodeURIComponent(lines)));
-  const r = ksu_exec(`echo '${b64}' | base64 -d > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
+  const r = await ksu_exec(`echo '${b64}' | base64 -d > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
   return r.errno === 0;
 }
 
@@ -77,8 +77,8 @@ const state = {
 const overrides = {};
 
 // ─── Bootstrap ──────────────────────────────────────────────────────
-function loadState() {
-  state.cfg = readConfig();
+async function loadState() {
+  state.cfg = await readConfig();
   state.profile      = state.cfg.profile      || 'Redmi 9';
   state.seed         = parseInt(state.cfg.master_seed) || generateRandomSeed();
   state.jitter       = (state.cfg.jitter || 'true') !== 'false';
@@ -97,7 +97,7 @@ function loadState() {
   state.recentProfiles = loadRecentProfiles();
 
   computeAll();
-  loadSystemInfo();
+  await loadSystemInfo();
 }
 
 function computeAll() {
@@ -136,16 +136,16 @@ function computeAll() {
   });
 }
 
-function loadSystemInfo() {
-  const ipRes = ksu_exec("ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1");
-  const ipRes2 = ipRes.stdout || ksu_exec("ip -4 addr show rmnet0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1").stdout || '';
+async function loadSystemInfo() {
+  const ipRes = await ksu_exec("ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1");
+  const ipRes2 = ipRes.stdout || (await ksu_exec("ip -4 addr show rmnet0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1")).stdout || '';
   state.deviceIp = ipRes2 || '–';
-  const modelRes = ksu_exec('getprop ro.product.model');
+  const modelRes = await ksu_exec('getprop ro.product.model');
   state.deviceModel = modelRes.stdout || state.profile;
 }
 
 // ─── Persist helpers ────────────────────────────────────────────────
-function saveConfig() {
+async function saveConfig() {
   const cfg = {
     profile:       state.profile,
     master_seed:   String(state.seed),
@@ -165,7 +165,7 @@ function saveConfig() {
   cfg.proxy_user    = state.proxyUser;
   cfg.proxy_pass    = state.proxyPass;
   if (state.scopedApps.length) cfg.scoped_apps = state.scopedApps.join(',');
-  return writeConfig(cfg);
+  return await writeConfig(cfg);
 }
 
 function generateRandomSeed() {
@@ -497,8 +497,8 @@ window.randomizeAllIds = function() {
   toast('All IDs randomized');
 };
 
-window.applyIds = function() {
-  if (saveConfig()) { toast('Identity changes saved'); }
+window.applyIds = async function() {
+  if (await saveConfig()) { toast('Identity changes saved'); }
   else toast('Save failed — check permissions', 'err');
 };
 
@@ -534,8 +534,8 @@ window.randomizeAllTelephony = function() {
   toast('All telephony IDs randomized');
 };
 
-window.applyTelephony = function() {
-  if (saveConfig()) toast('Network changes saved');
+window.applyTelephony = async function() {
+  if (await saveConfig()) toast('Network changes saved');
   else toast('Save failed', 'err');
 };
 
@@ -558,8 +558,8 @@ window.randomLocation = function() {
   toast(`Location → ${city.name}`);
 };
 
-window.applyLocation = function() {
-  if (saveConfig()) toast('Location changes saved');
+window.applyLocation = async function() {
+  if (await saveConfig()) toast('Location changes saved');
   else toast('Save failed', 'err');
 };
 
@@ -588,7 +588,7 @@ function initMap() {
 }
 
 // ─── Event handlers: Advanced/Proxy ───────────────────────────────────
-window.applyProxy = function() {
+window.applyProxy = async function() {
   state.proxyEnabled = document.getElementById('proxy-enabled')?.checked || false;
   state.proxyType = document.getElementById('proxy-type')?.value || 'http';
   state.proxyHost = document.getElementById('proxy-host')?.value || '';
@@ -597,12 +597,12 @@ window.applyProxy = function() {
   state.proxyPass = document.getElementById('proxy-pass')?.value || '';
   if (state.proxyEnabled && !state.proxyHost) { toast('Enter a proxy host', 'warn'); return; }
   if (state.proxyEnabled && !state.proxyPort) { toast('Enter a proxy port', 'warn'); return; }
-  if (saveConfig()) toast('Proxy settings saved');
+  if (await saveConfig()) toast('Proxy settings saved');
   else toast('Save failed', 'err');
 };
 
 // ─── App scope management ──────────────────────────────────────────────
-window.addScopedApp = function() {
+window.addScopedApp = async function() {
   const input = document.getElementById('app-search-input');
   const val = input?.value?.trim() || '';
   const dropdown = document.getElementById('app-dropdown');
@@ -614,21 +614,21 @@ window.addScopedApp = function() {
   if (input) input.value = '';
   if (dropdown) dropdown.value = '';
   renderScopedApps();
-  saveConfig();
+  await saveConfig();
   toast(`Added ${pkg} to scope`);
 };
 
-window.removeScopedApp = function(pkg) {
+window.removeScopedApp = async function(pkg) {
   state.scopedApps = state.scopedApps.filter(p => p !== pkg);
   renderScopedApps();
-  saveConfig();
+  await saveConfig();
 };
 
 window.forcestopApp = async function(pkg) {
   const ok = await showDialog('Force Stop', `Force stop <b>${escHtml(pkg)}</b>?<br><span class="text-sm">The app will close immediately.</span>`,
     [{label:'Cancel',cls:'btn-secondary',value:false},{label:'Force Stop',cls:'btn-warning',value:true}]);
   if (!ok) return;
-  const r = ksu_exec(`am force-stop ${pkg}`);
+  const r = await ksu_exec(`am force-stop ${pkg}`);
   toast(r.errno === 0 ? `${pkg} stopped` : 'Force stop failed', r.errno === 0 ? 'ok' : 'err');
 };
 
@@ -636,15 +636,15 @@ window.wipeApp = async function(pkg) {
   const ok = await showDialog('Wipe Data', `<span style="color:var(--error)">Permanently wipe ALL data</span> for <b>${escHtml(pkg)}</b>?<br><span class="text-sm">This cannot be undone.</span>`,
     [{label:'Cancel',cls:'btn-secondary',value:false},{label:'Wipe Data',cls:'btn-danger',value:true}]);
   if (!ok) return;
-  const r = ksu_exec(`pm clear ${pkg}`);
+  const r = await ksu_exec(`pm clear ${pkg}`);
   toast(r.errno === 0 ? `${pkg} wiped` : 'Wipe failed', r.errno === 0 ? 'ok' : 'err');
 };
 
-window.loadInstalledApps = function() {
+window.loadInstalledApps = async function() {
   const dd = document.getElementById('app-dropdown');
   if (!dd || dd.options.length > 1) return;
   dd.innerHTML = '<option value="">Loading apps...</option>';
-  const {stdout} = ksu_exec('pm list packages 2>/dev/null | sed "s/package://" | grep -v "^$" | sort | head -200');
+  const {stdout} = await ksu_exec('pm list packages 2>/dev/null | sed "s/package://" | grep -v "^$" | sort | head -200');
   const pkgs = stdout ? stdout.split('\n').filter(Boolean) : [];
   dd.innerHTML = '<option value="">Select app to add...</option>' +
     pkgs.map(p => `<option value="${escAttr(p)}">${escHtml(p)}</option>`).join('');
@@ -678,13 +678,13 @@ window.destroyIdentity = async function() {
 
   // 1. Force stop all scoped apps
   for (const pkg of state.scopedApps) {
-    ksu_exec(`am force-stop ${pkg}`);
+    await ksu_exec(`am force-stop ${pkg}`);
     await sleep(200);
   }
 
   // 2. Wipe data for all scoped apps
   for (const pkg of state.scopedApps) {
-    ksu_exec(`pm clear ${pkg}`);
+    await ksu_exec(`pm clear ${pkg}`);
     await sleep(200);
   }
 
@@ -717,8 +717,8 @@ window.destroyIdentity = async function() {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─── Refresh status ────────────────────────────────────────────────────
-window.refreshStatus = function() {
-  loadSystemInfo();
+window.refreshStatus = async function() {
+  await loadSystemInfo();
   computeAll();
   renderStatus();
   toast('Status refreshed', 'info');
@@ -729,8 +729,8 @@ function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&
 function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 
 // ─── Init ─────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-  loadState();
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadState();
 
   // Navigation
   document.querySelectorAll('.nav-item').forEach(btn => {
