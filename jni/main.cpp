@@ -2860,7 +2860,7 @@ public:
 
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
-        if (g_api) g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+        // PR58: DLCLOSE removido — causa pc=0x0 en forkSystemServer.
     }
     void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {}
 private:

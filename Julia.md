@@ -925,3 +925,11 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   over-blocking accidental.
 - Verificación: `grep -n "tombstones" jni/main.cpp` debe retornar solo comentarios o vacío.
   La línea con `HIDDEN_TOKENS` ahora queda: `"android_cache_data",` seguido de `nullptr`.
+- **PR58 completado en segundo commit:** `preServerSpecialize` vaciado — eliminado
+  `g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY)`. Esta llamada descargaba la librería
+  del proceso `system_server` (forkSystemServer), causando `pc=0x0` al regresar a código
+  ya unmapeado. Reemplazado por comentario explicativo.
+- `G_DEVICE_PROFILES` ya estaba convertido a `getDeviceProfiles()` desde PR53 — confirmado
+  vacío en todos los archivos jni/. Ningún cambio necesario.
+- La verificación `grep -n "DLCLOSE" jni/main.cpp` retorna la línea del comentario
+  (esperado). Lo relevante es que la llamada `setOption(DLCLOSE_MODULE_LIBRARY)` no existe.
