@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.28
-versionCode=12928
+version=v12.9.29
+versionCode=12929
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR48 — Anti-crash: null guards for all 23 libc/syscall Dobby hooks
+description=Total Invisibility (The Void). Zygisk module. PR49 — Crash fix: DobbySymbolResolver for all 9 direct-ptr hooks (VDSO/PLT)

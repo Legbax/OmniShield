@@ -63,6 +63,15 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 26 de febrero de 2026, Jules (PR49 — Crash fix: DobbySymbolResolver para hooks directos)
+**Resumen de cambios:** v12.9.29 — Reemplazo de 9 llamadas `DobbyHook((void*)funcName, ...)` por patrón `DobbySymbolResolver`.
+- **Causa raíz identificada:** `DobbyHook((void*)clock_gettime, ...)` y similares pasan la dirección del **PLT stub** en libomnishield.so, NO la dirección real en libc.so. En arm64, `clock_gettime` es una función VDSO (Virtual Dynamic Shared Object) — memoria read-only que no se puede mprotect → **SIGSEGV** inmediato. Explica "zygote (64): Skipped (0)" en el dashboard Zygisk Next.
+- **9 hooks convertidos:** `uname`, `clock_gettime`, `access`, `getifaddrs`, `stat`, `lstat`, `fopen`, `readlinkat`, `dup` → todos usan `DobbySymbolResolver(nullptr, "name")` + `if (sym) DobbyHook(sym, ...)`.
+- **Sinergia con PR48:** Si DobbySymbolResolver retorna null (símbolo no encontrado), `orig_*` queda null y el null guard de PR48 cubre el fallback seguro.
+- **Por qué zygote32 no crasheaba:** Solo compilamos `arm64-v8a.so`. zygote32 nunca carga el módulo.
+**Prompt del usuario:** "Still crashing" + screenshots mostrando "Stop by zygote crashed" y "zygote (64): Skipped (0)".
+**Nota personal para el siguiente agente:** NUNCA usar `DobbyHook((void*)libc_function, ...)` con punteros de función de libc. Siempre `DobbySymbolResolver(nullptr, "symbol_name")`. Los punteros directos = PLT stub del módulo propio = (1) solo intercepta llamadas desde el módulo, no desde la app; (2) puede ser VDSO read-only → crash en Dobby al intentar mprotect+write.
+
 **Fecha y agente:** 26 de febrero de 2026, Jules (PR48 — Anti-crash: null guards libc/syscall completo)
 **Resumen de cambios:** v12.9.28 — 23 null guards para todos los hooks Dobby de libc/syscall.
 - **23 hooks blindados:** `my_stat`, `my_lstat`, `my_fstatat`, `my_fopen`, `my_clock_gettime`, `my_uname`, `my_ioctl`, `my_fcntl`, `my_access`, `my_getifaddrs`, `my_readlinkat`, `my_system_property_get`, `my_open`, `my_openat` (crítico — detectado por revisión externa), `my_read`, `my_lseek`, `my_pread`, `my_dup`, `my_dup2`, `my_dup3`, `my_sysinfo`, `my_readdir`, `my_getauxval`.

@@ -2368,16 +2368,34 @@ public:
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
-        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
-        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
-        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
-        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
-        DobbyHook((void*)stat, (void*)my_stat, (void**)&orig_stat);
-        DobbyHook((void*)lstat, (void*)my_lstat, (void**)&orig_lstat);
+        // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
+        // y de funciones VDSO (clock_gettime en arm64 es VDSO read-only → SIGSEGV).
+        void* uname_sym = DobbySymbolResolver(nullptr, "uname");
+        if (uname_sym) DobbyHook(uname_sym, (void*)my_uname, (void**)&orig_uname);
+
+        void* clock_gettime_sym = DobbySymbolResolver(nullptr, "clock_gettime");
+        if (clock_gettime_sym) DobbyHook(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+
+        void* access_sym = DobbySymbolResolver(nullptr, "access");
+        if (access_sym) DobbyHook(access_sym, (void*)my_access, (void**)&orig_access);
+
+        void* getifaddrs_sym = DobbySymbolResolver(nullptr, "getifaddrs");
+        if (getifaddrs_sym) DobbyHook(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+
+        void* stat_sym = DobbySymbolResolver(nullptr, "stat");
+        if (stat_sym) DobbyHook(stat_sym, (void*)my_stat, (void**)&orig_stat);
+
+        void* lstat_sym = DobbySymbolResolver(nullptr, "lstat");
+        if (lstat_sym) DobbyHook(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
+
         void* fstatat_func = DobbySymbolResolver(nullptr, "fstatat");
         if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
-        DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
-        DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
+
+        void* fopen_sym = DobbySymbolResolver(nullptr, "fopen");
+        if (fopen_sym) DobbyHook(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
+
+        void* readlinkat_sym = DobbySymbolResolver(nullptr, "readlinkat");
+        if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
         void* sysinfo_func = DobbySymbolResolver(nullptr, "sysinfo");
         if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
@@ -2389,7 +2407,8 @@ public:
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
-        DobbyHook((void*)dup, (void*)my_dup, (void**)&orig_dup);
+        void* dup_sym = DobbySymbolResolver(nullptr, "dup");
+        if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
         void* dup2_func = DobbySymbolResolver(nullptr, "dup2");
         if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
         void* dup3_func = DobbySymbolResolver(nullptr, "dup3");

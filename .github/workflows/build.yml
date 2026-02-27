@@ -38,10 +38,10 @@ jobs:
         cp post-fs-data.sh dist/
         cp service.sh dist/
         cd dist
-        zip -r omnishield-v12.9.28-release.zip .
+        zip -r omnishield-v12.9.29-release.zip .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: omnishield-v12.9.28-release
-        path: dist/omnishield-v12.9.28-release.zip
+        name: omnishield-v12.9.29-release
+        path: dist/omnishield-v12.9.29-release.zip
