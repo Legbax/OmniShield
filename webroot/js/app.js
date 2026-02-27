@@ -11,18 +11,23 @@ import {
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
-// Uses dynamic import so the module loads even outside KernelSU WebView
+// Uses dynamic import so the module loads even outside KernelSU WebView.
+// 3 s timeout guards against KernelSU Next on Android 11 taking too long
+// to resolve the native import (seen in some ROM builds).
 let _ksuExecFn = null;
 async function ksu_exec(cmd) {
   try {
     if (!_ksuExecFn) {
-      const mod = await import('kernelsu');
+      const mod = await Promise.race([
+        import('kernelsu'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('ksu timeout')), 3000))
+      ]);
       _ksuExecFn = mod.exec;
     }
     const r = await _ksuExecFn(cmd);
     return { errno: r.errno || 0, stdout: (r.stdout || '').trim() };
   } catch(e) {
-    // Not in KernelSU environment — graceful degradation
+    // Not in KernelSU environment or timed out — graceful degradation
     return { errno: 1, stdout: '' };
   }
 }
@@ -741,14 +746,26 @@ function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&
 
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadState();
-
-  // Hide loading screen once state is loaded
-  const loader = document.getElementById('loading-screen');
-  if (loader) {
-    loader.classList.add('hidden');
-    setTimeout(() => loader.remove(), 600);
+  // loadState() is wrapped in try/finally so the loading screen is ALWAYS
+  // removed even if ksu_exec times out, throws, or the config is missing.
+  // Without this guarantee the #loading-screen stays on top and blocks every
+  // click / touch event on the underlying UI.
+  try {
+    await loadState();
+  } catch(e) {
+    console.error('[OmniShield] init error:', e);
+    // State defaults are already set at declaration time, so computeAll()
+    // below will still produce valid generated values.
+  } finally {
+    const loader = document.getElementById('loading-screen');
+    if (loader) {
+      loader.classList.add('hidden');
+      setTimeout(() => loader.remove(), 600);
+    }
   }
+
+  // ── Event listeners are registered AFTER the finally block so they are
+  //    always attached regardless of whether loadState() succeeded. ──────
 
   // Navigation
   document.querySelectorAll('.nav-item').forEach(btn => {

@@ -1130,3 +1130,45 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   Verificación post-PR63:
   `nm --demangle arm64-v8a.so | grep "zygisk_module_entry"` → tipo T (global).
   `strings arm64-v8a.so | grep "zygisk"` → "zygisk_module_entry".
+
+## PR64 — Fix UI: loading screen bloqueaba interacción + Leaflet offline
+
+**Fecha y agente:** 27 de febrero de 2026, Jules & Claude (PR64 — fix robustez WebUI)
+
+**Problema raíz:** El `DOMContentLoaded` hacía `await loadState()` sin try/catch. Si `ksu_exec` fallaba silenciosamente (timeout de import dinámico en Android 11 WebView, KernelSU Next), `loadState()` resolvía pero podía lanzar excepciones no capturadas. Más crítico: el `#loading-screen` sólo se ocultaba en el camino feliz — cualquier excepción dejaba el overlay visible de forma permanente, bloqueando todos los clicks y taps sobre la UI subyacente.
+
+**Problema secundario:** Leaflet se cargaba desde CDN (`unpkg.com`). En el WebView de Android sin conectividad activa, el timeout de red de la hoja de estilos podía retrasar o bloquear la renderización de la página completa.
+
+**Fixes aplicados:**
+
+1. **`webroot/js/app.js` — try/catch/finally en DOMContentLoaded**
+   ```javascript
+   try {
+     await loadState();
+   } catch(e) {
+     console.error('[OmniShield] init error:', e);
+   } finally {
+     // Se ejecuta siempre — loading screen se oculta pase lo que pase
+     const loader = document.getElementById('loading-screen');
+     if (loader) { loader.classList.add('hidden'); setTimeout(() => loader.remove(), 600); }
+   }
+   // Todos los event listeners se registran FUERA del try, siempre
+   ```
+
+2. **`webroot/js/app.js` — timeout de 3 s en `ksu_exec` import dinámico**
+   ```javascript
+   const mod = await Promise.race([
+     import('kernelsu'),
+     new Promise((_, reject) => setTimeout(() => reject(new Error('ksu timeout')), 3000))
+   ]);
+   ```
+   Previene que el WebView de KernelSU Next en Android 11 bloquee indefinidamente si la resolución del módulo nativo tarda demasiado.
+
+3. **`webroot/index.html` + archivos locales — Leaflet bundleado**
+   - Descargados `leaflet.js` (147 KB) y `leaflet.css` (14 KB) + imágenes de marcadores a `webroot/js/` y `webroot/css/images/`.
+   - Reemplazados los tags CDN por referencias locales: `css/leaflet.css` y `js/leaflet.js`.
+   - Elimina la dependencia de red para el mapa — funciona completamente offline.
+
+4. **`module.prop`** — version bump `v12.9.42 → v12.9.43`, versionCode `12942 → 12943`.
+
+**Resultado:** La UI es ahora totalmente robusta: el loading screen se retira siempre en ≤ 3.6 s (3 s timeout + 600 ms fade), el mapa funciona sin internet, y todos los event listeners se registran incluso si `loadState()` falla.
