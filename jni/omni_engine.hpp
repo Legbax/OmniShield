@@ -87,8 +87,8 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
     std::string brand = "default";
     bool isQualcomm = false;
 
-    auto it = G_DEVICE_PROFILES.find(profileName);
-    if (it != G_DEVICE_PROFILES.end()) {
+    auto it = getDeviceProfiles().find(profileName);
+    if (it != getDeviceProfiles().end()) {
         brand = toLower(it->second.brand);
         isQualcomm = (toLower(std::string(it->second.eglDriver)) == "adreno");
     }
@@ -365,8 +365,8 @@ inline std::string getCarrierNameForImsi(const std::string& profileName, long se
 // Afectados: Galaxy A52 (atoll), A72 (atoll), S20 FE (kona), A52s (sm7325)
 // Samsung Exynos siguen con "Samsung RIL v3.0"
 inline std::string getRilVersionForProfile(const std::string& profileName) {
-    auto it = G_DEVICE_PROFILES.find(profileName);
-    if (it != G_DEVICE_PROFILES.end()) {
+    auto it = getDeviceProfiles().find(profileName);
+    if (it != getDeviceProfiles().end()) {
         std::string plat = toLower(std::string(it->second.boardPlatform));
         std::string brand = toLower(std::string(it->second.brand));
         // MediaTek — cualquier marca

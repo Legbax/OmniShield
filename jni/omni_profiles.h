@@ -73,7 +73,11 @@ struct DeviceFingerprint {
     bool hasFingerprintWakeupSensor;
 };
 
-static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
+inline const std::map<std::string, DeviceFingerprint>& getDeviceProfiles() {
+    // PR53: Meyer's Singleton — inicialización lazy thread-safe (C++11).
+    // Retrasa la construcción del mapa hasta postAppSpecialize (proceso hijo),
+    // evitando ejecución en el contexto frágil de dlopen en zygote64.
+    static const std::map<std::string, DeviceFingerprint> profiles = {
     { "Redmi 9", {
         "Xiaomi", "Redmi", "Redmi 9", "lancelot",
         "lancelot_global", "mt6768", "lancelot", "V12.5.6.0.RJCMIXM",
@@ -714,4 +718,6 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         4.00f, 3.00f, 2.18f, 2.45f,                              // PR44: front physSize + focal + aperture
         false, false, false                                      // PR38+39: sensor presence bools
     } },
-};
+    };
+    return profiles;
+}

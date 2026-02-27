@@ -39,8 +39,8 @@
 #include "omni_engine.hpp"
 
 #define LOG_TAG "AndroidSystem"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGD(...) do { if (g_debugMode) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); } while(0)
+#define LOGE(...) do { if (g_debugMode) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); } while(0)
 
 // Globals
 static std::map<std::string, std::string> g_config;
@@ -49,6 +49,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
+static bool g_debugMode = false;  // PR53: activar con debug_mode=true en .identity.cfg
 
 // PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
 static double g_cachedLat       = 0.0;
@@ -71,7 +72,7 @@ static long   g_seedVersion        = 0;
 static bool   g_sensorHasHeartRate = false;
 static bool   g_sensorHasBarometer = false;
 
-// PR44: Camera2 — globals ópticos cargados desde G_DEVICE_PROFILES en postAppSpecialize
+// PR44: Camera2 — globals ópticos cargados desde getDeviceProfiles() en postAppSpecialize
 // Rear camera (siempre activo)
 static float   g_camPhysicalWidth   = 6.40f;
 static float   g_camPhysicalHeight  = 4.80f;
@@ -245,6 +246,7 @@ void readConfig() {
     if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
     if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
     if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
+    if (g_config.count("debug_mode")) g_debugMode = (g_config["debug_mode"] == "true");
     // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
     // Permite que el módulo invalide caches en el próximo arranque de la app
     if (g_config.count("seed_version")) {
@@ -262,8 +264,8 @@ bool shouldHide(const char* key) {
     if (!key || key[0] == '\0') return false;
     std::string s = toLowerStr(key);
     if (g_currentProfileName == "Redmi 9" && s.find("lancelot") != std::string::npos) return false;
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if (getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
         if (toLowerStr(fp.brand).find("xiaomi") != std::string::npos ||
             toLowerStr(fp.hardware).find("mt") != std::string::npos) {
             if (s.find("mediatek") != std::string::npos) return false;
@@ -278,8 +280,8 @@ bool shouldHide(const char* key) {
 cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     if (!orig_clGetDeviceInfo) return -1;
     cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
-    if (ret == 0 && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if (ret == 0 && getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
         std::string egl = toLowerStr(fp.eglDriver);
 
         // En my_clGetDeviceInfo, añadir constantes y lógica de driver:
@@ -353,8 +355,8 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 
 const char* my_eglQueryString(void* display, int name) {
     if (!orig_eglQueryString) return nullptr;
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if (getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
 
         if (name == EGL_VENDOR) return fp.gpuVendor;
 
@@ -410,8 +412,8 @@ int my_uname(struct utsname *buf) {
         std::string kv = "4.14.186-perf+";
         if (g_currentProfileName == "Redmi 9") {
              kv = "4.14.186-perf+";
-        } else if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            const auto& kfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        } else if (getDeviceProfiles().count(g_currentProfileName)) {
+            const auto& kfp = getDeviceProfiles().at(g_currentProfileName);
             std::string plat = toLowerStr(kfp.boardPlatform);
             std::string brd  = toLowerStr(kfp.brand);
 
@@ -715,8 +717,8 @@ int my_system_property_get(const char *key, char *value) {
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
     int ret = orig_system_property_get(key, value);
 
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if (getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
         std::string k = key;
         std::string dynamic_buffer; // Use local buffer instead of static
 
@@ -1034,9 +1036,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
     }
     if (pathname) {
         // Bloquear drivers de GPU contradictorios (Evasión Capa 5)
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
+        if (getDeviceProfiles().count(g_currentProfileName)) {
+            std::string plat = toLowerStr(getDeviceProfiles().at(g_currentProfileName).boardPlatform);
+            std::string brand = toLowerStr(getDeviceProfiles().at(g_currentProfileName).brand);
             bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos ||
                 plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos ||
                 plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos ||
@@ -1044,7 +1046,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos ||
                 plat.find("sm6150") != std::string::npos || plat.find("sm6350") != std::string::npos ||
                 plat.find("sm7325") != std::string::npos);
-            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
+            std::string egl = toLowerStr(getDeviceProfiles().at(g_currentProfileName).eglDriver);
 
             // Adreno → bloquea mali; Mali → bloquea kgsl; PowerVR → bloquea ambos
             if (egl == "powervr") {
@@ -1121,8 +1123,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 
         if (type != NONE) {
             std::string content;
-            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            if (getDeviceProfiles().count(g_currentProfileName)) {
+                const auto& fp = getDeviceProfiles().at(g_currentProfileName);
 
                 if (type == PROC_VERSION) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -1202,8 +1204,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     // Device Tree Blob model. Instagram y Firebase lo leen directamente.
                     // En el Redmi 9 real contiene "Xiaomi Redmi 9 (mt6768)" — expone
                     // fabricante y SoC real aunque todas las properties estén hooked.
-                    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                        const auto& fp2 = G_DEVICE_PROFILES.at(g_currentProfileName);
+                    if (getDeviceProfiles().count(g_currentProfileName)) {
+                        const auto& fp2 = getDeviceProfiles().at(g_currentProfileName);
                         content = std::string(fp2.manufacturer) + " " + std::string(fp2.model) + "\n";
                     } else {
                         content = "Android Device\n";
@@ -1624,9 +1626,9 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     }
     if (pathname) {
         // Bloquear drivers de GPU contradictorios (Evasión Capa 5)
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
+        if (getDeviceProfiles().count(g_currentProfileName)) {
+            std::string plat = toLowerStr(getDeviceProfiles().at(g_currentProfileName).boardPlatform);
+            std::string brand = toLowerStr(getDeviceProfiles().at(g_currentProfileName).brand);
             bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos ||
                 plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos ||
                 plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos ||
@@ -1634,7 +1636,7 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
                 plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos ||
                 plat.find("sm6150") != std::string::npos || plat.find("sm6350") != std::string::npos ||
                 plat.find("sm7325") != std::string::npos);
-            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
+            std::string egl = toLowerStr(getDeviceProfiles().at(g_currentProfileName).eglDriver);
 
             // Adreno → bloquea mali; Mali → bloquea kgsl; PowerVR → bloquea ambos
             if (egl == "powervr") {
@@ -1863,8 +1865,8 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 
 const GLubyte* my_glGetString(GLenum name) {
     if (!orig_glGetString) return nullptr;
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if (getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
         if (name == GL_VENDOR)   return (const GLubyte*)fp.gpuVendor;
         if (name == GL_RENDERER) return (const GLubyte*)fp.gpuRenderer;
         if (name == GL_VERSION)  return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
@@ -1910,8 +1912,8 @@ const GLubyte* my_glGetString(GLenum name) {
 void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
     if (!orig_vkGetPhysicalDeviceProperties) return;
     orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
-    if (pProperties && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if (pProperties && getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
         std::string egl = toLowerStr(fp.eglDriver);
 
         // Sobreescribir con los datos del perfil emulado
@@ -1991,8 +1993,8 @@ struct dirent* my_readdir(DIR *dirp) {
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
+        if (getDeviceProfiles().count(g_currentProfileName)) {
+            std::string plat = toLowerStr(getDeviceProfiles().at(g_currentProfileName).boardPlatform);
             if (plat.find("mt") == std::string::npos) {
                 if (dname.find("mtk") != std::string::npos || dname.find("mt_bat") != std::string::npos) {
                     continue; // Saltar archivos de MediaTek si no emulamos MTK
@@ -2018,8 +2020,8 @@ struct dirent* my_readdir(DIR *dirp) {
 unsigned long my_getauxval(unsigned long type) {
     if (!orig_getauxval) return 0;
     unsigned long val = orig_getauxval(type);
-    if ((type == AT_HWCAP || type == AT_HWCAP2) && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    if ((type == AT_HWCAP || type == AT_HWCAP2) && getDeviceProfiles().count(g_currentProfileName)) {
+        const auto& fp = getDeviceProfiles().at(g_currentProfileName);
         std::string plat = toLowerStr(fp.boardPlatform);
 
         // Si el perfil es Cortex-A53 puro (ARMv8.0) o Exynos 9611, apagamos las flags ARMv8.2+
@@ -2171,7 +2173,7 @@ static bool isFrontCameraMetadata(JNIEnv* env, jobject thiz) {
 // -----------------------------------------------------------------------------
 static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
     if (!orig_nativeReadValues) return nullptr;
-    if (!G_DEVICE_PROFILES.count(g_currentProfileName)) {
+    if (!getDeviceProfiles().count(g_currentProfileName)) {
         return orig_nativeReadValues(env, thiz, tag);
     }
 
@@ -2316,8 +2318,8 @@ public:
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            const auto& sp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        if (getDeviceProfiles().count(g_currentProfileName)) {
+            const auto& sp = getDeviceProfiles().at(g_currentProfileName);
             g_sensorAccelMax      = sp.accelMaxRange;
             g_sensorAccelRes      = sp.accelResolution;
             g_sensorGyroMax       = sp.gyroMaxRange;
@@ -2473,8 +2475,8 @@ public:
                 // PR37: Expandir sync a todos los campos Build.* inicializados por Zygote
                 // Estos campos tienen el valor del hardware FÍSICO hasta que los sobrescribimos aquí.
                 // SetStaticObjectField es indetectable — es idéntico a como Zygote los inicializó.
-                if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                    const auto& bfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+                if (getDeviceProfiles().count(g_currentProfileName)) {
+                    const auto& bfp = getDeviceProfiles().at(g_currentProfileName);
 
                     auto setStr = [&](const char* field, const char* val) {
                         if (!val) return;

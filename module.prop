@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.31
-versionCode=12931
+version=v12.9.32
+versionCode=12932
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR51 — Crash fix: recursión infinita open/openat eliminada, null guard orig_readlinkat
+description=Total Invisibility (The Void). Zygisk module. PR53 — Meyer's Singleton para G_DEVICE_PROFILES, debug_mode flag
