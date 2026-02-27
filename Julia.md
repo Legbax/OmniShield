@@ -63,6 +63,20 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR56 — Zygisk API v3: AppSpecializeArgs/ServerSpecializeArgs + REGISTER_ZYGISK_MODULE)
+**Resumen de cambios:** v12.9.36 — Actualización completa de la API Zygisk de v2 a v3. Crash persistía post-PR54b (offset 0xb5d8c→0xb5b34). ADB no disponible en el entorno de CI — no se pudo ejecutar addr2line. Se procede con el fix estructural.
+- **TAREA 1 (diagnóstico):** ADB no disponible en este entorno. No se pudo extraer `arm64-v8a.so` del dispositivo. Se necesita ejecutar `llvm-addr2line -e arm64-v8a.so -f -C 0xb5b34` manualmente desde un entorno con acceso al dispositivo.
+- **zygisk.hpp reescrito completo (API v3):** `ZYGISK_API_VERSION 2→3`. Eliminado `registerModule()` de la vtable de `Api` (era vtable[0] en v2 → ahora vtable[0] es `hookJniNativeMethods`). Añadidos structs `AppSpecializeArgs` y `ServerSpecializeArgs` con campos tipados. `Module::preAppSpecialize/postAppSpecialize` ahora reciben `AppSpecializeArgs*` / `const AppSpecializeArgs*`. `Module::preServerSpecialize/postServerSpecialize` reciben `ServerSpecializeArgs*` / `const ServerSpecializeArgs*`. Destructor virtual explícito eliminado (confirmado PR54). Macro `REGISTER_ZYGISK_MODULE(clazz)` reemplaza el entry point manual.
+- **main.cpp — 5 cambios quirúrgicos:**
+  - **Cambio A:** Globals `g_api`, `g_jvm`, `g_isTargetApp` antes de la clase.
+  - **Cambio B:** Firmas de los 5 métodos actualizadas a API v3. `preAppSpecialize` ahora lee `args->nice_name` via JNI para determinar `g_isTargetApp` y llama `FORCE_DENYLIST_UNMOUNT` antes de la especialización.
+  - **Cambio C:** Guard de `postAppSpecialize` reemplazada: de leer `/proc/self/cmdline` + loop ALLOWED a `if (!g_isTargetApp) return;`. `env` obtenido de `g_jvm->GetEnv()`.
+  - **Cambio D:** Entry point: `static OmniModule; extern "C" zygisk_module_entry` → `REGISTER_ZYGISK_MODULE(OmniModule)`.
+  - **Cambio E:** `api->hookJniNativeMethods` → `g_api->hookJniNativeMethods` (8 call sites).
+- **Verificación:** `grep registerModule\|module_instance\|zygisk_module_entry` → vacío. `grep "virtual ~Module"` → vacío.
+**Prompt del usuario:** PR56 — Actualización de API Zygisk v2→v3 con AppSpecializeArgs/ServerSpecializeArgs y REGISTER_ZYGISK_MODULE.
+**Nota personal para el siguiente agente:** La API v3 de Zygisk es radicalmente diferente de v2: (1) `registerModule` ya no existe — el macro `REGISTER_ZYGISK_MODULE` exporta un entry point que crea la instancia con `new`. (2) Los métodos pre/post ya NO reciben `Api*` ni `JNIEnv*` — reciben args structs. Para acceder a Api y JNIEnv, usar los globals `g_api` y `g_jvm->GetEnv()` respectivamente. (3) Sin destructor virtual. Si alguien intenta volver a la API v2 o mezclar firmas, el resultado será un VTable mismatch → crash inmediato en el fork de zygote64. NUNCA modificar las firmas de Module sin actualizar simultáneamente zygisk.hpp.
+
 **Fecha y agente:** 27 de febrero de 2026, Jules (PR55 — Defensive fixes: onLoad null guard + g_jvm + DLCLOSE via this->api)
 **Resumen de cambios:** v12.9.35 — El crash persiste post-PR54b. El offset cambió de 0xb5d8c a 0xb5b34 (binario modificado pero causa raíz no resuelta). No se pudo ejecutar nm/addr2line porque no hay `.so` compilado en el repositorio (source-only). Fixes defensivos aplicados mientras se espera el binario para diagnóstico completo.
 - **PASO 1 (nm/addr2line):** `arm64-v8a.so` NO existe en el repo. Herramientas disponibles (`nm`, `llvm-nm`, `addr2line`, `llvm-addr2line`) pero sin binario que analizar. Se necesita extraer el `.so` del dispositivo o del build pipeline para identificar la función en pc=0xb5b34.

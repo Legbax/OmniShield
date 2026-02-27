@@ -2289,36 +2289,49 @@ static void my_native_setup(JNIEnv* env, jobject thiz,
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
-static JavaVM *g_jvm = nullptr;  // PR55: guardar JavaVM en lugar de JNIEnv raw
+static zygisk::Api *g_api = nullptr;  // PR56: Api global guardada en onLoad
+static JavaVM *g_jvm = nullptr;       // PR55: guardar JavaVM en lugar de JNIEnv raw
+static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en preAppSpecialize
 
 class OmniModule : public zygisk::Module {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
         if (!api || !env) return;
+        g_api = api;
+        env->GetJavaVM(&g_jvm);
         this->api = api;
-        env->GetJavaVM(&g_jvm);  // PR55: guardar JavaVM — más seguro que JNIEnv entre threads
         this->env = env;
     }
-    void preAppSpecialize(zygisk::Api *api, JNIEnv *env) override { readConfig(); }
-    void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
-        // GUARDIA: solo inyectar en procesos objetivo
-        std::string procName;
-        { std::ifstream f("/proc/self/cmdline"); std::getline(f, procName, '\0'); }
+    void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
+        readConfig();
+        // PR56: leer procName desde args->nice_name para guardia de proceso
+        JNIEnv *env = nullptr;
+        if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+        g_isTargetApp = false;
+        if (env && args->nice_name) {
+            const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
+            if (p) {
+                std::string proc(p);
+                static const char* ALLOWED[] = {
+                    "com.snapchat.android","com.instagram.android",
+                    "com.tinder","com.bumble.app","com.badoo.mobile",
+                    "com.match.android","com.grindr.android",
+                    "com.OkCupid","com.pof.android",nullptr
+                };
+                for (int i = 0; ALLOWED[i]; i++)
+                    if (proc.find(ALLOWED[i]) != std::string::npos) { g_isTargetApp = true; break; }
+                env->ReleaseStringUTFChars(args->nice_name, p);
+            }
+        }
+        if (g_isTargetApp && g_api) g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+    }
+    void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
+        if (!g_isTargetApp) return;
 
-        static const char* ALLOWED[] = {
-            "com.snapchat.android", "com.instagram.android",
-            "com.tinder", "com.bumble.app", "com.badoo.mobile",
-            "com.match.android", "com.grindr.android",
-            "com.OkCupid", "com.pof.android", nullptr
-        };
-        bool isTarget = false;
-        for (int i = 0; ALLOWED[i]; i++)
-            if (procName.find(ALLOWED[i]) != std::string::npos) { isTarget = true; break; }
-
-        if (!isTarget) return;  // Salida temprana — sin hooks en procesos del sistema
-
-        // PR46: FORCE_DENYLIST_UNMOUNT solo para procesos objetivo confirmados
-        api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+        // PR56: obtener JNIEnv desde g_jvm (ya no viene como parámetro)
+        JNIEnv *env = nullptr;
+        if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+        if (!env) return;
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
@@ -2617,9 +2630,9 @@ public:
             {"getImei", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
         };
-        api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
+        g_api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
         if (env->ExceptionCheck()) env->ExceptionClear();
-        api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
+        g_api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
         if (env->ExceptionCheck()) env->ExceptionClear();
 
         // PR38+39: Location spoofing hooks
@@ -2661,7 +2674,7 @@ public:
                 {"getBearing",                "()F", (void*)LocationHook::getBearing},
                 {"getTime",                   "()J", (void*)LocationHook::getTime},
             };
-            api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
+            g_api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -2689,7 +2702,7 @@ public:
                 {"isAvailable",    "()Z",                  (void*)NetworkInfoHook::isAvailable},
                 {"isRoaming",      "()Z",                  (void*)NetworkInfoHook::isRoaming},
             };
-            api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
+            g_api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -2763,7 +2776,7 @@ public:
                 {"getFifoMaxEventCount",     "()I", (void*)SensorMetaHook::getFifoMaxEventCount},
                 {"getFifoReservedEventCount","()I", (void*)SensorMetaHook::getFifoReservedEventCount},
             };
-            api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
+            g_api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -2800,7 +2813,7 @@ public:
             JNINativeMethod sensorListMethods[] = {
                 {"getSensorList", "(I)Ljava/util/List;", (void*)SensorListHook::getSensorList},
             };
-            api->hookJniNativeMethods(env, "android/hardware/SensorManager",
+            g_api->hookJniNativeMethods(env, "android/hardware/SensorManager",
                                       sensorListMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
@@ -2813,7 +2826,7 @@ public:
             JNINativeMethod cameraMethods[] = {
                 {"nativeReadValues", "(I)[B", (void*)my_nativeReadValues},
             };
-            api->hookJniNativeMethods(env,
+            g_api->hookJniNativeMethods(env,
                 "android/hardware/camera2/impl/CameraMetadataNative",
                 cameraMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
@@ -2834,7 +2847,7 @@ public:
             JNINativeMethod codecMethods[] = {
                 {"native_setup", "(Ljava/lang/String;ZZ)V", (void*)my_native_setup},
             };
-            api->hookJniNativeMethods(env, "android/media/MediaCodec",
+            g_api->hookJniNativeMethods(env, "android/media/MediaCodec",
                                       codecMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
             // PR47: Solo capturar orig si hookJniNativeMethods realmente lo reemplazó.
@@ -2846,19 +2859,13 @@ public:
         }
 
     }
-    void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {
-        // PR55: Usar this->api (guardado en onLoad) NO el parámetro.
-        // El parámetro 'api' en realidad es ServerSpecializeArgs* según
-        // la API oficial — nuestras firmas son incompatibles con eso.
-        // DLCLOSE descarga el módulo del proceso system_server,
-        // eliminando cualquier posible callback null durante el fork.
-        if (this->api) this->api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+    void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
+        if (g_api) g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
-    void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
+    void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {}
 private:
     zygisk::Api *api;
     JNIEnv *env;
 };
 
-static OmniModule module_instance;
-extern "C" { void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { api->registerModule(&module_instance); } }
+REGISTER_ZYGISK_MODULE(OmniModule)

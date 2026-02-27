@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.35
-versionCode=12935
+version=v12.9.36
+versionCode=12936
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR55 — onLoad null guard + g_jvm + DLCLOSE via this->api en preServerSpecialize
+description=Total Invisibility (The Void). Zygisk module. PR56 — Zygisk API v3 + REGISTER_ZYGISK_MODULE + AppSpecializeArgs/ServerSpecializeArgs
