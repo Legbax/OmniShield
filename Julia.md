@@ -1171,4 +1171,35 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 
 4. **`module.prop`** — version bump `v12.9.42 → v12.9.43`, versionCode `12942 → 12943`.
 
+## PR65 — Fix: bottom nav tapeable — safe-area-inset-bottom para Android system bar
+
+**Fecha y agente:** 27 de febrero de 2026, Claude (PR65 — fix bottom nav overlap)
+
+**Problema:** Con `viewport-fit=cover` en el meta viewport, el WebView de KernelSU extiende el canvas de la app por debajo de la barra de navegación del sistema Android (back/home/recents, típicamente 48–60 px). El `#bottom-nav` se renderizaba justo en ese espacio oculto, haciendo que los 4 botones de navegación fueran físicamente inalcanzables.
+
+**Causa raíz:** `env(safe-area-inset-bottom)` no se usaba en ninguna parte del CSS.
+
+**Fix aplicado — sólo CSS (`webroot/css/style.css`), 3 cambios:**
+
+1. **`#bottom-nav`** — height y padding-bottom con safe-area:
+   ```css
+   height: calc(58px + env(safe-area-inset-bottom, 0px));
+   min-height: calc(58px + env(safe-area-inset-bottom, 0px));
+   padding-bottom: env(safe-area-inset-bottom, 0px);
+   ```
+   El fallback `0px` garantiza que en dispositivos sin barra de sistema (desktop, Android antiguo) no cambia nada. El layout flex-column de `#app` hace que `#main` (flex:1) se comprima automáticamente cuando `#bottom-nav` crece — sin cambios en HTML ni JS.
+
+2. **`#app`** — `100dvh` con fallback `100vh`:
+   ```css
+   height: 100vh;   /* fallback WebViews antiguos */
+   height: 100dvh;  /* dynamic viewport height — Chrome 108+ / Android 12+ */
+   ```
+
+3. **`#toast-container`** — bottom ajustado para quedar sobre el nav:
+   ```css
+   bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+   ```
+
+**`module.prop`** — version bump `v12.9.43 → v12.9.44`, versionCode `12943 → 12944`.
+
 **Resultado:** La UI es ahora totalmente robusta: el loading screen se retira siempre en ≤ 3.6 s (3 s timeout + 600 ms fade), el mapa funciona sin internet, y todos los event listeners se registran incluso si `loadState()` falla.

@@ -120,7 +120,9 @@ body {
 
 /* ─── Layout ──────────────────────────────────────────────────── */
 #app {
-  display: flex; flex-direction: column; height: 100vh;
+  display: flex; flex-direction: column;
+  height: 100vh;        /* fallback for older WebViews */
+  height: 100dvh;       /* dynamic viewport height — adjusts when system chrome changes */
   position: relative; overflow: hidden;
 }
 
@@ -203,7 +205,12 @@ body {
 
 /* ─── Bottom Navigation ───────────────────────────────────────── */
 #bottom-nav {
-  height: 58px; min-height: 58px;
+  /* env(safe-area-inset-bottom) pushes nav above the Android system bar when
+     viewport-fit=cover is active. Falls back to 0px on devices without a
+     system navigation bar (desktop, older Android). */
+  height: calc(58px + env(safe-area-inset-bottom, 0px));
+  min-height: calc(58px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   display: flex; align-items: stretch;
   background: var(--surface);
   border-top: 1px solid var(--border);
@@ -542,7 +549,9 @@ body {
 
 /* ─── Toasts ──────────────────────────────────────────────────── */
 #toast-container {
-  position: fixed; bottom: 70px; left: 0; right: 0;
+  position: fixed;
+  bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+  left: 0; right: 0;
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   z-index: 999; pointer-events: none;
 }
