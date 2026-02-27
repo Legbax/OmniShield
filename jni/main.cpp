@@ -49,7 +49,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
-static bool g_debugMode = false;  // PR53: activar con debug_mode=true en .identity.cfg
+static bool g_debugMode = true;  // PR53: activar con debug_mode=true en .identity.cfg
 
 // PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
 static double g_cachedLat       = 0.0;
