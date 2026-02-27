@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.39
-versionCode=12939
+version=v12.9.40
+versionCode=12940
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR59 — Fix definitivo SIGSEGV: static local maps en omni_engine.hpp causan guard-variable deadlock post-fork
+description=Total Invisibility (The Void). Zygisk module. PR60 — Fix final SIGSEGV: getDeviceProfiles()::profiles guard-variable .rodata → findProfile() array POD

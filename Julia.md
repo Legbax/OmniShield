@@ -978,3 +978,44 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - Verificación post-PR59:
   `grep -n "static const std::map\|static const auto\|static.*map<" jni/omni_engine.hpp`
   → debe retornar vacío (cero mapas con static local en funciones).
+
+---
+
+## PR60 — Fix final SIGSEGV: getDeviceProfiles()::profiles guard-variable → findProfile() array POD
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR60 — Fix final crash zygote)
+**Resumen de cambios:** v12.9.39 → v12.9.40
+
+- **Causa raíz confirmada (nm):** `000000000154888 V guard variable for getDeviceProfiles()::profiles`
+  — símbolo tipo `V` (.rodata). El primer fork hijo inicializaba el mapa de 40 perfiles
+  (`static const std::map<string,DeviceFingerprint>`), dejando la guard en estado transitorio.
+  El segundo fork heredaba ese estado → SIGSEGV al intentar acceder al mapa ya "en construcción".
+- **CAMBIO 1 — omni_profiles.h:** Eliminada `getDeviceProfiles()` y su `static const std::map`.
+  Reemplazada por `findProfile(const std::string& name)` con `struct Entry { const char* n; DeviceFingerprint fp; }` y `static const Entry TABLE[]`.
+  `DeviceFingerprint` es 100% POD (const char*, int, float, bool) → TABLE vive en .rodata con
+  inicialización en tiempo de compilación. CERO guard variables. CERO heap. CERO riesgo fork.
+  Los 40 perfiles son exactamente iguales, solo cambia el contenedor.
+- **CAMBIO 2 — main.cpp (17 sitios) + omni_engine.hpp (2 sitios):** Todos los bloques
+  `if (getDeviceProfiles().count(X)) { const auto& fp = getDeviceProfiles().at(X);`
+  convertidos a `const DeviceFingerprint* fp_ptr = findProfile(X); if (fp_ptr) { const auto& fp = *fp_ptr;`
+  Los bloques con `.find()/.end()` convertidos a `const DeviceFingerprint* it = findProfile(X); if (it) {` con `it->field` en lugar de `it->second.field`.
+- **CAMBIO 3 — g_debugMode verificado:** `static bool g_debugMode = true` en main.cpp línea 52.
+- **#include <map> removido de omni_profiles.h:** Ya no se usa std::map ahí. omni_engine.hpp
+  mantiene su propio `#include <map>` para TACS_BY_BRAND (namespace-level, init_array, sin guard).
+
+**Prompt del usuario:** "PR60: Eliminar el último guard variable — array de structs estático POD."
+
+**Nota personal para el siguiente agente:**
+- `static const Entry TABLE[]` donde Entry es un aggregate de tipos triviales (const char*,
+  DeviceFingerprint con solo const char*/int/float/bool) → inicialización constante en
+  tiempo de compilación → .rodata → CERO guard variable. Esto es el fix correcto.
+- Diferencia clave vs PR59: PR59 eliminó guards en funciones auxiliares (CC, IMSI_POOL, etc.).
+  PR60 elimina la guard del mapa PRINCIPAL de 40 perfiles — la que causaba el crash real.
+- `TACS_BY_BRAND` y `OUIS` en omni_engine.hpp son namespace-level statics. Se inicializan
+  via `.init_array` en dlopen, ANTES de cualquier fork y de forma completa. No tienen guard
+  variables — el linker garantiza su inicialización antes de `zygisk_module_entry`.
+- `findProfile()` hace búsqueda lineal O(n) sobre 40 entradas. Perfectamente aceptable —
+  se llama en hooks individuales por evento, no en loops masivos.
+- Verificación post-PR60:
+  `grep -rn "getDeviceProfiles" jni/` → vacío.
+  `nm --demangle arm64-v8a.so | grep "guard variable"` → CERO símbolo tipo V.

@@ -87,10 +87,10 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
     std::string brand = "default";
     bool isQualcomm = false;
 
-    auto it = getDeviceProfiles().find(profileName);
-    if (it != getDeviceProfiles().end()) {
-        brand = toLower(it->second.brand);
-        isQualcomm = (toLower(std::string(it->second.eglDriver)) == "adreno");
+    const DeviceFingerprint* it = findProfile(profileName);
+    if (it) {
+        brand = toLower(it->brand);
+        isQualcomm = (toLower(std::string(it->eglDriver)) == "adreno");
     }
 
     const std::vector<std::string>* tacList = TACS_BY_BRAND.count(brand) ? &TACS_BY_BRAND.at(brand) : &TACS_BY_BRAND.at("default");
@@ -377,10 +377,10 @@ inline std::string getCarrierNameForImsi(const std::string& profileName, long se
 // Afectados: Galaxy A52 (atoll), A72 (atoll), S20 FE (kona), A52s (sm7325)
 // Samsung Exynos siguen con "Samsung RIL v3.0"
 inline std::string getRilVersionForProfile(const std::string& profileName) {
-    auto it = getDeviceProfiles().find(profileName);
-    if (it != getDeviceProfiles().end()) {
-        std::string plat = toLower(std::string(it->second.boardPlatform));
-        std::string brand = toLower(std::string(it->second.brand));
+    const DeviceFingerprint* it = findProfile(profileName);
+    if (it) {
+        std::string plat = toLower(std::string(it->boardPlatform));
+        std::string brand = toLower(std::string(it->brand));
         // MediaTek — cualquier marca
         if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos)
             return "android mtk-ril 1.0";
