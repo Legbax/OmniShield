@@ -762,10 +762,16 @@ window.loadInstalledApps = async function() {
   const dd = document.getElementById('app-dropdown');
   if (!dd) return;
   dd.innerHTML = '<option value="">Loading apps…</option>';
-  const {stdout} = await ksu_exec('pm list packages 2>/dev/null | sed "s/package://" | grep -v "^$" | sort | head -200');
-  const pkgs = stdout ? stdout.split('\n').filter(Boolean) : [];
+  // Use bare `pm list packages` — no shell pipes (sed/grep/sort not guaranteed
+  // in Android's minimal /system/bin/sh). Parse and sort entirely in JS.
+  const {stdout, errno} = await ksu_exec('pm list packages 2>/dev/null');
+  const pkgs = (stdout || '')
+    .split('\n')
+    .map(l => l.replace(/^package:/, '').trim())
+    .filter(Boolean)
+    .sort();
   if (!pkgs.length) {
-    dd.innerHTML = '<option value="">No apps found (KernelSU required)</option>';
+    dd.innerHTML = '<option value="">No apps found — try again or type package manually</option>';
     return;
   }
   dd.innerHTML = '<option value="">Select app to add…</option>' +
