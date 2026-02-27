@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.44
-versionCode=12944
+version=v12.9.45
+versionCode=12945
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR65 — Fix: bottom nav tapeable con safe-area-inset-bottom para Android system bar
+description=Total Invisibility (The Void). Zygisk module. PR65b — Fix: JS detectNavInset() + CSS max() para MIUI WebView donde env() devuelve 0

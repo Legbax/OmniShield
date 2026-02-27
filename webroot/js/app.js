@@ -744,8 +744,61 @@ window.refreshStatus = async function() {
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 
+// ─── System nav bar inset detection ───────────────────────────────────
+// env(safe-area-inset-bottom) returns 0 on MIUI / Android 11 WebViews even
+// when viewport-fit=cover is set, because KernelSU's activity doesn't forward
+// window insets to the WebView on those builds.
+// This function measures the actual gap using 3 methods and sets the CSS
+// custom property --inset-bottom on :root so the bottom nav compensates.
+function detectNavInset() {
+  // ── Method 1: probe whether env() is already working ─────────────────
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:fixed;bottom:0;left:0;width:0;' +
+    'height:env(safe-area-inset-bottom,0px);visibility:hidden;pointer-events:none';
+  document.documentElement.appendChild(probe);
+  const envH = probe.offsetHeight;
+  probe.remove();
+  if (envH > 5) return; // env() is working — CSS already handles it
+
+  // ── Method 2: visualViewport API (most precise, Android WebView 67+) ──
+  if (window.visualViewport) {
+    const apply = () => {
+      const layoutH = document.documentElement.clientHeight;
+      const inset = Math.max(
+        0,
+        Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
+      );
+      document.documentElement.style.setProperty(
+        '--inset-bottom', inset > 10 ? inset + 'px' : '0px'
+      );
+    };
+    apply();
+    window.visualViewport.addEventListener('resize', apply);
+    return;
+  }
+
+  // ── Method 3: screen vs window height heuristic ───────────────────────
+  // On Android, screen.height can be physical px or CSS px depending on build.
+  // We try both interpretations and use whichever lands in a plausible nav bar
+  // range (30–120 CSS px).
+  const dpr      = window.devicePixelRatio || 1;
+  const diffCss  = window.screen.height - window.innerHeight;
+  const diffPhys = Math.round(window.screen.height / dpr) - window.innerHeight;
+  const diff = (diffCss > 20 && diffCss < 200)   ? diffCss
+             : (diffPhys > 20 && diffPhys < 120)  ? diffPhys
+             : 0;
+  if (diff > 0) {
+    document.documentElement.style.setProperty('--inset-bottom', diff + 'px');
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+  // Detect system nav bar height immediately — before any async work so the
+  // bottom nav is already correctly positioned during the loading screen.
+  detectNavInset();
+
   // loadState() is wrapped in try/finally so the loading screen is ALWAYS
   // removed even if ksu_exec times out, throws, or the config is missing.
   // Without this guarantee the #loading-screen stays on top and blocks every
