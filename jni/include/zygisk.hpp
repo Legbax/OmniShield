@@ -7,25 +7,6 @@
 
 namespace zygisk {
 
-enum Option {
-    FORCE_DENYLIST_UNMOUNT = 0,
-    DLCLOSE_MODULE_LIBRARY = 1,
-};
-
-struct Api {
-    // CRÍTICO: Sin registerModule — vtable[0] es hookJniNativeMethods
-    virtual bool hookJniNativeMethods(JNIEnv *env, const char *className,
-                                      JNINativeMethod *methods, int numMethods) = 0;
-    virtual void pltHookRegister(const char *executable_path, const char *symbol,
-                                 void *new_func, void **old_func) = 0;
-    virtual void pltHookExclude(const char *executable_path, const char *symbol) = 0;
-    virtual bool pltHookCommit() = 0;
-    virtual int connectCompanion() = 0;
-    virtual void setOption(Option opt) = 0;
-    virtual int getModuleDir() = 0;
-    virtual uint32_t getFlags() = 0;
-};
-
 struct AppSpecializeArgs {
     jint &uid;
     jint &gid;
@@ -54,6 +35,33 @@ struct ServerSpecializeArgs {
     jint &runtime_flags;
     jlong &permitted_capabilities;
     jlong &effective_capabilities;
+    jint &mount_external;
+    jstring &se_info;
+    jstring &nice_name;
+    jintArray &fds_to_close;
+    jintArray &fds_to_ignore;
+    jboolean &is_child_zygote;
+    jstring &instruction_set;
+    jstring &app_data_dir;
+};
+
+enum Option {
+    FORCE_DENYLIST_UNMOUNT = 0,
+    DLCLOSE_MODULE_LIBRARY = 1,
+};
+
+struct Api {
+    virtual void registerModule(class Module *module) = 0;
+    virtual void hookJniNativeMethods(JNIEnv *env, const char *className,
+                                      JNINativeMethod *methods, int numMethods) = 0;
+    virtual void pltHookRegister(const char *executable_path, const char *symbol,
+                                 void *new_func, void **old_func) = 0;
+    virtual void pltHookExclude(const char *executable_path, const char *symbol) = 0;
+    virtual void pltHookCommit() = 0;
+    virtual int connectCompanion() = 0;
+    virtual void setOption(Option opt) = 0;
+    virtual int getModuleDir() = 0;
+    virtual uint32_t getFlags() = 0;
 };
 
 class Module {
@@ -69,9 +77,7 @@ public:
 } // namespace zygisk
 
 #define REGISTER_ZYGISK_MODULE(clazz) \
-static clazz _module_instance; \
 extern "C" __attribute__((visibility("default"))) \
-void zygisk_module_entry(int32_t* api_version, void** v_module) { \
-    *api_version = ZYGISK_API_VERSION; \
-    *v_module = &_module_instance; \
+void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { \
+    if (api) api->registerModule(new clazz()); \
 }

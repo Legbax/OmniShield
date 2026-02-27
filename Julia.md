@@ -1019,3 +1019,55 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - Verificación post-PR60:
   `grep -rn "getDeviceProfiles" jni/` → vacío.
   `nm --demangle arm64-v8a.so | grep "guard variable"` → CERO símbolo tipo V.
+
+---
+
+## PR61 — Módulo mínimo de diagnóstico (test de control crash zygote)
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR61 — test de control)
+**Resumen:** Compilar módulo Zygisk vacío para aislar causa del crash.
+
+- `jni/main_minimal.cpp`: módulo con solo onLoad()+LOGD. Cero hooks, cero maps.
+- `CMakeLists.txt`: swap main.cpp → main_minimal.cpp para build de diagnóstico.
+- `libs/arm64-v8a/omnishield-minimal-pr61.so`: prebuilt arm64 para probar en dispositivo.
+- **Resultado del test:** el módulo minimal CON firma `(int32_t*, void**)` TAMBIÉN crasheó.
+  Conclusión: la firma del entry point es incorrecta para este Zygisk Next, no el código propio.
+  → Proceder con PR62: revertir a firma `(Api*, JNIEnv*)` + `registerModule`.
+
+---
+
+## PR62 — Revertir firma entry point: (Api*, JNIEnv*) + registerModule
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR62 — fix firma Zygisk Next)
+**Resumen de cambios:** v12.9.40 → v12.9.41
+
+- **Diagnóstico (PR61):** módulo minimal con firma `zygisk_module_entry(int32_t* api_version, void** v_module)`
+  crasheaba igual que el módulo completo — la firma era incorrecta para Zygisk Next en este dispositivo.
+  El crash NO era nuestro código (maps, guards, hooks) sino el contract de API.
+
+- **CAMBIO ÚNICO — `jni/include/zygisk.hpp`** reescrito completamente:
+  1. `Api::registerModule(Module*)` añadido como **vtable[0]** — desplaza todos los demás +1.
+  2. `Api::hookJniNativeMethods` cambia de `bool` a `void`.
+  3. `Api::pltHookCommit` cambia de `bool` a `void`.
+  4. `ServerSpecializeArgs` ampliado con campos adicionales: `mount_external`, `se_info`,
+     `nice_name`, `fds_to_close`, `fds_to_ignore`, `is_child_zygote`, `instruction_set`, `app_data_dir`.
+  5. `REGISTER_ZYGISK_MODULE` macro: firma cambia de `(int32_t*, void**)` a `(Api*, JNIEnv*)`,
+     cuerpo cambia de asignar `v_module` a llamar `api->registerModule(new clazz())`.
+
+- **main.cpp, omni_profiles.h, omni_engine.hpp:** intactos — el código de negocio es correcto.
+  Las llamadas a `hookJniNativeMethods` en main.cpp no usaban el valor de retorno `bool`,
+  por lo que el cambio a `void` es compatible sin tocar main.cpp.
+
+- **Artifact actualizado:** `libs/arm64-v8a/omnishield-minimal-pr61.so` reconstruido con
+  la nueva firma (129 KB). Verificación:
+  `nm --demangle`: `zygisk_module_entry` tipo T exportado. CERO guard variables.
+  Disasm `zygisk_module_entry`: `ldr x9,[api]; ldr x2,[x9]; br x2` → vtable[0]=registerModule
+  llamado via tail-call con (api, new MinimalModule). Correcto.
+  `DT_NEEDED`: `liblog.so` + `libc++.so` (para __android_log_print y operator new).
+
+- **Nota para el siguiente agente:**
+  La firma `(Api*, JNIEnv*)` + `registerModule` es la API de Zygisk Next actual.
+  La firma `(int32_t*, void**)` era de Zygisk original (KernelSU antiguo) y ya no es válida.
+  `Api::registerModule` es siempre vtable[0] — crítico para el dispatch correcto.
+  Si el módulo minimal con la nueva firma CARGA sin crash → PR62 es el fix definitivo.
+  Si aún crashea → investigar si Zygisk Next en este dispositivo espera otro ABI.
