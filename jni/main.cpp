@@ -32,6 +32,7 @@
 #include <dirent.h>
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
+#include <sys/syscall.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -319,7 +320,8 @@ static inline bool isHiddenPath(const char* path) {
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
-    if (!orig_stat) { errno = ENOSYS; return -1; }
+    // PR54: arm64 no tiene __NR_stat; usar fstatat(AT_FDCWD,...,0) como equivalente.
+    if (!orig_stat) return (int)syscall(__NR_fstatat, AT_FDCWD, pathname, statbuf, 0);
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_stat(pathname, statbuf);
 }
@@ -330,7 +332,8 @@ int my_lstat(const char* pathname, struct stat* statbuf) {
 }
 
 int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
-    if (!orig_fstatat) { errno = ENOSYS; return -1; }
+    // PR54: syscall directo cuando orig_fstatat es null.
+    if (!orig_fstatat) return (int)syscall(__NR_fstatat, dirfd, pathname, statbuf, flags);
     // Resolver path absoluto si es relativo con AT_FDCWD
     if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
         char cwd[512] = {};
@@ -1013,7 +1016,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
     // PR51: NO hookeamos open directamente — su body en Bionic llama openat()
     // que está hooked, creando recursión infinita. my_open se usa como helper
     // llamado desde my_openat; usa orig_openat(AT_FDCWD) como terminal seguro.
-    if (!orig_openat) { errno = ENOSYS; return -1; }
+    // PR54: syscall directo cuando orig_openat es null.
+    if (!orig_openat) return (int)syscall(__NR_openat, AT_FDCWD, pathname, flags, mode);
     if (!pathname) return orig_openat(AT_FDCWD, pathname, flags, mode);
 
     std::string path_str(pathname);
@@ -1603,7 +1607,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
-    if (!orig_openat) { errno = ENOSYS; return -1; }
+    // PR54: syscall directo cuando orig_openat es null — openat es crítico para el arranque.
+    if (!orig_openat) return (int)syscall(__NR_openat, dirfd, pathname, flags, mode);
     if (!pathname) return orig_openat(dirfd, pathname, flags, mode);
 
     std::string path_str(pathname);
@@ -1697,11 +1702,13 @@ int my_close(int fd) {
         g_fdOffsetMap.erase(fd);
         g_fdContentCache.erase(fd);
     }
-    return orig_close ? orig_close(fd) : close(fd);
+    // PR54: syscall directo cuando orig_close es null — evita recursión via libc close hooked.
+    return orig_close ? orig_close(fd) : (int)syscall(__NR_close, fd);
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
-    if (!orig_read) { errno = ENOSYS; return -1; }
+    // PR54: syscall directo cuando orig_read es null — read es crítico para el arranque.
+    if (!orig_read) return (ssize_t)syscall(__NR_read, fd, buf, count);
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1733,7 +1740,8 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 }
 
 off_t my_lseek(int fd, off_t offset, int whence) {
-    if (!orig_lseek) { errno = ENOSYS; return -1; }
+    // PR54: syscall directo cuando orig_lseek es null.
+    if (!orig_lseek) return (off_t)syscall(__NR_lseek, fd, offset, whence);
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -2842,7 +2850,13 @@ public:
         }
 
     }
-    void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
+    void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {
+        // PR54: El system server NO es un proceso objetivo.
+        // Llamar setOption aquí protege el fork del system server
+        // de cualquier interferencia de los hooks Dobby.
+        // Los hooks se instalan en postAppSpecialize — nunca llegan aquí.
+        api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+    }
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
 private:
     zygisk::Api *api;

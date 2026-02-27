@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.32
-versionCode=12932
+version=v12.9.33
+versionCode=12933
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR53 — Meyer's Singleton para G_DEVICE_PROFILES, debug_mode flag
+description=Total Invisibility (The Void). Zygisk module. PR54 — syscall fallback en hooks críticos + DLCLOSE en preServerSpecialize
