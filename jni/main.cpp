@@ -15,6 +15,7 @@
 #include <jni.h>
 #include <cstdio>
 #include <algorithm>
+#include <sstream>
 #include <chrono>
 #include <random>
 #include <time.h>
@@ -2316,7 +2317,6 @@ public:
     }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         readConfig();
-        // PR56: leer procName desde args->nice_name para guardia de proceso
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         g_isTargetApp = false;
@@ -2324,14 +2324,19 @@ public:
             const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
             if (p) {
                 std::string proc(p);
-                static const char* ALLOWED[] = {
-                    "com.snapchat.android","com.instagram.android",
-                    "com.tinder","com.bumble.app","com.badoo.mobile",
-                    "com.match.android","com.grindr.android",
-                    "com.OkCupid","com.pof.android",nullptr
-                };
-                for (int i = 0; ALLOWED[i]; i++)
-                    if (proc.find(ALLOWED[i]) != std::string::npos) { g_isTargetApp = true; break; }
+                // Match process against scoped_apps from config (comma-separated)
+                if (g_config.count("scoped_apps")) {
+                    std::istringstream ss(g_config["scoped_apps"]);
+                    std::string token;
+                    while (std::getline(ss, token, ',')) {
+                        token.erase(0, token.find_first_not_of(" \t"));
+                        token.erase(token.find_last_not_of(" \t") + 1);
+                        if (!token.empty() && proc.find(token) != std::string::npos) {
+                            g_isTargetApp = true;
+                            break;
+                        }
+                    }
+                }
                 env->ReleaseStringUTFChars(args->nice_name, p);
             }
         }

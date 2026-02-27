@@ -64,8 +64,8 @@ async function readConfig() {
 async function writeConfig(cfg) {
   await ksu_exec(`mkdir -p /data/adb/.omni_data`);
   const lines = Object.entries(cfg).map(([k,v]) => `${k}=${v}`).join('\n');
-  const b64 = btoa(unescape(encodeURIComponent(lines)));
-  const r = await ksu_exec(`echo '${b64}' | base64 -d > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
+  const safe = lines.replace(/'/g, "'\\''");
+  const r = await ksu_exec(`printf '%s\n' '${safe}' > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
   return r.errno === 0;
 }
 

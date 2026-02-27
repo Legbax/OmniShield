@@ -59,12 +59,21 @@ derive_ssaid() {
     fi
 }
 
-# Apps objetivo: Snapchat primero (SSAID crítico para ban tracking)
-TARGET_PACKAGES=(
-    "com.snapchat.android"
-    "com.instagram.android"
-    "com.tinder.app"
-)
+# Read scoped_apps from config (comma-separated)
+SCOPED_APPS=""
+if [ -f "$OMNI_CONFIG" ]; then
+    SCOPED_APPS=$(grep "^scoped_apps=" "$OMNI_CONFIG" | cut -d'=' -f2-)
+fi
+
+# POSIX sh compatible: split by comma into positional params ($1, $2, ...)
+if [ -n "$SCOPED_APPS" ]; then
+    OLDIFS="$IFS"
+    IFS=','
+    set -- $SCOPED_APPS
+    IFS="$OLDIFS"
+else
+    set --
+fi
 
 if [ ! -f "$SSAID_FILE" ]; then
     exit 0
@@ -74,8 +83,8 @@ fi
 [ ! -f "${SSAID_FILE}.omni_bak" ] && cp "$SSAID_FILE" "${SSAID_FILE}.omni_bak"
 
 MODIFIED=0
-for i in "${!TARGET_PACKAGES[@]}"; do
-    PKG="${TARGET_PACKAGES[$i]}"
+i=0
+for PKG in "$@"; do
     NEW_SSAID=$(derive_ssaid "$MASTER_SEED" "$i")
 
     if grep -q "package=\"$PKG\"" "$SSAID_FILE" 2>/dev/null; then
@@ -105,6 +114,7 @@ open('$SSAID_FILE', 'w').write(new_content)
             MODIFIED=1
         fi
     fi
+    i=$((i + 1))
 done
 
 # Notificar al sistema que invalide el caché de Settings si se modificó algo
