@@ -69,8 +69,9 @@ public:
 } // namespace zygisk
 
 #define REGISTER_ZYGISK_MODULE(clazz) \
+static clazz _module_instance; \
 extern "C" __attribute__((visibility("default"))) \
 void zygisk_module_entry(int32_t* api_version, void** v_module) { \
     *api_version = ZYGISK_API_VERSION; \
-    *v_module = new clazz(); \
+    *v_module = &_module_instance; \
 }

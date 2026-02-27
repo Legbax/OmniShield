@@ -858,3 +858,44 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - Scope de este PR: solo lado de CREACIÓN de MediaCodec. El listing de codecs
   (`MediaCodecList.getCodecInfos()`) sigue mostrando `c2.mtk.*`/ pero Snapchat
   no usa esa API para fingerprinting — usa `createEncoderByType(MIME)`.
+
+---
+
+## PR57 — Anti-SIGBUS: static instance + build.yml versión dinámica
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR57 — Tres fixes post-PR56 para crashes en zygote)
+**Resumen de cambios:** v12.9.36 → v12.9.37
+
+- **CAMBIO 1 — REGISTER_ZYGISK_MODULE (CRÍTICO):** Reemplazado `new clazz()` por instancia estática
+  en la macro `REGISTER_ZYGISK_MODULE` en `jni/include/zygisk.hpp`. `new` en contexto de zygote
+  usa el heap del proceso padre antes del fork — puede retornar memoria mal alineada causando
+  SIGBUS. La instancia estática `static clazz _module_instance` vive en `.bss` desde `dlopen`,
+  igual que antes pero sin riesgo de alineación de heap.
+- **CAMBIO 2 — omni_profiles.h (VERIFICADO):** `getDeviceProfiles()` ya fue convertido a
+  Meyer's Singleton por PR53 (`inline const std::map<...>& getDeviceProfiles()` con
+  `static const std::map` interno). No requirió cambios. `grep -n "^static const std::map"
+  jni/omni_profiles.h` → vacío confirmado.
+- **CAMBIO 3 — build.yml versión dinámica:** Eliminadas las líneas hardcodeadas
+  `omnishield-v12.9.31-release.zip`. El step "Get version from module.prop" lee la versión
+  de `module.prop` via `grep '^version='` y la expone como `steps.version.outputs.VERSION`.
+  Package Module y Upload Artifact usan `${{ steps.version.outputs.VERSION }}` — el zip
+  siempre refleja la versión correcta sin tocar el yml en cada PR.
+
+**Prompt del usuario:** "PR57: Tres cambios para resolver crashes post-PR56."
+
+**Nota personal para el siguiente agente:**
+- La causa raíz del SIGBUS con `fault addr = string ASCII` es inicialización estática global
+  en contexto `dlopen`. `getDeviceProfiles()` como Meyer's Singleton es la protección correcta
+  — construye el mapa solo cuando se llama por primera vez (post-fork, en el proceso hijo).
+- `REGISTER_ZYGISK_MODULE` con instancia estática elimina el riesgo de `new` en pre-fork.
+  La instancia vive en `.bss` desde `dlopen` — tiempo de vida garantizado durante toda la
+  sesión del módulo. Sin destructor virtual (PR54 confirmado) → no hay doble-free.
+- El step de versión en build.yml usa `>> $GITHUB_OUTPUT` (sintaxis moderna GitHub Actions,
+  reemplaza `::set-output`). Compatible con runners `ubuntu-latest` actuales.
+- `grep '^version=' module.prop | cut -d'=' -f2` retorna `v12.9.37` (con prefijo `v`).
+  El artifact queda `omnishield-v12.9.37-release.zip`. Si en el futuro se quiere sin prefijo
+  usar `| sed 's/^v//'`.
+- Verificaciones post-PR57:
+  `grep -n "new clazz\|new OmniModule" jni/include/zygisk.hpp jni/main.cpp` → vacío.
+  `grep -n "^static const std::map" jni/omni_profiles.h` → vacío.
+  `grep -n "v12.9.3[0-6]" .github/workflows/build.yml` → vacío.
