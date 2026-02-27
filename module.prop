@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.37
-versionCode=12937
+version=v12.9.38
+versionCode=12938
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR57 — static instance en REGISTER_ZYGISK_MODULE + build.yml versión dinámica (anti-SIGBUS)
+description=Total Invisibility (The Void). Zygisk module. PR58 — Remover "tombstones" de HIDDEN_TOKENS (crash_dump necesita /data/tombstones/)

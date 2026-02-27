@@ -308,7 +308,7 @@ static inline bool isHiddenPath(const char* path) {
     static const char* HIDDEN_TOKENS[] = {
         "omnishield", "omni_data", "vortex",
         "magisk", "kernelsu", "susfs",
-        "android_cache_data", "tombstones",
+        "android_cache_data",
         nullptr
     };
 

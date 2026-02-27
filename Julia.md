@@ -899,3 +899,29 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   `grep -n "new clazz\|new OmniModule" jni/include/zygisk.hpp jni/main.cpp` → vacío.
   `grep -n "^static const std::map" jni/omni_profiles.h` → vacío.
   `grep -n "v12.9.3[0-6]" .github/workflows/build.yml` → vacío.
+
+---
+
+## PR58 — Remover "tombstones" de HIDDEN_TOKENS (preservar diagnóstico de crashes)
+
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR58 — Fix preventivo: crash_dump necesita /data/tombstones/)
+**Resumen de cambios:** v12.9.37 → v12.9.38
+
+- **jni/main.cpp — HIDDEN_TOKENS (CRÍTICO):** Eliminado `"tombstones"` del array `HIDDEN_TOKENS[]`
+  en `isHiddenPath()` (línea ~311). `crash_dump` necesita acceder a `/data/tombstones/` para
+  escribir los archivos de diagnóstico (`.tombstone`, `.proto`). Si `isHiddenPath` bloquea ese
+  path retornando `ENOENT`, el proceso de volcado falla silenciosamente y se pierden los
+  stack traces necesarios para depurar cualquier SIGBUS o SIGSEGV futuro.
+
+**Prompt del usuario:** "PR58 preventivo — Remover tombstones de HIDDEN_TOKENS."
+
+**Nota personal para el siguiente agente:**
+- `crash_dump` es un proceso separado invocado por el kernel via `/proc/sys/kernel/core_pattern`
+  cuando un proceso nativo crashea. Opera como root y accede a `/data/tombstones/` para
+  escribir el volcado. Nuestros hooks en `open`/`openat`/`stat` con el token `"tombstones"`
+  devolvían `ENOENT` a ese proceso, silenciando el diagnóstico.
+- El token `"tombstones"` nunca fue necesario para la invisibilidad — ninguna app de detección
+  busca ese path para identificar módulos Zygisk. Su presencia en HIDDEN_TOKENS fue un
+  over-blocking accidental.
+- Verificación: `grep -n "tombstones" jni/main.cpp` debe retornar solo comentarios o vacío.
+  La línea con `HIDDEN_TOKENS` ahora queda: `"android_cache_data",` seguido de `nullptr`.
