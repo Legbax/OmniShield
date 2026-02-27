@@ -63,6 +63,16 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR55 — Defensive fixes: onLoad null guard + g_jvm + DLCLOSE via this->api)
+**Resumen de cambios:** v12.9.35 — El crash persiste post-PR54b. El offset cambió de 0xb5d8c a 0xb5b34 (binario modificado pero causa raíz no resuelta). No se pudo ejecutar nm/addr2line porque no hay `.so` compilado en el repositorio (source-only). Fixes defensivos aplicados mientras se espera el binario para diagnóstico completo.
+- **PASO 1 (nm/addr2line):** `arm64-v8a.so` NO existe en el repo. Herramientas disponibles (`nm`, `llvm-nm`, `addr2line`, `llvm-addr2line`) pero sin binario que analizar. Se necesita extraer el `.so` del dispositivo o del build pipeline para identificar la función en pc=0xb5b34.
+- **Cambio A — onLoad defensivo:** `if (!api || !env) return;` como primera línea. `env->GetJavaVM(&g_jvm)` guarda la JavaVM globalmente (más seguro que JNIEnv raw entre threads). Global `static JavaVM *g_jvm = nullptr` añadido antes de la clase.
+- **Cambio B — preServerSpecialize: `this->api` en lugar del parámetro:** Descubrimiento clave: los parámetros `api`/`env` en `preServerSpecialize` pueden ser `ServerSpecializeArgs*` según la API oficial de Zygisk — nuestras firmas de overrides son incompatibles. Usar `api->setOption()` con el parámetro podría dereferenciar un puntero de tipo incorrecto → crash. Fix: usar `this->api` (guardado correctamente en `onLoad`) con null check: `if (this->api) this->api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY)`.
+- **Cambio C — postServerSpecialize:** Sin cambio funcional, permanece `{}`.
+- **PR54 revertido externamente:** El commit `0bd48ed` (ajeno a esta sesión) revirtió PR54 (syscall fallbacks + DLCLOSE). Los syscall fallbacks NO se re-aplican en PR55 — se priorizó el diagnóstico de la causa raíz.
+**Prompt del usuario:** El crash persiste post-PR54b (offset 0xb5d8c → 0xb5b34). Ejecutar nm/addr2line y aplicar fixes defensivos mientras se espera diagnóstico.
+**Nota personal para el siguiente agente:** PRIORIDAD MÁXIMA: obtener el binario `arm64-v8a.so` compilado y ejecutar `llvm-addr2line -e arm64-v8a.so -f 0xb5b34` para identificar la función exacta del crash. Sin este dato, estamos aplicando fixes a ciegas. El cambio de offset (0xb5d8c → 0xb5b34) confirma que PR54b modificó el binario (eliminar `virtual ~Module()` cambió el layout), pero la función que crashea puede ser completamente distinta. Las 4 hipótesis abiertas: (A) virtual de Module no overrideado, (B) orig_XXX Dobby null, (C) código interno de Dobby durante fork, (D) api→algún_método con vtable incorrecta. El cambio B de PR55 cierra la hipótesis (D) para preServerSpecialize.
+
 **Fecha y agente:** 27 de febrero de 2026, Jules (PR54b — VTable shift: eliminar virtual ~Module() de zygisk.hpp)
 **Resumen de cambios:** v12.9.34 — Diagnóstico confirmado por tombstone: VTable shift por destructor virtual.
 - **Causa raíz:** `virtual ~Module() {}` en `jni/include/zygisk.hpp` inserta el destructor en vtable[0], desplazando todos los pure virtuals un slot. Zygisk Next llama `vtable[0]` esperando `onLoad()` pero ejecuta `~Module()` — destruye el objeto in-place. Los pure virtuals de la clase base quedan como null VTable entries → SIGSEGV pc=0x0 desde `forkSystemServer`.

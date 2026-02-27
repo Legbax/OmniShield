@@ -2289,10 +2289,14 @@ static void my_native_setup(JNIEnv* env, jobject thiz,
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
+static JavaVM *g_jvm = nullptr;  // PR55: guardar JavaVM en lugar de JNIEnv raw
+
 class OmniModule : public zygisk::Module {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
+        if (!api || !env) return;
         this->api = api;
+        env->GetJavaVM(&g_jvm);  // PR55: guardar JavaVM — más seguro que JNIEnv entre threads
         this->env = env;
     }
     void preAppSpecialize(zygisk::Api *api, JNIEnv *env) override { readConfig(); }
@@ -2842,7 +2846,14 @@ public:
         }
 
     }
-    void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
+    void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {
+        // PR55: Usar this->api (guardado en onLoad) NO el parámetro.
+        // El parámetro 'api' en realidad es ServerSpecializeArgs* según
+        // la API oficial — nuestras firmas son incompatibles con eso.
+        // DLCLOSE descarga el módulo del proceso system_server,
+        // eliminando cualquier posible callback null durante el fork.
+        if (this->api) this->api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+    }
     void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
 private:
     zygisk::Api *api;
