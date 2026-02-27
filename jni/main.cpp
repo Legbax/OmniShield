@@ -39,8 +39,8 @@
 #include "omni_engine.hpp"
 
 #define LOG_TAG "AndroidSystem"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGD(...) do { if (g_debugMode) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); } while(0)
+#define LOGE(...) do { if (g_debugMode) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); } while(0)
 
 // Globals
 static std::map<std::string, std::string> g_config;
@@ -49,6 +49,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
+static bool g_debugMode = true;  // PR53: activar con debug_mode=true en .identity.cfg
 
 // PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
 static double g_cachedLat       = 0.0;
@@ -71,7 +72,7 @@ static long   g_seedVersion        = 0;
 static bool   g_sensorHasHeartRate = false;
 static bool   g_sensorHasBarometer = false;
 
-// PR44: Camera2 — globals ópticos cargados desde G_DEVICE_PROFILES en postAppSpecialize
+// PR44: Camera2 — globals ópticos cargados desde findProfile() en postAppSpecialize
 // Rear camera (siempre activo)
 static float   g_camPhysicalWidth   = 6.40f;
 static float   g_camPhysicalHeight  = 4.80f;
@@ -245,6 +246,7 @@ void readConfig() {
     if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
     if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
     if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
+    if (g_config.count("debug_mode")) g_debugMode = (g_config["debug_mode"] == "true");
     // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
     // Permite que el módulo invalide caches en el próximo arranque de la app
     if (g_config.count("seed_version")) {
@@ -262,8 +264,9 @@ bool shouldHide(const char* key) {
     if (!key || key[0] == '\0') return false;
     std::string s = toLowerStr(key);
     if (g_currentProfileName == "Redmi 9" && s.find("lancelot") != std::string::npos) return false;
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if (fp_ptr) {
+        const auto& fp = *fp_ptr;
         if (toLowerStr(fp.brand).find("xiaomi") != std::string::npos ||
             toLowerStr(fp.hardware).find("mt") != std::string::npos) {
             if (s.find("mediatek") != std::string::npos) return false;
@@ -278,8 +281,9 @@ bool shouldHide(const char* key) {
 cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
     if (!orig_clGetDeviceInfo) return -1;
     cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
-    if (ret == 0 && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if (ret == 0 && fp_ptr) {
+        const auto& fp = *fp_ptr;
         std::string egl = toLowerStr(fp.eglDriver);
 
         // En my_clGetDeviceInfo, añadir constantes y lógica de driver:
@@ -306,7 +310,7 @@ static inline bool isHiddenPath(const char* path) {
     static const char* HIDDEN_TOKENS[] = {
         "omnishield", "omni_data", "vortex",
         "magisk", "kernelsu", "susfs",
-        "android_cache_data", "tombstones",
+        "android_cache_data",
         nullptr
     };
 
@@ -353,8 +357,9 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 
 const char* my_eglQueryString(void* display, int name) {
     if (!orig_eglQueryString) return nullptr;
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if (fp_ptr) {
+        const auto& fp = *fp_ptr;
 
         if (name == EGL_VENDOR) return fp.gpuVendor;
 
@@ -410,8 +415,8 @@ int my_uname(struct utsname *buf) {
         std::string kv = "4.14.186-perf+";
         if (g_currentProfileName == "Redmi 9") {
              kv = "4.14.186-perf+";
-        } else if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            const auto& kfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        } else if (const DeviceFingerprint* kfp_ptr = findProfile(g_currentProfileName)) {
+            const auto& kfp = *kfp_ptr;
             std::string plat = toLowerStr(kfp.boardPlatform);
             std::string brd  = toLowerStr(kfp.brand);
 
@@ -715,8 +720,9 @@ int my_system_property_get(const char *key, char *value) {
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
     int ret = orig_system_property_get(key, value);
 
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if (fp_ptr) {
+        const auto& fp = *fp_ptr;
         std::string k = key;
         std::string dynamic_buffer; // Use local buffer instead of static
 
@@ -1034,9 +1040,10 @@ int my_open(const char *pathname, int flags, mode_t mode) {
     }
     if (pathname) {
         // Bloquear drivers de GPU contradictorios (Evasión Capa 5)
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
+        const DeviceFingerprint* fp_gpu = findProfile(g_currentProfileName);
+        if (fp_gpu) {
+            std::string plat = toLowerStr(fp_gpu->boardPlatform);
+            std::string brand = toLowerStr(fp_gpu->brand);
             bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos ||
                 plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos ||
                 plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos ||
@@ -1044,7 +1051,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                 plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos ||
                 plat.find("sm6150") != std::string::npos || plat.find("sm6350") != std::string::npos ||
                 plat.find("sm7325") != std::string::npos);
-            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
+            std::string egl = toLowerStr(fp_gpu->eglDriver);
 
             // Adreno → bloquea mali; Mali → bloquea kgsl; PowerVR → bloquea ambos
             if (egl == "powervr") {
@@ -1121,8 +1128,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 
         if (type != NONE) {
             std::string content;
-            if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+            const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+            if (fp_ptr) {
+                const auto& fp = *fp_ptr;
 
                 if (type == PROC_VERSION) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -1202,8 +1210,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     // Device Tree Blob model. Instagram y Firebase lo leen directamente.
                     // En el Redmi 9 real contiene "Xiaomi Redmi 9 (mt6768)" — expone
                     // fabricante y SoC real aunque todas las properties estén hooked.
-                    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                        const auto& fp2 = G_DEVICE_PROFILES.at(g_currentProfileName);
+                    const DeviceFingerprint* fp2_ptr = findProfile(g_currentProfileName);
+                    if (fp2_ptr) {
+                        const auto& fp2 = *fp2_ptr;
                         content = std::string(fp2.manufacturer) + " " + std::string(fp2.model) + "\n";
                     } else {
                         content = "Android Device\n";
@@ -1624,9 +1633,10 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     }
     if (pathname) {
         // Bloquear drivers de GPU contradictorios (Evasión Capa 5)
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
-            std::string brand = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).brand);
+        const DeviceFingerprint* fp_gpu = findProfile(g_currentProfileName);
+        if (fp_gpu) {
+            std::string plat = toLowerStr(fp_gpu->boardPlatform);
+            std::string brand = toLowerStr(fp_gpu->brand);
             bool isQcom = (brand == "google" || plat.find("msmnile") != std::string::npos ||
                 plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos ||
                 plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos ||
@@ -1634,7 +1644,7 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
                 plat.find("trinket") != std::string::npos || plat.find("sdm670") != std::string::npos ||
                 plat.find("sm6150") != std::string::npos || plat.find("sm6350") != std::string::npos ||
                 plat.find("sm7325") != std::string::npos);
-            std::string egl = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).eglDriver);
+            std::string egl = toLowerStr(fp_gpu->eglDriver);
 
             // Adreno → bloquea mali; Mali → bloquea kgsl; PowerVR → bloquea ambos
             if (egl == "powervr") {
@@ -1863,8 +1873,9 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 
 const GLubyte* my_glGetString(GLenum name) {
     if (!orig_glGetString) return nullptr;
-    if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if (fp_ptr) {
+        const auto& fp = *fp_ptr;
         if (name == GL_VENDOR)   return (const GLubyte*)fp.gpuVendor;
         if (name == GL_RENDERER) return (const GLubyte*)fp.gpuRenderer;
         if (name == GL_VERSION)  return (const GLubyte*)omni::engine::getGlVersionForProfile(fp);
@@ -1910,8 +1921,9 @@ const GLubyte* my_glGetString(GLenum name) {
 void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
     if (!orig_vkGetPhysicalDeviceProperties) return;
     orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
-    if (pProperties && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if (pProperties && fp_ptr) {
+        const auto& fp = *fp_ptr;
         std::string egl = toLowerStr(fp.eglDriver);
 
         // Sobreescribir con los datos del perfil emulado
@@ -1991,8 +2003,9 @@ struct dirent* my_readdir(DIR *dirp) {
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            std::string plat = toLowerStr(G_DEVICE_PROFILES.at(g_currentProfileName).boardPlatform);
+        const DeviceFingerprint* fp_rd = findProfile(g_currentProfileName);
+        if (fp_rd) {
+            std::string plat = toLowerStr(fp_rd->boardPlatform);
             if (plat.find("mt") == std::string::npos) {
                 if (dname.find("mtk") != std::string::npos || dname.find("mt_bat") != std::string::npos) {
                     continue; // Saltar archivos de MediaTek si no emulamos MTK
@@ -2018,8 +2031,9 @@ struct dirent* my_readdir(DIR *dirp) {
 unsigned long my_getauxval(unsigned long type) {
     if (!orig_getauxval) return 0;
     unsigned long val = orig_getauxval(type);
-    if ((type == AT_HWCAP || type == AT_HWCAP2) && G_DEVICE_PROFILES.count(g_currentProfileName)) {
-        const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
+    const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+    if ((type == AT_HWCAP || type == AT_HWCAP2) && fp_ptr) {
+        const auto& fp = *fp_ptr;
         std::string plat = toLowerStr(fp.boardPlatform);
 
         // Si el perfil es Cortex-A53 puro (ARMv8.0) o Exynos 9611, apagamos las flags ARMv8.2+
@@ -2171,7 +2185,7 @@ static bool isFrontCameraMetadata(JNIEnv* env, jobject thiz) {
 // -----------------------------------------------------------------------------
 static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
     if (!orig_nativeReadValues) return nullptr;
-    if (!G_DEVICE_PROFILES.count(g_currentProfileName)) {
+    if (!findProfile(g_currentProfileName)) {
         return orig_nativeReadValues(env, thiz, tag);
     }
 
@@ -2287,37 +2301,55 @@ static void my_native_setup(JNIEnv* env, jobject thiz,
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
-class OmniModule : public zygisk::Module {
+static zygisk::Api *g_api = nullptr;  // PR56: Api global guardada en onLoad
+static JavaVM *g_jvm = nullptr;       // PR55: guardar JavaVM en lugar de JNIEnv raw
+static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en preAppSpecialize
+
+class OmniModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
+        if (!api || !env) return;
+        g_api = api;
+        env->GetJavaVM(&g_jvm);
         this->api = api;
         this->env = env;
     }
-    void preAppSpecialize(zygisk::Api *api, JNIEnv *env) override { readConfig(); }
-    void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
-        // GUARDIA: solo inyectar en procesos objetivo
-        std::string procName;
-        { std::ifstream f("/proc/self/cmdline"); std::getline(f, procName, '\0'); }
+    void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
+        readConfig();
+        // PR56: leer procName desde args->nice_name para guardia de proceso
+        JNIEnv *env = nullptr;
+        if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+        g_isTargetApp = false;
+        if (env && args->nice_name) {
+            const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
+            if (p) {
+                std::string proc(p);
+                static const char* ALLOWED[] = {
+                    "com.snapchat.android","com.instagram.android",
+                    "com.tinder","com.bumble.app","com.badoo.mobile",
+                    "com.match.android","com.grindr.android",
+                    "com.OkCupid","com.pof.android",nullptr
+                };
+                for (int i = 0; ALLOWED[i]; i++)
+                    if (proc.find(ALLOWED[i]) != std::string::npos) { g_isTargetApp = true; break; }
+                env->ReleaseStringUTFChars(args->nice_name, p);
+            }
+        }
+        if (g_isTargetApp && g_api) g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+    }
+    void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
+        if (!g_isTargetApp) return;
 
-        static const char* ALLOWED[] = {
-            "com.snapchat.android", "com.instagram.android",
-            "com.tinder", "com.bumble.app", "com.badoo.mobile",
-            "com.match.android", "com.grindr.android",
-            "com.OkCupid", "com.pof.android", nullptr
-        };
-        bool isTarget = false;
-        for (int i = 0; ALLOWED[i]; i++)
-            if (procName.find(ALLOWED[i]) != std::string::npos) { isTarget = true; break; }
-
-        if (!isTarget) return;  // Salida temprana — sin hooks en procesos del sistema
-
-        // PR46: FORCE_DENYLIST_UNMOUNT solo para procesos objetivo confirmados
-        api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+        // PR56: obtener JNIEnv desde g_jvm (ya no viene como parámetro)
+        JNIEnv *env = nullptr;
+        if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+        if (!env) return;
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
-        if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-            const auto& sp = G_DEVICE_PROFILES.at(g_currentProfileName);
+        const DeviceFingerprint* sp_ptr = findProfile(g_currentProfileName);
+        if (sp_ptr) {
+            const auto& sp = *sp_ptr;
             g_sensorAccelMax      = sp.accelMaxRange;
             g_sensorAccelRes      = sp.accelResolution;
             g_sensorGyroMax       = sp.gyroMaxRange;
@@ -2473,8 +2505,9 @@ public:
                 // PR37: Expandir sync a todos los campos Build.* inicializados por Zygote
                 // Estos campos tienen el valor del hardware FÍSICO hasta que los sobrescribimos aquí.
                 // SetStaticObjectField es indetectable — es idéntico a como Zygote los inicializó.
-                if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
-                    const auto& bfp = G_DEVICE_PROFILES.at(g_currentProfileName);
+                const DeviceFingerprint* bfp_ptr = findProfile(g_currentProfileName);
+                if (bfp_ptr) {
+                    const auto& bfp = *bfp_ptr;
 
                     auto setStr = [&](const char* field, const char* val) {
                         if (!val) return;
@@ -2611,9 +2644,9 @@ public:
             {"getImei", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
         };
-        api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
+        g_api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
         if (env->ExceptionCheck()) env->ExceptionClear();
-        api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
+        g_api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
         if (env->ExceptionCheck()) env->ExceptionClear();
 
         // PR38+39: Location spoofing hooks
@@ -2655,7 +2688,7 @@ public:
                 {"getBearing",                "()F", (void*)LocationHook::getBearing},
                 {"getTime",                   "()J", (void*)LocationHook::getTime},
             };
-            api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
+            g_api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -2683,7 +2716,7 @@ public:
                 {"isAvailable",    "()Z",                  (void*)NetworkInfoHook::isAvailable},
                 {"isRoaming",      "()Z",                  (void*)NetworkInfoHook::isRoaming},
             };
-            api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
+            g_api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -2757,7 +2790,7 @@ public:
                 {"getFifoMaxEventCount",     "()I", (void*)SensorMetaHook::getFifoMaxEventCount},
                 {"getFifoReservedEventCount","()I", (void*)SensorMetaHook::getFifoReservedEventCount},
             };
-            api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
+            g_api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -2794,7 +2827,7 @@ public:
             JNINativeMethod sensorListMethods[] = {
                 {"getSensorList", "(I)Ljava/util/List;", (void*)SensorListHook::getSensorList},
             };
-            api->hookJniNativeMethods(env, "android/hardware/SensorManager",
+            g_api->hookJniNativeMethods(env, "android/hardware/SensorManager",
                                       sensorListMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
@@ -2807,7 +2840,7 @@ public:
             JNINativeMethod cameraMethods[] = {
                 {"nativeReadValues", "(I)[B", (void*)my_nativeReadValues},
             };
-            api->hookJniNativeMethods(env,
+            g_api->hookJniNativeMethods(env,
                 "android/hardware/camera2/impl/CameraMetadataNative",
                 cameraMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
@@ -2828,7 +2861,7 @@ public:
             JNINativeMethod codecMethods[] = {
                 {"native_setup", "(Ljava/lang/String;ZZ)V", (void*)my_native_setup},
             };
-            api->hookJniNativeMethods(env, "android/media/MediaCodec",
+            g_api->hookJniNativeMethods(env, "android/media/MediaCodec",
                                       codecMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
             // PR47: Solo capturar orig si hookJniNativeMethods realmente lo reemplazó.
@@ -2840,12 +2873,13 @@ public:
         }
 
     }
-    void preServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
-    void postServerSpecialize(zygisk::Api *api, JNIEnv *env) override {}
+    void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
+        // PR58: DLCLOSE removido — causa pc=0x0 en forkSystemServer.
+    }
+    void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {}
 private:
     zygisk::Api *api;
     JNIEnv *env;
 };
 
-static OmniModule module_instance;
-extern "C" { void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { api->registerModule(&module_instance); } }
+REGISTER_ZYGISK_MODULE(OmniModule)

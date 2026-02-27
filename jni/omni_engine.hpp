@@ -87,10 +87,10 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
     std::string brand = "default";
     bool isQualcomm = false;
 
-    auto it = G_DEVICE_PROFILES.find(profileName);
-    if (it != G_DEVICE_PROFILES.end()) {
-        brand = toLower(it->second.brand);
-        isQualcomm = (toLower(std::string(it->second.eglDriver)) == "adreno");
+    const DeviceFingerprint* it = findProfile(profileName);
+    if (it) {
+        brand = toLower(it->brand);
+        isQualcomm = (toLower(std::string(it->eglDriver)) == "adreno");
     }
 
     const std::vector<std::string>* tacList = TACS_BY_BRAND.count(brand) ? &TACS_BY_BRAND.at(brand) : &TACS_BY_BRAND.at("default");
@@ -112,12 +112,18 @@ inline std::string generateValidImei(const std::string& profileName, long seed) 
 // ICCID: Estándar ITU-T E.118 (89...)
 inline std::string generateValidIccid(const std::string& profileName, long seed) {
     // PR41: Solo USA — country code 1
-    static const std::map<std::string, std::string> ICCID_PREFIX = {
+    // PR59: Sin static local map — struct array sin guard variable
+    struct IccidEntry { const char* region; const char* prefix; };
+    static const IccidEntry ICCID_TBL[] = {
         {"usa", "89101"},
+        {nullptr, nullptr}
     };
     Random rng(seed);
     std::string region = getRegionForProfile(profileName);
-    std::string prefix = ICCID_PREFIX.count(region) ? ICCID_PREFIX.at(region) : "89101";
+    const char* prefix_cstr = "89101";
+    for (int i = 0; ICCID_TBL[i].region; i++)
+        if (region == ICCID_TBL[i].region) { prefix_cstr = ICCID_TBL[i].prefix; break; }
+    std::string prefix = prefix_cstr;
     std::string iccid = prefix;
     int remaining = 18 - (int)prefix.size();  // base 18 + 1 check digit = 19 total (ITU-T E.118)
     for(int i = 0; i < remaining; ++i) iccid += std::to_string(rng.nextInt(10));
@@ -126,14 +132,15 @@ inline std::string generateValidIccid(const std::string& profileName, long seed)
 
 inline std::string generateValidImsi(const std::string& profileName, long seed) {
     // PR41: Pool USA expandido — 5 carriers cubren >98% del mercado real
-    static const std::map<std::string, std::vector<std::string>> IMSI_POOLS = {
-        {"usa", {"310260", "310410", "311480", "310120", "311580"}}
-        //       T-Mobile   AT&T      Verizon   Sprint    US Cellular
+    // PR59: Sin static local map — array de const char* (sin guard variable)
+    static const char* const IMSI_POOL[] = {
+        "310260", "310410", "311480", "310120", "311580"
+        // T-Mobile  AT&T     Verizon   Sprint    US Cellular
     };
+    static const int IMSI_POOL_SIZE = 5;
+    (void)profileName;
     Random rng(seed);
-    std::string region = getRegionForProfile(profileName);
-    const auto& pool = IMSI_POOLS.count(region) ? IMSI_POOLS.at(region) : IMSI_POOLS.at("usa");
-    std::string mccMnc = pool[rng.nextInt(pool.size())];
+    std::string mccMnc = IMSI_POOL[rng.nextInt(IMSI_POOL_SIZE)];
     int remaining = 15 - mccMnc.length();
     std::string rest = std::to_string(2 + rng.nextInt(8));
     for (int i = 1; i < remaining; ++i) rest += std::to_string(rng.nextInt(10));
@@ -142,10 +149,10 @@ inline std::string generateValidImsi(const std::string& profileName, long seed) 
 
 inline std::string generatePhoneNumber(const std::string& profileName, long seed) {
     // PR41: Solo USA NANP
-    static const std::map<std::string,std::string> CC={{"usa","+1"}};
+    // PR59: Sin static local — lookup directo
+    std::string cc = "+1"; // Solo USA NANP, siempre +1
+    (void)profileName;
     Random rng(seed+777);
-    std::string region=getRegionForProfile(profileName);
-    std::string cc=CC.count(region)?CC.at(region):"+1";
 
     // PR42: NANP completo — estructura NPA-NXX-XXXX
     // NPA (área code, dígitos 1-3): primer dígito 2-9, excluir N11 y 555
@@ -333,7 +340,8 @@ inline double generateAltitudeForRegion(const std::string& profileName, long see
 // PR42: Timezone coherente con ciudad GPS — mismo seed que cityRng (seed+7777)
 // Houston usa Central Time (America/Chicago). Phoenix es MST sin DST (America/Phoenix).
 inline std::string getTimezoneForProfile(long seed) {
-    static const std::string US_CITY_TZ[5] = {
+    // PR59: const char* es trivialmente construible — sin guard variable
+    static const char* const US_CITY_TZ[5] = {
         "America/New_York",    // idx=0: New York
         "America/Los_Angeles", // idx=1: Los Angeles
         "America/Chicago",     // idx=2: Chicago
@@ -347,28 +355,32 @@ inline std::string getTimezoneForProfile(long seed) {
 // PR41: Mapeo MCC/MNC → nombre comercial del carrier USA
 // Usado por main.cpp para gsm.sim.operator.alpha
 inline std::string getCarrierNameForImsi(const std::string& profileName, long seed) {
-    static const std::map<std::string, std::string> CARRIER_NAMES = {
+    // PR59: Sin static local map — struct array sin guard variable
+    struct CarrierEntry { const char* mccmnc; const char* name; };
+    static const CarrierEntry CARRIERS[] = {
         {"310260", "T-Mobile"},
         {"310410", "AT&T"},
         {"311480", "Verizon Wireless"},
         {"310120", "T-Mobile"},       // Sprint fusionado → reporta T-Mobile en red
         {"311580", "U.S. Cellular"},
+        {nullptr, nullptr}
     };
     std::string imsi = generateValidImsi(profileName, seed);
     std::string mccMnc = (imsi.substr(0,3) == "310" || imsi.substr(0,3) == "311")
                          ? imsi.substr(0,6) : imsi.substr(0,5);
-    auto it = CARRIER_NAMES.find(mccMnc);
-    return (it != CARRIER_NAMES.end()) ? it->second : "T-Mobile";
+    for (int i = 0; CARRIERS[i].mccmnc; i++)
+        if (mccMnc == CARRIERS[i].mccmnc) return CARRIERS[i].name;
+    return "T-Mobile";
 }
 
 // PR42: Samsung Qualcomm recibe RIL Qualcomm, no Samsung
 // Afectados: Galaxy A52 (atoll), A72 (atoll), S20 FE (kona), A52s (sm7325)
 // Samsung Exynos siguen con "Samsung RIL v3.0"
 inline std::string getRilVersionForProfile(const std::string& profileName) {
-    auto it = G_DEVICE_PROFILES.find(profileName);
-    if (it != G_DEVICE_PROFILES.end()) {
-        std::string plat = toLower(std::string(it->second.boardPlatform));
-        std::string brand = toLower(std::string(it->second.brand));
+    const DeviceFingerprint* it = findProfile(profileName);
+    if (it) {
+        std::string plat = toLower(std::string(it->boardPlatform));
+        std::string brand = toLower(std::string(it->brand));
         // MediaTek — cualquier marca
         if (plat.find("mt6") != std::string::npos || plat.find("mt8") != std::string::npos)
             return "android mtk-ril 1.0";

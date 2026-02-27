@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(jni/include)
 
+# PR64: Restaurar módulo completo — main.cpp con OmniModule + Dobby + Vulkan
+
+# ── FULL (módulo completo) ───────────────────────────────────────────────────
 # Stub for Dobby implementation to allow linking check
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/dobby_stub.cpp "
 #include \"dobby.h\"
@@ -26,3 +29,9 @@ target_link_libraries(omnishield
     log
     vulkan
 )
+
+# ── MINIMAL (PR61 diagnóstico — comentado) ───────────────────────────────────
+# add_library(omnishield SHARED
+#     jni/main_minimal.cpp
+# )
+# target_link_libraries(omnishield log)

@@ -30,6 +30,10 @@ jobs:
           -DANDROID_STL=c++_static
         make
 
+    - name: Get version from module.prop
+      id: version
+      run: echo "VERSION=$(grep '^version=' module.prop | cut -d'=' -f2)" >> $GITHUB_OUTPUT
+
     - name: Package Module
       run: |
         mkdir -p dist/zygisk
@@ -37,11 +41,12 @@ jobs:
         cp module.prop dist/
         cp post-fs-data.sh dist/
         cp service.sh dist/
+        cp -r webroot dist/
         cd dist
-        zip -r omnishield-v12.9.31-release.zip .
+        zip -r omnishield-${{ steps.version.outputs.VERSION }}-release.zip .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: omnishield-v12.9.31-release
-        path: dist/omnishield-v12.9.31-release.zip
+        name: omnishield-${{ steps.version.outputs.VERSION }}-release
+        path: dist/omnishield-${{ steps.version.outputs.VERSION }}-release.zip

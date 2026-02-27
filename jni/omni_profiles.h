@@ -1,6 +1,5 @@
 #pragma once
 #include <string>
-#include <map>
 #include <cstdint>
 
 struct DeviceFingerprint {
@@ -73,7 +72,12 @@ struct DeviceFingerprint {
     bool hasFingerprintWakeupSensor;
 };
 
-static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
+// PR60: Array estático POD en .rodata — cero guard variables, cero heap.
+// Un static const de tipos trivialmente construibles (const char*, int, float, bool)
+// se inicializa en tiempo de compilación: no hay guard variable, no hay riesgo fork.
+inline const DeviceFingerprint* findProfile(const std::string& name) {
+    struct Entry { const char* n; DeviceFingerprint fp; };
+    static const Entry TABLE[] = {
     { "Redmi 9", {
         "Xiaomi", "Redmi", "Redmi 9", "lancelot",
         "lancelot_global", "mt6768", "lancelot", "V12.5.6.0.RJCMIXM",
@@ -714,4 +718,9 @@ static const std::map<std::string, DeviceFingerprint> G_DEVICE_PROFILES = {
         4.00f, 3.00f, 2.18f, 2.45f,                              // PR44: front physSize + focal + aperture
         false, false, false                                      // PR38+39: sensor presence bools
     } },
-};
+        { nullptr, {} }
+    };
+    for (int i = 0; TABLE[i].n; i++)
+        if (name == TABLE[i].n) return &TABLE[i].fp;
+    return nullptr;
+}
