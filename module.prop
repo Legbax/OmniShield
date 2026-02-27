@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.45
-versionCode=12945
+version=v12.9.46
+versionCode=12946
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR65b — Fix: JS detectNavInset() + CSS max() para MIUI WebView donde env() devuelve 0
+description=Total Invisibility (The Void). Zygisk module. PR66 — Fix: detectNavInset() Method 2 fallthrough + Method 4 Android UA 48px fallback

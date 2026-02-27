@@ -1203,3 +1203,34 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 **`module.prop`** — version bump `v12.9.43 → v12.9.44`, versionCode `12943 → 12944`.
 
 **Resultado:** La UI es ahora totalmente robusta: el loading screen se retira siempre en ≤ 3.6 s (3 s timeout + 600 ms fade), el mapa funciona sin internet, y todos los event listeners se registran incluso si `loadState()` falla.
+
+## PR66 — Fix: detectNavInset() fallthrough + Android UA fallback (bottom nav definitivo)
+
+**Fecha y agente:** 27 de febrero de 2026, Claude (PR66 — fix bottom nav overlap definitivo)
+
+**Problema:** La barra de navegación inferior seguía sin ser interactuable después de PR65b. El usuario confirmó: "Persiste el error, la navbar de android permanece y no es posible interactuar con el navbar".
+
+**Causa raíz (2 bugs en `detectNavInset()`):**
+
+1. **Method 2 (visualViewport) siempre hacía `return`** — incluso cuando el inset medido era 0. Esto bloqueaba completamente los Methods 3 y 4. En MIUI / Android 11 + KernelSU WebView, `visualViewport` existe pero reporta inset = 0 (los insets del sistema no se propagan al WebView), así que Method 2 nunca aplicaba nada pero sí impedía que los métodos de fallback actuaran.
+
+2. **Method 4 no existía** — no había ningún fallback de último recurso para Android. En dispositivos donde los 3 métodos de medición devuelven 0, el `--inset-bottom` nunca se actualizaba desde `0px`.
+
+**Fix aplicado — sólo `webroot/js/app.js`:**
+
+- **Method 2 corregido:** Se registra el listener de `resize` (para cambios dinámicos de viewport), pero el `return` temprano sólo se ejecuta si `initInset > 10 px`. Si el inset inicial es 0, la ejecución cae a Method 3 y luego a Method 4.
+
+- **Method 3 con `return`:** Agregado `return` explícito si Method 3 encontró una diferencia válida, para no sobrescribir con Method 4.
+
+- **Method 4 nuevo — Android UA fallback hardcodeado:**
+  ```javascript
+  // Method 4: Android UA hardcoded fallback
+  if (/Android/i.test(navigator.userAgent)) {
+    document.documentElement.style.setProperty('--inset-bottom', '48px');
+  }
+  ```
+  Si todos los métodos de medición devuelven 0, se aplican 48 px (altura CSS típica de la barra de navegación Android, tanto gestos como 3 botones). Esto garantiza que el `#bottom-nav` siempre queda por encima de la barra del sistema en cualquier dispositivo Android.
+
+**CSS sin cambios** — el CSS ya usa `max(env(safe-area-inset-bottom, 0px), var(--inset-bottom, 0px))`, así que en cuanto JS fija `--inset-bottom: 48px`, el bottom nav se desplaza automáticamente.
+
+**`module.prop`** — version bump `v12.9.45 → v12.9.46`, versionCode `12945 → 12946`.

@@ -748,7 +748,7 @@ function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&
 // env(safe-area-inset-bottom) returns 0 on MIUI / Android 11 WebViews even
 // when viewport-fit=cover is set, because KernelSU's activity doesn't forward
 // window insets to the WebView on those builds.
-// This function measures the actual gap using 3 methods and sets the CSS
+// This function measures the actual gap using 4 methods and sets the CSS
 // custom property --inset-bottom on :root so the bottom nav compensates.
 function detectNavInset() {
   // ── Method 1: probe whether env() is already working ─────────────────
@@ -762,20 +762,33 @@ function detectNavInset() {
   if (envH > 5) return; // env() is working — CSS already handles it
 
   // ── Method 2: visualViewport API (most precise, Android WebView 67+) ──
+  // IMPORTANT: Only return early if we actually measured a real inset (> 10px).
+  // On MIUI / Android 11 KernelSU WebView, visualViewport often reports 0 even
+  // though a physical nav bar is present. In that case we fall through to Methods
+  // 3 and 4. The resize listener is still registered so future viewport changes
+  // (e.g. keyboard) are handled dynamically.
   if (window.visualViewport) {
-    const apply = () => {
+    const applyVV = () => {
       const layoutH = document.documentElement.clientHeight;
       const inset = Math.max(
         0,
         Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
       );
-      document.documentElement.style.setProperty(
-        '--inset-bottom', inset > 10 ? inset + 'px' : '0px'
-      );
+      if (inset > 10) {
+        document.documentElement.style.setProperty('--inset-bottom', inset + 'px');
+      }
     };
-    apply();
-    window.visualViewport.addEventListener('resize', apply);
-    return;
+    window.visualViewport.addEventListener('resize', applyVV);
+    const layoutH = document.documentElement.clientHeight;
+    const initInset = Math.max(
+      0,
+      Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
+    );
+    if (initInset > 10) {
+      document.documentElement.style.setProperty('--inset-bottom', initInset + 'px');
+      return; // real measurement obtained — done
+    }
+    // initInset = 0 → fall through to Methods 3 & 4
   }
 
   // ── Method 3: screen vs window height heuristic ───────────────────────
@@ -790,6 +803,16 @@ function detectNavInset() {
              : 0;
   if (diff > 0) {
     document.documentElement.style.setProperty('--inset-bottom', diff + 'px');
+    return;
+  }
+
+  // ── Method 4: Android UA hardcoded fallback ────────────────────────────
+  // All measurement methods returned 0. On Android the system navigation bar
+  // (gesture strip or 3-button bar) is always present and is typically 48 px
+  // tall in CSS pixels. Apply this safe fallback so the bottom nav is always
+  // above the system bar on any Android device.
+  if (/Android/i.test(navigator.userAgent)) {
+    document.documentElement.style.setProperty('--inset-bottom', '48px');
   }
 }
 
