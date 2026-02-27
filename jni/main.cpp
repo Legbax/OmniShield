@@ -276,6 +276,7 @@ bool shouldHide(const char* key) {
 // Hooks: OpenCL
 // -----------------------------------------------------------------------------
 cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
+    if (!orig_clGetDeviceInfo) return -1;
     cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
     if (ret == 0 && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
@@ -316,15 +317,18 @@ static inline bool isHiddenPath(const char* path) {
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
+    if (!orig_stat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_stat(pathname, statbuf);
 }
 int my_lstat(const char* pathname, struct stat* statbuf) {
+    if (!orig_lstat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_lstat(pathname, statbuf);
 }
 
 int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags) {
+    if (!orig_fstatat) { errno = ENOSYS; return -1; }
     // Resolver path absoluto si es relativo con AT_FDCWD
     if (pathname && pathname[0] != '/' && dirfd == AT_FDCWD) {
         char cwd[512] = {};
@@ -339,6 +343,7 @@ int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
     return orig_fstatat(dirfd, pathname, statbuf, flags);
 }
 FILE* my_fopen(const char* pathname, const char* mode) {
+    if (!orig_fopen) { errno = ENOENT; return nullptr; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
     return orig_fopen(pathname, mode);
 }
@@ -347,6 +352,7 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 #define EGL_EXTENSIONS_ENUM 0x3055
 
 const char* my_eglQueryString(void* display, int name) {
+    if (!orig_eglQueryString) return nullptr;
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
 
@@ -383,6 +389,7 @@ const char* my_eglQueryString(void* display, int name) {
 
 // 2. Uptime Spoofing
 int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
+    if (!orig_clock_gettime) return -1;
     int ret = orig_clock_gettime(clockid, tp);
     // Solo modificamos relojes de uptime de sistema
     if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
@@ -395,6 +402,7 @@ int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
 
 // 3. Kernel Identity
 int my_uname(struct utsname *buf) {
+    if (!orig_uname) return -1;
     int ret = orig_uname(buf);
     if (ret == 0 && buf != nullptr) {
         strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
@@ -456,6 +464,7 @@ int my_uname(struct utsname *buf) {
 #endif
 
 int my_ioctl(int fd, unsigned long request, void* arg) {
+    if (!orig_ioctl) return -1;
     int ret = orig_ioctl(fd, request, arg);
     if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
         struct ifreq* ifr = static_cast<struct ifreq*>(arg);
@@ -472,6 +481,7 @@ int my_ioctl(int fd, unsigned long request, void* arg) {
 // Intercepta fcntl(F_DUPFD) para propagar la caché VFS al nuevo descriptor.
 // Argumento 'arg' es long para cubrir tanto int (F_DUPFD) como punteros (F_GETLK).
 int my_fcntl(int fd, int cmd, long arg) {
+    if (!orig_fcntl) return -1;
     int ret = orig_fcntl(fd, cmd, arg);
     if (ret >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) {
         // Propagar caché VFS al nuevo FD clonado
@@ -490,12 +500,14 @@ int my_fcntl(int fd, int cmd, long arg) {
 
 // 4. Deep VFS (Root Hiding)
 int my_access(const char *pathname, int mode) {
+    if (!orig_access) return -1;
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_access(pathname, mode);
 }
 
 // 5. Network Interfaces (Layer 2)
 int my_getifaddrs(struct ifaddrs **ifap) {
+    if (!orig_getifaddrs) return -1;
     int ret = orig_getifaddrs(ifap);
     if (ret == 0 && ifap != nullptr && *ifap != nullptr) {
         struct ifaddrs *curr = *ifap;
@@ -670,6 +682,7 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
 }
 
 ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
+    if (!orig_readlinkat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
@@ -698,6 +711,7 @@ static std::string generateBootId(long seed) {
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
 int my_system_property_get(const char *key, char *value) {
+    if (!orig_system_property_get) return 0;
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
     int ret = orig_system_property_get(key, value);
 
@@ -994,7 +1008,11 @@ int my_system_property_get(const char *key, char *value) {
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
 int my_open(const char *pathname, int flags, mode_t mode) {
-    if (!pathname) return orig_open(pathname, flags, mode);
+    // PR51: NO hookeamos open directamente — su body en Bionic llama openat()
+    // que está hooked, creando recursión infinita. my_open se usa como helper
+    // llamado desde my_openat; usa orig_openat(AT_FDCWD) como terminal seguro.
+    if (!orig_openat) { errno = ENOSYS; return -1; }
+    if (!pathname) return orig_openat(AT_FDCWD, pathname, flags, mode);
 
     std::string path_str(pathname);
     if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
@@ -1007,7 +1025,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         return -1;
     }
     if (path_str == "/proc/iomem") {
-        return orig_open("/dev/null", flags, mode);
+        return orig_openat(AT_FDCWD, "/dev/null", flags, mode);
     }
 
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
@@ -1035,7 +1053,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
             else if (!isQcom && strstr(pathname, "/dev/kgsl")) { errno = ENOENT; return -1; }
         }
     }
-    int fd = orig_open(pathname, flags, mode);
+    int fd = orig_openat(AT_FDCWD, pathname, flags, mode);
     if (fd >= 0 && pathname) {
         FileType type = NONE;
         if (strstr(pathname, "/proc/version")) type = PROC_VERSION;
@@ -1583,6 +1601,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
 }
 
 int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
+    if (!orig_openat) { errno = ENOSYS; return -1; }
     if (!pathname) return orig_openat(dirfd, pathname, flags, mode);
 
     std::string path_str(pathname);
@@ -1640,6 +1659,7 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
         char dirpath[512] = {};
         char fdlink[64];
         snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", dirfd);
+        if (!orig_readlinkat) return orig_openat(dirfd, pathname, flags, mode);
         ssize_t len = orig_readlinkat(AT_FDCWD, fdlink, dirpath, sizeof(dirpath)-1);
         if (len > 0) {
             dirpath[len] = '\0';
@@ -1679,6 +1699,7 @@ int my_close(int fd) {
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
+    if (!orig_read) { errno = ENOSYS; return -1; }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1710,6 +1731,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 }
 
 off_t my_lseek(int fd, off_t offset, int whence) {
+    if (!orig_lseek) { errno = ENOSYS; return -1; }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1732,6 +1754,7 @@ off64_t my_lseek64(int fd, off64_t offset, int whence) {
 }
 
 ssize_t my_pread(int fd, void* buf, size_t count, off_t offset) {
+    if (!orig_pread) { errno = ENOSYS; return -1; }
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -1759,6 +1782,7 @@ ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
 // Sin esto, read(dup(fd)) leería el hardware real (MediaTek) en lugar del emulado.
 // -----------------------------------------------------------------------------
 int my_dup(int oldfd) {
+    if (!orig_dup) return -1;
     int newfd = orig_dup(oldfd);
     if (newfd >= 0) {
         std::lock_guard<std::mutex> lock(g_fdMutex);
@@ -1775,6 +1799,7 @@ int my_dup(int oldfd) {
 }
 
 int my_dup2(int oldfd, int newfd) {
+    if (!orig_dup2) return -1;
     // Si newfd ya está en nuestra caché, limpiarlo primero
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
@@ -1798,6 +1823,7 @@ int my_dup2(int oldfd, int newfd) {
 }
 
 int my_dup3(int oldfd, int newfd, int flags) {
+    if (!orig_dup3) return -1;
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         g_fdMap.erase(newfd);
@@ -1822,10 +1848,11 @@ int my_dup3(int oldfd, int newfd, int flags) {
 // -----------------------------------------------------------------------------
 // Hooks: Network (SSL)
 // -----------------------------------------------------------------------------
-int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
-int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { return orig_SSL_set1_tls13_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
-int my_SSL_set_cipher_list(SSL *ssl, const char *str) { return orig_SSL_set_cipher_list(ssl, omni::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *str) { if (!orig_SSL_CTX_set_ciphersuites) return 0; return orig_SSL_CTX_set_ciphersuites(ctx, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set1_tls13_ciphersuites(SSL *ssl, const char *str) { if (!orig_SSL_set1_tls13_ciphersuites) return 0; return orig_SSL_set1_tls13_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str()); }
+int my_SSL_set_cipher_list(SSL *ssl, const char *str) { if (!orig_SSL_set_cipher_list) return 0; return orig_SSL_set_cipher_list(ssl, omni::engine::generateTls12CipherSuites(g_masterSeed).c_str()); }
 int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
+    if (!orig_SSL_set_ciphersuites) return 0;
     return orig_SSL_set_ciphersuites(ssl, omni::engine::generateTls13CipherSuites(g_masterSeed).c_str());
 }
 
@@ -1835,6 +1862,7 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 #define GL_EXTENSIONS 0x1F03
 
 const GLubyte* my_glGetString(GLenum name) {
+    if (!orig_glGetString) return nullptr;
     if (G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
         if (name == GL_VENDOR)   return (const GLubyte*)fp.gpuVendor;
@@ -1880,6 +1908,7 @@ const GLubyte* my_glGetString(GLenum name) {
 // Hooks: Vulkan API
 // -----------------------------------------------------------------------------
 void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
+    if (!orig_vkGetPhysicalDeviceProperties) return;
     orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
     if (pProperties && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
@@ -1903,6 +1932,7 @@ void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysica
 // Hooks: SensorManager (Limpieza de firmas MTK/Xiaomi)
 // -----------------------------------------------------------------------------
 const char* my_Sensor_getName(void* sensor) {
+    if (!orig_Sensor_getName) return nullptr;
     const char* orig_name = orig_Sensor_getName(sensor);
     if (!orig_name) return nullptr;
 
@@ -1924,6 +1954,7 @@ const char* my_Sensor_getName(void* sensor) {
 }
 
 const char* my_Sensor_getVendor(void* sensor) {
+    if (!orig_Sensor_getVendor) return nullptr;
     const char* orig_vendor = orig_Sensor_getVendor(sensor);
     if (!orig_vendor) return nullptr;
 
@@ -1943,6 +1974,7 @@ const char* my_Sensor_getVendor(void* sensor) {
 // Hooks: sysinfo (Uptime Paradox Fix)
 // -----------------------------------------------------------------------------
 int my_sysinfo(struct sysinfo *info) {
+    if (!orig_sysinfo) return -1;
     int ret = orig_sysinfo(info);
     if (ret == 0 && info != nullptr) {
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
@@ -1955,6 +1987,7 @@ int my_sysinfo(struct sysinfo *info) {
 // Hooks: readdir (Ocultación de nodos de batería MTK)
 // -----------------------------------------------------------------------------
 struct dirent* my_readdir(DIR *dirp) {
+    if (!orig_readdir) return nullptr;
     struct dirent* ret;
     while ((ret = orig_readdir(dirp)) != nullptr) {
         std::string dname = toLowerStr(ret->d_name);
@@ -1983,6 +2016,7 @@ struct dirent* my_readdir(DIR *dirp) {
 #endif
 
 unsigned long my_getauxval(unsigned long type) {
+    if (!orig_getauxval) return 0;
     unsigned long val = orig_getauxval(type);
     if ((type == AT_HWCAP || type == AT_HWCAP2) && G_DEVICE_PROFILES.count(g_currentProfileName)) {
         const auto& fp = G_DEVICE_PROFILES.at(g_currentProfileName);
@@ -2022,6 +2056,7 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
     env->ReleaseStringUTFChars(name, key);
 
     if (result) return result;
+    if (!orig_SettingsSecure_getString) return nullptr;
     return orig_SettingsSecure_getString(env, name);
 }
 
@@ -2045,6 +2080,7 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
         catch_ptr->serial = s;
     };
 
+    if (!orig_system_property_read_callback) { callback(cookie, "", "", 0); return; }
     orig_system_property_read_callback(pi, internal_cb, &catcher);
 
     if (shouldHide(catcher.name.c_str()) || shouldHide(catcher.real_val.c_str())) {
@@ -2134,6 +2170,7 @@ static bool isFrontCameraMetadata(JNIEnv* env, jobject thiz) {
 //   0x00050006  LENS_FACING — cae en default:, pasa al original
 // -----------------------------------------------------------------------------
 static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
+    if (!orig_nativeReadValues) return nullptr;
     if (!G_DEVICE_PROFILES.count(g_currentProfileName)) {
         return orig_nativeReadValues(env, thiz, tag);
     }
@@ -2191,6 +2228,7 @@ static jbyteArray my_nativeReadValues(JNIEnv* env, jobject thiz, jint tag) {
         default:
             // LENS_FACING (0x00050006) cae aquí intencionalmente.
             // Es el oráculo de isFrontCameraMetadata — no interceptar.
+            if (orig_nativeReadValues == nullptr) return nullptr;
             return orig_nativeReadValues(env, thiz, tag);
     }
 }
@@ -2242,6 +2280,7 @@ static void my_native_setup(JNIEnv* env, jobject thiz,
                 name = env->NewStringUTF(translated.c_str());
         }
     }
+    if (!orig_native_setup) return;
     orig_native_setup(env, thiz, name, nameIsType, encoder);
 }
 
@@ -2256,6 +2295,23 @@ public:
     }
     void preAppSpecialize(zygisk::Api *api, JNIEnv *env) override { readConfig(); }
     void postAppSpecialize(zygisk::Api *api, JNIEnv *env) override {
+        // GUARDIA: solo inyectar en procesos objetivo
+        std::string procName;
+        { std::ifstream f("/proc/self/cmdline"); std::getline(f, procName, '\0'); }
+
+        static const char* ALLOWED[] = {
+            "com.snapchat.android", "com.instagram.android",
+            "com.tinder", "com.bumble.app", "com.badoo.mobile",
+            "com.match.android", "com.grindr.android",
+            "com.OkCupid", "com.pof.android", nullptr
+        };
+        bool isTarget = false;
+        for (int i = 0; ALLOWED[i]; i++)
+            if (procName.find(ALLOWED[i]) != std::string::npos) { isTarget = true; break; }
+
+        if (!isTarget) return;  // Salida temprana — sin hooks en procesos del sistema
+
+        // PR46: FORCE_DENYLIST_UNMOUNT solo para procesos objetivo confirmados
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
@@ -2285,72 +2341,92 @@ public:
         }
 
         // Libc Hooks (Phase 1)
-        void* open_func = DobbySymbolResolver(nullptr, "open");
-        if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
+        // PR51: open NO se hookea directamente. Bionic::open llama openat() internamente;
+        // hookear ambos crea recursión infinita (my_open→orig_open→openat→my_openat→my_open).
+        // Toda llamada a open() pasa por openat() de todas formas → un solo hook en openat basta.
 
-        void* openat_func = DobbySymbolResolver(nullptr, "openat");
+        void* openat_func = DobbySymbolResolver("libc.so", "openat");
         if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
 
-        void* read_func = DobbySymbolResolver(nullptr, "read");
+        void* read_func = DobbySymbolResolver("libc.so", "read");
         if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
 
-        void* close_func = DobbySymbolResolver(nullptr, "close");
+        void* close_func = DobbySymbolResolver("libc.so", "close");
         if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
 
-        void* lseek_func = DobbySymbolResolver(nullptr, "lseek");
+        void* lseek_func = DobbySymbolResolver("libc.so", "lseek");
         if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
 
-        void* lseek64_func = DobbySymbolResolver(nullptr, "lseek64");
+        void* lseek64_func = DobbySymbolResolver("libc.so", "lseek64");
         if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
 
-        void* pread_func = DobbySymbolResolver(nullptr, "pread");
+        void* pread_func = DobbySymbolResolver("libc.so", "pread");
         if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
 
-        void* pread64_func = DobbySymbolResolver(nullptr, "pread64");
+        void* pread64_func = DobbySymbolResolver("libc.so", "pread64");
         if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
 
-        void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
+        void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
 
-        void* sysprop_cb_func = DobbySymbolResolver(nullptr, "__system_property_read_callback");
+        void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
-        DobbyHook((void*)uname, (void*)my_uname, (void**)&orig_uname);
-        DobbyHook((void*)clock_gettime, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
-        DobbyHook((void*)access, (void*)my_access, (void**)&orig_access);
-        DobbyHook((void*)getifaddrs, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
-        DobbyHook((void*)stat, (void*)my_stat, (void**)&orig_stat);
-        DobbyHook((void*)lstat, (void*)my_lstat, (void**)&orig_lstat);
-        void* fstatat_func = DobbySymbolResolver(nullptr, "fstatat");
-        if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
-        DobbyHook((void*)fopen, (void*)my_fopen, (void**)&orig_fopen);
-        DobbyHook((void*)readlinkat, (void*)my_readlinkat, (void**)&orig_readlinkat);
+        // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
+        // y de funciones VDSO (clock_gettime en arm64 es VDSO read-only → SIGSEGV).
+        void* uname_sym = DobbySymbolResolver("libc.so", "uname");
+        if (uname_sym) DobbyHook(uname_sym, (void*)my_uname, (void**)&orig_uname);
 
-        void* sysinfo_func = DobbySymbolResolver(nullptr, "sysinfo");
+        void* clock_gettime_sym = DobbySymbolResolver("libc.so", "clock_gettime");
+        if (clock_gettime_sym) DobbyHook(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+
+        void* access_sym = DobbySymbolResolver("libc.so", "access");
+        if (access_sym) DobbyHook(access_sym, (void*)my_access, (void**)&orig_access);
+
+        void* getifaddrs_sym = DobbySymbolResolver("libc.so", "getifaddrs");
+        if (getifaddrs_sym) DobbyHook(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+
+        void* stat_sym = DobbySymbolResolver("libc.so", "stat");
+        if (stat_sym) DobbyHook(stat_sym, (void*)my_stat, (void**)&orig_stat);
+
+        void* lstat_sym = DobbySymbolResolver("libc.so", "lstat");
+        if (lstat_sym) DobbyHook(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
+
+        void* fstatat_func = DobbySymbolResolver("libc.so", "fstatat");
+        if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
+
+        void* fopen_sym = DobbySymbolResolver("libc.so", "fopen");
+        if (fopen_sym) DobbyHook(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
+
+        void* readlinkat_sym = DobbySymbolResolver("libc.so", "readlinkat");
+        if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
+
+        void* sysinfo_func = DobbySymbolResolver("libc.so", "sysinfo");
         if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
 
-        void* readdir_func = DobbySymbolResolver(nullptr, "readdir");
+        void* readdir_func = DobbySymbolResolver("libc.so", "readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
 
-        void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
+        void* getauxval_func = DobbySymbolResolver("libc.so", "getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
-        DobbyHook((void*)dup, (void*)my_dup, (void**)&orig_dup);
-        void* dup2_func = DobbySymbolResolver(nullptr, "dup2");
+        void* dup_sym = DobbySymbolResolver("libc.so", "dup");
+        if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
+        void* dup2_func = DobbySymbolResolver("libc.so", "dup2");
         if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
-        void* dup3_func = DobbySymbolResolver(nullptr, "dup3");
+        void* dup3_func = DobbySymbolResolver("libc.so", "dup3");
         if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
 
         // PR43: fcntl hook (F_DUPFD)
-        void* fcntl_func = DobbySymbolResolver(nullptr, "fcntl");
+        void* fcntl_func = DobbySymbolResolver("libc.so", "fcntl");
         if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
 
         // PR42: ioctl hook — MAC real bypass via syscall directo
         // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
-        void* ioctl_sym = DobbySymbolResolver(nullptr, "__ioctl");
-        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver(nullptr, "ioctl");
+        void* ioctl_sym = DobbySymbolResolver("libc.so", "__ioctl");
+        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver("libc.so", "ioctl");
         if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // -----------------------------------------------------------------------------
@@ -2430,7 +2506,8 @@ public:
                     // Build.TIME del ROM físico puede diferir del perfil emulado.
                     jfieldID fid_time = env->GetStaticFieldID(build_class, "TIME", "J");
                     if (fid_time) {
-                        jlong build_time = std::stoll(bfp.buildDateUtc) * 1000LL;
+                        jlong build_time = 0;
+                        try { build_time = std::stoll(bfp.buildDateUtc) * 1000LL; } catch(...) {}
                         env->SetStaticLongField(build_class, fid_time, build_time);
                     }
 
@@ -2445,15 +2522,15 @@ public:
                     jclass build_version_class = env->FindClass("android/os/Build$VERSION");
                     if (build_version_class) {
                         jfieldID fid_sp = env->GetStaticFieldID(build_version_class, "SECURITY_PATCH", "Ljava/lang/String;");
-                        if (fid_sp) env->SetStaticObjectField(build_version_class, fid_sp,
+                        if (fid_sp && bfp.securityPatch) env->SetStaticObjectField(build_version_class, fid_sp,
                             env->NewStringUTF(bfp.securityPatch));
 
                         jfieldID fid_release = env->GetStaticFieldID(build_version_class, "RELEASE", "Ljava/lang/String;");
-                        if (fid_release) env->SetStaticObjectField(build_version_class, fid_release,
+                        if (fid_release && bfp.release) env->SetStaticObjectField(build_version_class, fid_release,
                             env->NewStringUTF(bfp.release));
 
                         jfieldID fid_incr = env->GetStaticFieldID(build_version_class, "INCREMENTAL", "Ljava/lang/String;");
-                        if (fid_incr) env->SetStaticObjectField(build_version_class, fid_incr,
+                        if (fid_incr && bfp.incremental) env->SetStaticObjectField(build_version_class, fid_incr,
                             env->NewStringUTF(bfp.incremental));
 
                         // PR40 (Gemini BUG-C1-03): Forzar SDK_INT=30 (Android 11).
@@ -2466,6 +2543,8 @@ public:
                 }
             }
         }
+        // PR47: Limpiar cualquier excepción JNI pendiente del Build sync
+        if (env->ExceptionCheck()) env->ExceptionClear();
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
@@ -2533,7 +2612,9 @@ public:
             {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
         };
         api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
+        if (env->ExceptionCheck()) env->ExceptionClear();
         api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
+        if (env->ExceptionCheck()) env->ExceptionClear();
 
         // PR38+39: Location spoofing hooks
         // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
@@ -2575,6 +2656,7 @@ public:
                 {"getTime",                   "()J", (void*)LocationHook::getTime},
             };
             api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // PR38+39: ConnectivityManager — NetworkInfo getters
@@ -2602,6 +2684,7 @@ public:
                 {"isRoaming",      "()Z",                  (void*)NetworkInfoHook::isRoaming},
             };
             api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
@@ -2675,6 +2758,7 @@ public:
                 {"getFifoReservedEventCount","()I", (void*)SensorMetaHook::getFifoReservedEventCount},
             };
             api->hookJniNativeMethods(env, "android/hardware/Sensor", sensorMethods, 8);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // PR38+39: SensorManager.getSensorList(int type) filter
@@ -2712,6 +2796,7 @@ public:
             };
             api->hookJniNativeMethods(env, "android/hardware/SensorManager",
                                       sensorListMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
         // PR44: Camera2 — nativeReadValues hook
@@ -2725,6 +2810,14 @@ public:
             api->hookJniNativeMethods(env,
                 "android/hardware/camera2/impl/CameraMetadataNative",
                 cameraMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            // PR47: Solo capturar orig si hookJniNativeMethods realmente lo reemplazó.
+            // Si falló, fnPtr sigue apuntando a my_nativeReadValues → dejamos orig en nullptr.
+            if (cameraMethods[0].fnPtr && cameraMethods[0].fnPtr != (void*)my_nativeReadValues) {
+                orig_nativeReadValues =
+                    reinterpret_cast<jbyteArray(*)(JNIEnv*, jobject, jint)>(
+                        cameraMethods[0].fnPtr);
+            }
         }
 
         // PR44: MediaCodec — crash guard en native_setup (lado de creación)
@@ -2737,6 +2830,13 @@ public:
             };
             api->hookJniNativeMethods(env, "android/media/MediaCodec",
                                       codecMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            // PR47: Solo capturar orig si hookJniNativeMethods realmente lo reemplazó.
+            if (codecMethods[0].fnPtr && codecMethods[0].fnPtr != (void*)my_native_setup) {
+                orig_native_setup =
+                    reinterpret_cast<void(*)(JNIEnv*, jobject, jstring, jboolean, jboolean)>(
+                        codecMethods[0].fnPtr);
+            }
         }
 
     }
