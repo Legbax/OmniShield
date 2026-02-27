@@ -10,7 +10,6 @@ struct Api;
 
 class Module {
 public:
-    virtual ~Module() {}
     virtual void onLoad(Api *api, JNIEnv *env) = 0;
     virtual void preAppSpecialize(Api *api, JNIEnv *env) = 0;
     virtual void postAppSpecialize(Api *api, JNIEnv *env) = 0;
