@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#080b14">
+  <meta name="theme-color" content="#04070f">
   <title>OmniShield</title>
   <link rel="stylesheet" href="css/style.css">
   <!-- Leaflet map (loaded asynchronously, graceful degradation if offline) -->
@@ -11,6 +11,17 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
 </head>
 <body>
+
+<!-- ═══════════════════════════ LOADING SCREEN ════════════════════════════ -->
+<div id="loading-screen">
+  <div class="loader-content">
+    <div class="loader-shield">🛡️</div>
+    <div class="loader-title">OmniShield</div>
+    <div class="loader-sub">Initializing secure environment…</div>
+    <div class="loader-bar-wrap"><div class="loader-bar"></div></div>
+  </div>
+</div>
+
 <div id="app">
 
   <!-- ═══════════════════════════════ HEADER ═══════════════════════════════ -->

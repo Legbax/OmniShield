@@ -1,5 +1,4 @@
 // app.js — OmniShield WebUI main application
-import { exec } from 'kernelsu';
 import {
   generateIMEI, generateICCID, generateIMSI, generatePhoneNumber,
   generateMAC, generateSerial, generateAndroidId, generateGsfId,
@@ -12,11 +11,18 @@ import {
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
+// Uses dynamic import so the module loads even outside KernelSU WebView
+let _ksuExecFn = null;
 async function ksu_exec(cmd) {
   try {
-    const r = await exec(cmd);
+    if (!_ksuExecFn) {
+      const mod = await import('kernelsu');
+      _ksuExecFn = mod.exec;
+    }
+    const r = await _ksuExecFn(cmd);
     return { errno: r.errno || 0, stdout: (r.stdout || '').trim() };
   } catch(e) {
+    // Not in KernelSU environment — graceful degradation
     return { errno: 1, stdout: '' };
   }
 }
@@ -102,7 +108,9 @@ async function loadState() {
 
 function computeAll() {
   const { profile, seed } = state;
-  const fp = getProfileByName(profile);
+  let fp = getProfileByName(profile);
+  // Fallback to Redmi 9 if profile is missing/invalid
+  if (!fp) { state.profile = 'Redmi 9'; fp = getProfileByName('Redmi 9'); }
   const brand = (fp.brand || 'xiaomi').toLowerCase();
 
   state.imei       = overrides.imei       ?? generateIMEI(profile, seed);
@@ -392,14 +400,17 @@ function renderLocationTab() {
   document.getElementById('loc-tz')  && (document.getElementById('loc-tz').textContent  = state.tz);
   // Sensor values from profile
   const fp = getProfileByName(state.profile);
-  document.getElementById('loc-accel-max') && (document.getElementById('loc-accel-max').textContent = fp.accelMaxRange?.toFixed(4) + ' m/s²');
-  document.getElementById('loc-accel-res') && (document.getElementById('loc-accel-res').textContent = fp.accelResolution?.toFixed(7));
-  document.getElementById('loc-gyro-max')  && (document.getElementById('loc-gyro-max').textContent  = fp.gyroMaxRange?.toFixed(6) + ' rad/s');
-  document.getElementById('loc-gyro-res')  && (document.getElementById('loc-gyro-res').textContent  = fp.gyroResolution?.toFixed(6));
-  document.getElementById('loc-mag-max')   && (document.getElementById('loc-mag-max').textContent   = fp.magMaxRange?.toFixed(1) + ' µT');
-  document.getElementById('loc-heart')    && (document.getElementById('loc-heart').textContent     = fp.hasHeartRate  ? '✓ Present' : '✗ Absent');
-  document.getElementById('loc-baro')     && (document.getElementById('loc-baro').textContent      = fp.hasBarometer  ? '✓ Present' : '✗ Absent');
-  document.getElementById('loc-fp-wake')  && (document.getElementById('loc-fp-wake').textContent   = fp.hasFingerprintWakeup ? '✓ Present' : '✗ Absent');
+  // Safe fixed-point helper — shows '–' if value is null/undefined
+  const sfx = (v, d, unit='') => (v != null ? v.toFixed(d) + unit : '–');
+  const setEl = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  setEl('loc-accel-max', sfx(fp.accelMaxRange,  4, ' m/s²'));
+  setEl('loc-accel-res', sfx(fp.accelResolution, 7));
+  setEl('loc-gyro-max',  sfx(fp.gyroMaxRange,   6, ' rad/s'));
+  setEl('loc-gyro-res',  sfx(fp.gyroResolution, 6));
+  setEl('loc-mag-max',   sfx(fp.magMaxRange,    1, ' µT'));
+  setEl('loc-heart',     fp.hasHeartRate  ? '✓ Present' : '✗ Absent');
+  setEl('loc-baro',      fp.hasBarometer  ? '✓ Present' : '✗ Absent');
+  setEl('loc-fp-wake',   fp.hasFingerprintWakeup ? '✓ Present' : '✗ Absent');
 
   if (window._map) {
     window._map.setView([state.lat, state.lon], 11);
@@ -731,6 +742,13 @@ function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   await loadState();
+
+  // Hide loading screen once state is loaded
+  const loader = document.getElementById('loading-screen');
+  if (loader) {
+    loader.classList.add('hidden');
+    setTimeout(() => loader.remove(), 600);
+  }
 
   // Navigation
   document.querySelectorAll('.nav-item').forEach(btn => {
