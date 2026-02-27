@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.29
-versionCode=12929
+version=v12.9.30
+versionCode=12930
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR49 — Crash fix: DobbySymbolResolver for all 9 direct-ptr hooks (VDSO/PLT)
+description=Total Invisibility (The Void). Zygisk module. PR50 — Crash fix: DobbySymbolResolver("libc.so") para evitar VDSO, try-catch stoll, null guards NewStringUTF

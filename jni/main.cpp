@@ -2337,91 +2337,91 @@ public:
         }
 
         // Libc Hooks (Phase 1)
-        void* open_func = DobbySymbolResolver(nullptr, "open");
+        void* open_func = DobbySymbolResolver("libc.so", "open");
         if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
 
-        void* openat_func = DobbySymbolResolver(nullptr, "openat");
+        void* openat_func = DobbySymbolResolver("libc.so", "openat");
         if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
 
-        void* read_func = DobbySymbolResolver(nullptr, "read");
+        void* read_func = DobbySymbolResolver("libc.so", "read");
         if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
 
-        void* close_func = DobbySymbolResolver(nullptr, "close");
+        void* close_func = DobbySymbolResolver("libc.so", "close");
         if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
 
-        void* lseek_func = DobbySymbolResolver(nullptr, "lseek");
+        void* lseek_func = DobbySymbolResolver("libc.so", "lseek");
         if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
 
-        void* lseek64_func = DobbySymbolResolver(nullptr, "lseek64");
+        void* lseek64_func = DobbySymbolResolver("libc.so", "lseek64");
         if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
 
-        void* pread_func = DobbySymbolResolver(nullptr, "pread");
+        void* pread_func = DobbySymbolResolver("libc.so", "pread");
         if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
 
-        void* pread64_func = DobbySymbolResolver(nullptr, "pread64");
+        void* pread64_func = DobbySymbolResolver("libc.so", "pread64");
         if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
 
-        void* sysprop_func = DobbySymbolResolver(nullptr, "__system_property_get");
+        void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
 
-        void* sysprop_cb_func = DobbySymbolResolver(nullptr, "__system_property_read_callback");
+        void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
         // y de funciones VDSO (clock_gettime en arm64 es VDSO read-only → SIGSEGV).
-        void* uname_sym = DobbySymbolResolver(nullptr, "uname");
+        void* uname_sym = DobbySymbolResolver("libc.so", "uname");
         if (uname_sym) DobbyHook(uname_sym, (void*)my_uname, (void**)&orig_uname);
 
-        void* clock_gettime_sym = DobbySymbolResolver(nullptr, "clock_gettime");
+        void* clock_gettime_sym = DobbySymbolResolver("libc.so", "clock_gettime");
         if (clock_gettime_sym) DobbyHook(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
 
-        void* access_sym = DobbySymbolResolver(nullptr, "access");
+        void* access_sym = DobbySymbolResolver("libc.so", "access");
         if (access_sym) DobbyHook(access_sym, (void*)my_access, (void**)&orig_access);
 
-        void* getifaddrs_sym = DobbySymbolResolver(nullptr, "getifaddrs");
+        void* getifaddrs_sym = DobbySymbolResolver("libc.so", "getifaddrs");
         if (getifaddrs_sym) DobbyHook(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
 
-        void* stat_sym = DobbySymbolResolver(nullptr, "stat");
+        void* stat_sym = DobbySymbolResolver("libc.so", "stat");
         if (stat_sym) DobbyHook(stat_sym, (void*)my_stat, (void**)&orig_stat);
 
-        void* lstat_sym = DobbySymbolResolver(nullptr, "lstat");
+        void* lstat_sym = DobbySymbolResolver("libc.so", "lstat");
         if (lstat_sym) DobbyHook(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
 
-        void* fstatat_func = DobbySymbolResolver(nullptr, "fstatat");
+        void* fstatat_func = DobbySymbolResolver("libc.so", "fstatat");
         if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
 
-        void* fopen_sym = DobbySymbolResolver(nullptr, "fopen");
+        void* fopen_sym = DobbySymbolResolver("libc.so", "fopen");
         if (fopen_sym) DobbyHook(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
 
-        void* readlinkat_sym = DobbySymbolResolver(nullptr, "readlinkat");
+        void* readlinkat_sym = DobbySymbolResolver("libc.so", "readlinkat");
         if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
-        void* sysinfo_func = DobbySymbolResolver(nullptr, "sysinfo");
+        void* sysinfo_func = DobbySymbolResolver("libc.so", "sysinfo");
         if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
 
-        void* readdir_func = DobbySymbolResolver(nullptr, "readdir");
+        void* readdir_func = DobbySymbolResolver("libc.so", "readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
 
-        void* getauxval_func = DobbySymbolResolver(nullptr, "getauxval");
+        void* getauxval_func = DobbySymbolResolver("libc.so", "getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
-        void* dup_sym = DobbySymbolResolver(nullptr, "dup");
+        void* dup_sym = DobbySymbolResolver("libc.so", "dup");
         if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
-        void* dup2_func = DobbySymbolResolver(nullptr, "dup2");
+        void* dup2_func = DobbySymbolResolver("libc.so", "dup2");
         if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
-        void* dup3_func = DobbySymbolResolver(nullptr, "dup3");
+        void* dup3_func = DobbySymbolResolver("libc.so", "dup3");
         if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
 
         // PR43: fcntl hook (F_DUPFD)
-        void* fcntl_func = DobbySymbolResolver(nullptr, "fcntl");
+        void* fcntl_func = DobbySymbolResolver("libc.so", "fcntl");
         if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
 
         // PR42: ioctl hook — MAC real bypass via syscall directo
         // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
-        void* ioctl_sym = DobbySymbolResolver(nullptr, "__ioctl");
-        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver(nullptr, "ioctl");
+        void* ioctl_sym = DobbySymbolResolver("libc.so", "__ioctl");
+        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver("libc.so", "ioctl");
         if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // -----------------------------------------------------------------------------
@@ -2501,7 +2501,8 @@ public:
                     // Build.TIME del ROM físico puede diferir del perfil emulado.
                     jfieldID fid_time = env->GetStaticFieldID(build_class, "TIME", "J");
                     if (fid_time) {
-                        jlong build_time = std::stoll(bfp.buildDateUtc) * 1000LL;
+                        jlong build_time = 0;
+                        try { build_time = std::stoll(bfp.buildDateUtc) * 1000LL; } catch(...) {}
                         env->SetStaticLongField(build_class, fid_time, build_time);
                     }
 
@@ -2516,15 +2517,15 @@ public:
                     jclass build_version_class = env->FindClass("android/os/Build$VERSION");
                     if (build_version_class) {
                         jfieldID fid_sp = env->GetStaticFieldID(build_version_class, "SECURITY_PATCH", "Ljava/lang/String;");
-                        if (fid_sp) env->SetStaticObjectField(build_version_class, fid_sp,
+                        if (fid_sp && bfp.securityPatch) env->SetStaticObjectField(build_version_class, fid_sp,
                             env->NewStringUTF(bfp.securityPatch));
 
                         jfieldID fid_release = env->GetStaticFieldID(build_version_class, "RELEASE", "Ljava/lang/String;");
-                        if (fid_release) env->SetStaticObjectField(build_version_class, fid_release,
+                        if (fid_release && bfp.release) env->SetStaticObjectField(build_version_class, fid_release,
                             env->NewStringUTF(bfp.release));
 
                         jfieldID fid_incr = env->GetStaticFieldID(build_version_class, "INCREMENTAL", "Ljava/lang/String;");
-                        if (fid_incr) env->SetStaticObjectField(build_version_class, fid_incr,
+                        if (fid_incr && bfp.incremental) env->SetStaticObjectField(build_version_class, fid_incr,
                             env->NewStringUTF(bfp.incremental));
 
                         // PR40 (Gemini BUG-C1-03): Forzar SDK_INT=30 (Android 11).

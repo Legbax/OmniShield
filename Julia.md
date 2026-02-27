@@ -63,6 +63,14 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR50 — Crash fix: libc.so-specific DobbySymbolResolver + JNI null guards)
+**Resumen de cambios:** v12.9.30 — Tres fixes para "stopped due to multiple previous soft reboots" y zygote PID 0.
+- **Fix 1 — DobbySymbolResolver("libc.so") global (28 calls):** `DobbySymbolResolver(nullptr, ...)` usa internamente `dl_iterate_phdr` de Dobby, que incluye el VDSO en su búsqueda. Para `clock_gettime` en arm64, el VDSO puede devolver su versión read-only antes que la wrapper en libc.so → `DobbyHook` intenta `mprotect+write` en memoria VDSO → SIGSEGV. Fix: reemplazado `nullptr` por `"libc.so"` en los 28 `DobbySymbolResolver` de hooks libc. `"libc.so"` fuerza búsqueda exclusiva en Bionic, donde `clock_gettime` es una wrapper hookeable (no VDSO directa).
+- **Fix 2 — try-catch para `std::stoll(bfp.buildDateUtc)`:** Sin bloque try-catch, un valor inválido (vacío, no numérico) en `buildDateUtc` lanzaba `std::invalid_argument` → abort sin captura → crash. Fix: `jlong build_time = 0; try { build_time = std::stoll(bfp.buildDateUtc) * 1000LL; } catch(...) {}`.
+- **Fix 3 — null guards para `NewStringUTF` en Build$VERSION:** `env->NewStringUTF(nullptr)` → JNI crash (SIGSEGV o `FatalError`). Los campos `bfp.securityPatch`, `bfp.release`, `bfp.incremental` pueden ser null si el perfil no los define. Fix: condición `if (fid_sp && bfp.securityPatch)` antes de cada `SetStaticObjectField+NewStringUTF`.
+**Prompt del usuario:** "Seguimos con errores" + screenshot mostrando "Zygisk injecting was stopped due to multiple previous soft reboots" y "zygote (64): Skipped (0)" con PID 0.
+**Nota personal para el siguiente agente:** SIEMPRE usar `DobbySymbolResolver("libc.so", "symbol")` para hooks de Bionic, NUNCA `nullptr`. El `nullptr` busca en todos los `.so` cargados incluyendo VDSO → riesgo permanente de hookear la versión read-only del kernel. Para hooks de otras librerías (libEGL, libssl, libvulkan) usar el nombre exacto de la librería. Los soft-reboots acumulados de sesiones previas (PR47-PR49) se resetean deshabilitando el módulo → reboot → rehabilitando → reboot.
+
 **Fecha y agente:** 26 de febrero de 2026, Jules (PR49 — Crash fix: DobbySymbolResolver para hooks directos)
 **Resumen de cambios:** v12.9.29 — Reemplazo de 9 llamadas `DobbyHook((void*)funcName, ...)` por patrón `DobbySymbolResolver`.
 - **Causa raíz identificada:** `DobbyHook((void*)clock_gettime, ...)` y similares pasan la dirección del **PLT stub** en libomnishield.so, NO la dirección real en libc.so. En arm64, `clock_gettime` es una función VDSO (Virtual Dynamic Shared Object) — memoria read-only que no se puede mprotect → **SIGSEGV** inmediato. Explica "zygote (64): Skipped (0)" en el dashboard Zygisk Next.
