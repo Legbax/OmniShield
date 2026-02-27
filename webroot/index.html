@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#04070f">
+  <meta name="theme-color" content="#07070e">
   <title>OmniShield</title>
   <link rel="stylesheet" href="css/style.css">
   <!-- Leaflet map — bundled locally to avoid CDN timeout blocking page load -->
@@ -15,7 +15,41 @@
 <!-- ═══════════════════════════ LOADING SCREEN ════════════════════════════ -->
 <div id="loading-screen">
   <div class="loader-content">
-    <div class="loader-shield">🛡️</div>
+    <div class="loader-shield">
+      <svg width="80" height="80" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="lg" x1="0" y1="48" x2="48" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#cc00ff"/>
+            <stop offset="100%" stop-color="#00e5ff"/>
+          </linearGradient>
+          <clipPath id="lsh">
+            <path d="M24 6L38 11v13c0 9.5-6.5 16-14 18.5C10.5 40 4 33.5 4 24.5V11Z"/>
+          </clipPath>
+          <clipPath id="llh"><rect x="0" y="0" width="24" height="48"/></clipPath>
+          <clipPath id="lrh"><rect x="24" y="0" width="24" height="48"/></clipPath>
+        </defs>
+        <rect width="48" height="48" rx="11" fill="#090910"/>
+        <path d="M24 6L38 11v13c0 9.5-6.5 16-14 18.5C10.5 40 4 33.5 4 24.5V11Z" fill="url(#lg)" opacity="0.08"/>
+        <g clip-path="url(#lsh)">
+          <g clip-path="url(#llh)" stroke="#cc00ff" stroke-width="1.1" stroke-linecap="round">
+            <line x1="5" y1="18" x2="23" y2="18"/>
+            <line x1="5" y1="24" x2="23" y2="24"/>
+            <line x1="5" y1="30" x2="22" y2="30"/>
+            <line x1="10" y1="18" x2="10" y2="24"/>
+            <line x1="16" y1="24" x2="16" y2="30"/>
+            <circle cx="10" cy="18" r="1.8" fill="#cc00ff"/>
+            <circle cx="16" cy="24" r="1.8" fill="#cc00ff"/>
+            <circle cx="16" cy="30" r="1.8" fill="#cc00ff"/>
+          </g>
+          <g clip-path="url(#lrh)">
+            <path d="M24 9C28 9 32 12 32.5 18C33 22.5 31 26 29 28L31.5 36C29 39.5 26 41.5 24 42.5L24 9Z" fill="#00e5ff" opacity="0.8"/>
+            <circle cx="30" cy="19" r="1.5" fill="white" opacity="0.9"/>
+          </g>
+          <line x1="24" y1="6" x2="24" y2="42.5" stroke="url(#lg)" stroke-width="0.75" opacity="0.7"/>
+        </g>
+        <path d="M24 6L38 11v13c0 9.5-6.5 16-14 18.5C10.5 40 4 33.5 4 24.5V11Z" stroke="url(#lg)" stroke-width="1.6"/>
+      </svg>
+    </div>
     <div class="loader-title">OmniShield</div>
     <div class="loader-sub">Initializing secure environment…</div>
     <div class="loader-bar-wrap"><div class="loader-bar"></div></div>
@@ -27,7 +61,41 @@
   <!-- ═══════════════════════════════ HEADER ═══════════════════════════════ -->
   <header id="header">
     <div class="logo">
-      <span class="logo-icon">🛡️</span>
+      <span class="logo-icon">
+        <svg width="36" height="36" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="hg" x1="0" y1="48" x2="48" y2="0" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#cc00ff"/>
+              <stop offset="100%" stop-color="#00e5ff"/>
+            </linearGradient>
+            <clipPath id="hsh">
+              <path d="M24 6L38 11v13c0 9.5-6.5 16-14 18.5C10.5 40 4 33.5 4 24.5V11Z"/>
+            </clipPath>
+            <clipPath id="hlh"><rect x="0" y="0" width="24" height="48"/></clipPath>
+            <clipPath id="hrh"><rect x="24" y="0" width="24" height="48"/></clipPath>
+          </defs>
+          <rect width="48" height="48" rx="11" fill="#090910"/>
+          <path d="M24 6L38 11v13c0 9.5-6.5 16-14 18.5C10.5 40 4 33.5 4 24.5V11Z" fill="url(#hg)" opacity="0.08"/>
+          <g clip-path="url(#hsh)">
+            <g clip-path="url(#hlh)" stroke="#cc00ff" stroke-width="1.1" stroke-linecap="round">
+              <line x1="5" y1="18" x2="23" y2="18"/>
+              <line x1="5" y1="24" x2="23" y2="24"/>
+              <line x1="5" y1="30" x2="22" y2="30"/>
+              <line x1="10" y1="18" x2="10" y2="24"/>
+              <line x1="16" y1="24" x2="16" y2="30"/>
+              <circle cx="10" cy="18" r="1.8" fill="#cc00ff"/>
+              <circle cx="16" cy="24" r="1.8" fill="#cc00ff"/>
+              <circle cx="16" cy="30" r="1.8" fill="#cc00ff"/>
+            </g>
+            <g clip-path="url(#hrh)">
+              <path d="M24 9C28 9 32 12 32.5 18C33 22.5 31 26 29 28L31.5 36C29 39.5 26 41.5 24 42.5L24 9Z" fill="#00e5ff" opacity="0.8"/>
+              <circle cx="30" cy="19" r="1.5" fill="white" opacity="0.9"/>
+            </g>
+            <line x1="24" y1="6" x2="24" y2="42.5" stroke="url(#hg)" stroke-width="0.75" opacity="0.7"/>
+          </g>
+          <path d="M24 6L38 11v13c0 9.5-6.5 16-14 18.5C10.5 40 4 33.5 4 24.5V11Z" stroke="url(#hg)" stroke-width="1.6"/>
+        </svg>
+      </span>
       <div>
         <div class="logo-text">OmniShield</div>
         <div class="logo-sub">Total Invisibility</div>

@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.47
-versionCode=12947
+version=v12.9.48
+versionCode=12948
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR67 — Device Apply button, full ID/Telephony hooks (IMEI2, SSAID, DRM, GAID, HWSERIAL, Gmail, GPU, JA3, SSID, BSSID, MCC/MNC), Settings Load Apps fix
+description=Total Invisibility (The Void). Zygisk module. PR69 — UI redesign: Void theme (magenta→cyan gradient), inline SVG shield logo replacing emoji in header & loader
