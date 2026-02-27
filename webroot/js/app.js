@@ -11,13 +11,15 @@ import {
 } from './engine.js';
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
 
-// ─── JA3/TLS fingerprint presets ──────────────────────────────────────
+// ─── JA3/TLS fingerprint presets (all Android-native clients) ─────────
+// Firefox excluded: uses Gecko engine — incoherent with Android system WebView / app traffic.
+// All presets here are Blink/Chromium-based or native Android HTTP stacks.
 const JA3_PRESETS = [
-  { name: 'Chrome 120 Android',  hash: '0700a69a2db4c9c8e5dedc5a1d14e7ce' },
-  { name: 'Chrome 119 Android',  hash: 'bfbe57248732353af79a92ba6271b9d4' },
-  { name: 'Firefox 121 Android', hash: '839bbe3ed07fed922ded5aaf714d6842' },
-  { name: 'Samsung Browser 23',  hash: 'a0e9f5d64349fb13191bc781f81f42e1' },
-  { name: 'OkHttp/4.12.0',       hash: 'd4e5b18d6b55c71db63d10a11e90e667' },
+  { name: 'Chrome 120 Android',       hash: '0700a69a2db4c9c8e5dedc5a1d14e7ce' },
+  { name: 'Chrome 119 Android',       hash: 'bfbe57248732353af79a92ba6271b9d4' },
+  { name: 'Samsung Internet 23',      hash: 'a0e9f5d64349fb13191bc781f81f42e1' },
+  { name: 'OkHttp/4.12.0',            hash: 'd4e5b18d6b55c71db63d10a11e90e667' },
+  { name: 'OkHttp/3.14.9 (Retrofit)', hash: 'c27a9b4a8b52c3ed95c5b1dc2e88b9f1' },
 ];
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
