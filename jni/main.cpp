@@ -1008,8 +1008,11 @@ int my_system_property_get(const char *key, char *value) {
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
 int my_open(const char *pathname, int flags, mode_t mode) {
-    if (!orig_open) { errno = ENOSYS; return -1; }
-    if (!pathname) return orig_open(pathname, flags, mode);
+    // PR51: NO hookeamos open directamente — su body en Bionic llama openat()
+    // que está hooked, creando recursión infinita. my_open se usa como helper
+    // llamado desde my_openat; usa orig_openat(AT_FDCWD) como terminal seguro.
+    if (!orig_openat) { errno = ENOSYS; return -1; }
+    if (!pathname) return orig_openat(AT_FDCWD, pathname, flags, mode);
 
     std::string path_str(pathname);
     if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
@@ -1022,7 +1025,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         return -1;
     }
     if (path_str == "/proc/iomem") {
-        return orig_open("/dev/null", flags, mode);
+        return orig_openat(AT_FDCWD, "/dev/null", flags, mode);
     }
 
     if (pathname && strstr(pathname, "/dev/__properties__/")) {
@@ -1050,7 +1053,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
             else if (!isQcom && strstr(pathname, "/dev/kgsl")) { errno = ENOENT; return -1; }
         }
     }
-    int fd = orig_open(pathname, flags, mode);
+    int fd = orig_openat(AT_FDCWD, pathname, flags, mode);
     if (fd >= 0 && pathname) {
         FileType type = NONE;
         if (strstr(pathname, "/proc/version")) type = PROC_VERSION;
@@ -1656,6 +1659,7 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
         char dirpath[512] = {};
         char fdlink[64];
         snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", dirfd);
+        if (!orig_readlinkat) return orig_openat(dirfd, pathname, flags, mode);
         ssize_t len = orig_readlinkat(AT_FDCWD, fdlink, dirpath, sizeof(dirpath)-1);
         if (len > 0) {
             dirpath[len] = '\0';
@@ -2337,8 +2341,9 @@ public:
         }
 
         // Libc Hooks (Phase 1)
-        void* open_func = DobbySymbolResolver("libc.so", "open");
-        if (open_func) DobbyHook(open_func, (void*)my_open, (void**)&orig_open);
+        // PR51: open NO se hookea directamente. Bionic::open llama openat() internamente;
+        // hookear ambos crea recursión infinita (my_open→orig_open→openat→my_openat→my_open).
+        // Toda llamada a open() pasa por openat() de todas formas → un solo hook en openat basta.
 
         void* openat_func = DobbySymbolResolver("libc.so", "openat");
         if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);

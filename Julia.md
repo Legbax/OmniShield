@@ -63,6 +63,14 @@ jitter=true
 
 ### Registro de Actualizaciones
 
+**Fecha y agente:** 27 de febrero de 2026, Jules (PR51 — Crash fix: recursión infinita open/openat + null guard readlinkat)
+**Resumen de cambios:** v12.9.31 — Eliminación de la recursión infinita `open`/`openat` y null guard para `orig_readlinkat`.
+- **Bug crítico (recursión infinita):** `DobbyHook` en `open` + `openat` simultáneamente crea un ciclo: `my_open` → `orig_open` (trampoline Dobby) → body de Bionic `open` → llama `openat()` internamente (patched) → `my_openat` → ruta absoluta → `my_open` → ... → **stack overflow → SIGSEGV**. Introducido en PR49 al cambiar PLT stubs por `DobbySymbolResolver` sobre la función real en libc.so. Con PLT stubs (pre-PR49) NO había recursión porque solo se interceptaban calls desde nuestro propio .so.
+- **Fix:** Eliminar `DobbyHook` sobre `open`. `my_open` ahora usa `orig_openat(AT_FDCWD, ...)` como terminal (no `orig_open`). Bionic `openat` llama `__openat` (private, NOT hooked) → syscall. Sin recursión. 100% de opens sigue interceptado vía `my_openat`.
+- **Bug secundario (null ptr):** `my_openat` usaba `orig_readlinkat` sin null guard en rama `dirfd != AT_FDCWD`. Fix: `if (!orig_readlinkat) return orig_openat(dirfd, pathname, flags, mode)` antes del call.
+**Prompt del usuario:** "El problema persiste, con el mismo error code" (soft reboots persistentes post-PR50).
+**Nota personal para el siguiente agente:** REGLA CRÍTICA: Si hooks A y B se instalan en libc.so, verificar que el body de A no llame a B. En Bionic: `open` llama `openat` → nunca hookear ambos. Solo `openat` es necesario. `my_open` SIEMPRE usa `orig_openat(AT_FDCWD, ...)` como terminal, NUNCA `orig_open`. El contador de "soft reboots" de Zygisk Next puede ser histórico: deshabilitar módulo → reboot → habilitar → reboot para resetearlo.
+
 **Fecha y agente:** 27 de febrero de 2026, Jules (PR50 — Crash fix: libc.so-specific DobbySymbolResolver + JNI null guards)
 **Resumen de cambios:** v12.9.30 — Tres fixes para "stopped due to multiple previous soft reboots" y zygote PID 0.
 - **Fix 1 — DobbySymbolResolver("libc.so") global (28 calls):** `DobbySymbolResolver(nullptr, ...)` usa internamente `dl_iterate_phdr` de Dobby, que incluye el VDSO en su búsqueda. Para `clock_gettime` en arm64, el VDSO puede devolver su versión read-only antes que la wrapper en libc.so → `DobbyHook` intenta `mprotect+write` en memoria VDSO → SIGSEGV. Fix: reemplazado `nullptr` por `"libc.so"` en los 28 `DobbySymbolResolver` de hooks libc. `"libc.so"` fuerza búsqueda exclusiva en Bionic, donde `clock_gettime` es una wrapper hookeable (no VDSO directa).
