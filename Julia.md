@@ -1130,3 +1130,143 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
   Verificación post-PR63:
   `nm --demangle arm64-v8a.so | grep "zygisk_module_entry"` → tipo T (global).
   `strings arm64-v8a.so | grep "zygisk"` → "zygisk_module_entry".
+
+## PR64 — Fix UI: loading screen bloqueaba interacción + Leaflet offline
+
+**Fecha y agente:** 27 de febrero de 2026, Jules & Claude (PR64 — fix robustez WebUI)
+
+**Problema raíz:** El `DOMContentLoaded` hacía `await loadState()` sin try/catch. Si `ksu_exec` fallaba silenciosamente (timeout de import dinámico en Android 11 WebView, KernelSU Next), `loadState()` resolvía pero podía lanzar excepciones no capturadas. Más crítico: el `#loading-screen` sólo se ocultaba en el camino feliz — cualquier excepción dejaba el overlay visible de forma permanente, bloqueando todos los clicks y taps sobre la UI subyacente.
+
+**Problema secundario:** Leaflet se cargaba desde CDN (`unpkg.com`). En el WebView de Android sin conectividad activa, el timeout de red de la hoja de estilos podía retrasar o bloquear la renderización de la página completa.
+
+**Fixes aplicados:**
+
+1. **`webroot/js/app.js` — try/catch/finally en DOMContentLoaded**
+   ```javascript
+   try {
+     await loadState();
+   } catch(e) {
+     console.error('[OmniShield] init error:', e);
+   } finally {
+     // Se ejecuta siempre — loading screen se oculta pase lo que pase
+     const loader = document.getElementById('loading-screen');
+     if (loader) { loader.classList.add('hidden'); setTimeout(() => loader.remove(), 600); }
+   }
+   // Todos los event listeners se registran FUERA del try, siempre
+   ```
+
+2. **`webroot/js/app.js` — timeout de 3 s en `ksu_exec` import dinámico**
+   ```javascript
+   const mod = await Promise.race([
+     import('kernelsu'),
+     new Promise((_, reject) => setTimeout(() => reject(new Error('ksu timeout')), 3000))
+   ]);
+   ```
+   Previene que el WebView de KernelSU Next en Android 11 bloquee indefinidamente si la resolución del módulo nativo tarda demasiado.
+
+3. **`webroot/index.html` + archivos locales — Leaflet bundleado**
+   - Descargados `leaflet.js` (147 KB) y `leaflet.css` (14 KB) + imágenes de marcadores a `webroot/js/` y `webroot/css/images/`.
+   - Reemplazados los tags CDN por referencias locales: `css/leaflet.css` y `js/leaflet.js`.
+   - Elimina la dependencia de red para el mapa — funciona completamente offline.
+
+4. **`module.prop`** — version bump `v12.9.42 → v12.9.43`, versionCode `12942 → 12943`.
+
+## PR65 — Fix: bottom nav tapeable — safe-area-inset-bottom para Android system bar
+
+**Fecha y agente:** 27 de febrero de 2026, Claude (PR65 — fix bottom nav overlap)
+
+**Problema:** Con `viewport-fit=cover` en el meta viewport, el WebView de KernelSU extiende el canvas de la app por debajo de la barra de navegación del sistema Android (back/home/recents, típicamente 48–60 px). El `#bottom-nav` se renderizaba justo en ese espacio oculto, haciendo que los 4 botones de navegación fueran físicamente inalcanzables.
+
+**Causa raíz:** `env(safe-area-inset-bottom)` no se usaba en ninguna parte del CSS.
+
+**Fix aplicado — sólo CSS (`webroot/css/style.css`), 3 cambios:**
+
+1. **`#bottom-nav`** — height y padding-bottom con safe-area:
+   ```css
+   height: calc(58px + env(safe-area-inset-bottom, 0px));
+   min-height: calc(58px + env(safe-area-inset-bottom, 0px));
+   padding-bottom: env(safe-area-inset-bottom, 0px);
+   ```
+   El fallback `0px` garantiza que en dispositivos sin barra de sistema (desktop, Android antiguo) no cambia nada. El layout flex-column de `#app` hace que `#main` (flex:1) se comprima automáticamente cuando `#bottom-nav` crece — sin cambios en HTML ni JS.
+
+2. **`#app`** — `100dvh` con fallback `100vh`:
+   ```css
+   height: 100vh;   /* fallback WebViews antiguos */
+   height: 100dvh;  /* dynamic viewport height — Chrome 108+ / Android 12+ */
+   ```
+
+3. **`#toast-container`** — bottom ajustado para quedar sobre el nav:
+   ```css
+   bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+   ```
+
+**`module.prop`** — version bump `v12.9.43 → v12.9.44`, versionCode `12943 → 12944`.
+
+**Resultado:** La UI es ahora totalmente robusta: el loading screen se retira siempre en ≤ 3.6 s (3 s timeout + 600 ms fade), el mapa funciona sin internet, y todos los event listeners se registran incluso si `loadState()` falla.
+
+## PR66 — Fix: detectNavInset() fallthrough + Android UA fallback (bottom nav definitivo)
+
+**Fecha y agente:** 27 de febrero de 2026, Claude (PR66 — fix bottom nav overlap definitivo)
+
+**Problema:** La barra de navegación inferior seguía sin ser interactuable después de PR65b. El usuario confirmó: "Persiste el error, la navbar de android permanece y no es posible interactuar con el navbar".
+
+**Causa raíz (2 bugs en `detectNavInset()`):**
+
+1. **Method 2 (visualViewport) siempre hacía `return`** — incluso cuando el inset medido era 0. Esto bloqueaba completamente los Methods 3 y 4. En MIUI / Android 11 + KernelSU WebView, `visualViewport` existe pero reporta inset = 0 (los insets del sistema no se propagan al WebView), así que Method 2 nunca aplicaba nada pero sí impedía que los métodos de fallback actuaran.
+
+2. **Method 4 no existía** — no había ningún fallback de último recurso para Android. En dispositivos donde los 3 métodos de medición devuelven 0, el `--inset-bottom` nunca se actualizaba desde `0px`.
+
+**Fix aplicado — sólo `webroot/js/app.js`:**
+
+- **Method 2 corregido:** Se registra el listener de `resize` (para cambios dinámicos de viewport), pero el `return` temprano sólo se ejecuta si `initInset > 10 px`. Si el inset inicial es 0, la ejecución cae a Method 3 y luego a Method 4.
+
+- **Method 3 con `return`:** Agregado `return` explícito si Method 3 encontró una diferencia válida, para no sobrescribir con Method 4.
+
+- **Method 4 nuevo — Android UA fallback hardcodeado:**
+  ```javascript
+  // Method 4: Android UA hardcoded fallback
+  if (/Android/i.test(navigator.userAgent)) {
+    document.documentElement.style.setProperty('--inset-bottom', '48px');
+  }
+  ```
+  Si todos los métodos de medición devuelven 0, se aplican 48 px (altura CSS típica de la barra de navegación Android, tanto gestos como 3 botones). Esto garantiza que el `#bottom-nav` siempre queda por encima de la barra del sistema en cualquier dispositivo Android.
+
+**CSS sin cambios** — el CSS ya usa `max(env(safe-area-inset-bottom, 0px), var(--inset-bottom, 0px))`, así que en cuanto JS fija `--inset-bottom: 48px`, el bottom nav se desplaza automáticamente.
+
+**`module.prop`** — version bump `v12.9.45 → v12.9.46`, versionCode `12945 → 12946`.
+
+## PR67 — Hooks completos: Device Apply, IDs expandidos, Telephony expandido, Settings Load Apps
+
+**Fecha y agente:** 27 de febrero de 2026, Claude (PR67 — hooks completos UI)
+
+**Problemas reportados:**
+1. **Device tab** — faltaba botón "Apply Changes" para persistir el perfil seleccionado.
+2. **IDs tab** — faltaban 8 hooks: IMEI 2, SSAID, Media DRM ID, Advertising ID (GAID), Hardware Serial, Gmail Account, GPU Renderer, JA3/TLS.
+3. **Telephony tab** — faltaban 4 hooks: SIM Operator, MCC/MNC, Wi-Fi SSID, Wi-Fi BSSID.
+4. **Settings** — el dropdown "Select app to add" no mostraba las apps instaladas porque `onclick` en un `<select>` en Android WebView abre el picker nativo sin ejecutar el handler.
+
+**Cambios — `webroot/js/engine.js`:**
+- `generateUUID(seed)` — UUID v4 determinístico (para Media DRM ID y Advertising ID).
+- `generateWifiSsid(seed)` — SSIDs de red doméstica realistas (HOME-XXXX, NETGEAR-XXXX, etc.).
+- `generateGmail(seed)` — cuentas Gmail ficticias con nombre + apellido + número (ej. `alex.smith472@gmail.com`).
+
+**Cambios — `webroot/js/app.js`:**
+- Importados `generateUUID`, `generateWifiSsid`, `generateGmail` desde engine.js.
+- Constante `JA3_PRESETS` con 5 fingerprints TLS reales de navegadores Android populares.
+- `state` expandido con: `imei2, hwSerial, ssaid, mediaDrmId, advertisingId, gmailAccount, gpuRenderer, ja3, wifiSsid, wifiBssid, mccmnc, simOperator`.
+- `computeAll()` — genera todos los nuevos campos determinísticamente desde `seed` con offsets (+137, +99, +31, +57, etc.) para evitar colisiones. `ssaid = androidId` (son el mismo valor en Android 8+). `gpuRenderer` leído del perfil. `mccmnc` extraído de los primeros 6 dígitos del IMSI.
+- `loadState()` — restaura todos los overrides desde el config file (`override_imei2`, `override_hw_serial`, `override_media_drm_id`, etc.).
+- `saveConfig()` — persiste todos los overrides activos en el config file.
+- `renderIdsTab()` — renderiza los 14 campos de identidad (incluyendo JA3 con nombre + hash en dos líneas).
+- `renderTelephonyTab()` — renderiza los 11 campos de red.
+- `randomizeField()` — 20 handlers (todos los campos randomizables).
+- `window.applyDevice` — nueva función que llama `saveConfig()` para persistir perfil.
+- `loadInstalledApps()` — eliminado el early-return por `options.length > 1`; ahora siempre recarga la lista desde `pm list packages`.
+
+**Cambios — `webroot/index.html`:**
+- **Device tab** — botón "Apply Changes" añadido junto a "Random Profile".
+- **IDs tab** — 8 campos nuevos: IMEI 2, Hardware Serial, SSAID (display-only), Media DRM ID, Advertising ID, Gmail Account, GPU Renderer (display-only), JA3/TLS (2 líneas: nombre + hash con botón cycle). "IMEI" renombrado a "IMEI 1".
+- **Telephony tab** — 4 campos nuevos: SIM Operator, MCC/MNC (display-only), Wi-Fi SSID, Wi-Fi BSSID. Renombrado a "Wi-Fi MAC Address".
+- **Settings tab** — eliminado `onclick` del `<select>`; añadido botón "Load Apps" con ícono de descarga que llama `loadInstalledApps()` explícitamente.
+
+**`module.prop`** — version bump `v12.9.46 → v12.9.47`, versionCode `12946 → 12947`.

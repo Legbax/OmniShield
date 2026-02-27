@@ -512,4 +512,37 @@ export function computeCorrelation(profileName, seed, overrides = {}) {
   return Math.round((score / max) * 100);
 }
 
+// ─── UUID v4 generator (for Media DRM ID, Advertising ID) ────────────────────
+export function generateUUID(seed) {
+  const rng = new MT64(seed);
+  const h8 = () => (Number(rng.gen() & 0xFFFFFFFFn) >>> 0).toString(16).padStart(8, '0');
+  const h4 = () => Number(rng.gen() & 0xFFFFn).toString(16).padStart(4, '0');
+  const a  = h8();
+  const b  = h4();
+  const c  = ((Number(rng.gen() & 0x0FFFn)) | 0x4000).toString(16).padStart(4, '0');
+  const d  = ((Number(rng.gen() & 0x3FFFn)) | 0x8000).toString(16).padStart(4, '0');
+  const e  = h8() + h4();
+  return `${a}-${b}-${c}-${d}-${e}`;
+}
+
+// ─── WiFi SSID generator ──────────────────────────────────────────────────────
+const _SSID_PFX = ['HOME','NETGEAR','TP-LINK','ASUS','Linksys','XFINITY','Spectrum','ATT','Verizon','MyWiFi'];
+export function generateWifiSsid(seed) {
+  const rng = new MT64(seed + 777);
+  const pfx = _SSID_PFX[Number(rng.gen() % BigInt(_SSID_PFX.length))];
+  const sfx = Number(rng.gen() & 0xFFFFn).toString(16).toUpperCase().padStart(4, '0');
+  return `${pfx}-${sfx}`;
+}
+
+// ─── Gmail account generator ──────────────────────────────────────────────────
+const _FN = ['alex','jordan','morgan','taylor','casey','riley','avery','blake','quinn','reese','sage','drew','cameron','harper','skyler'];
+const _LN = ['smith','johnson','williams','brown','jones','davis','miller','wilson','moore','anderson','thomas','jackson','white','harris','martin'];
+export function generateGmail(seed) {
+  const rng = new MT64(seed + 999);
+  const fn  = _FN[Number(rng.gen() % BigInt(_FN.length))];
+  const ln  = _LN[Number(rng.gen() % BigInt(_LN.length))];
+  const num = Number(rng.gen() % 900n) + 100;
+  return `${fn}.${ln}${num}@gmail.com`;
+}
+
 export { US_CITIES_100, CARRIER_NAMES, IMSI_POOLS };

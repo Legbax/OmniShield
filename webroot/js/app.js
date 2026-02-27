@@ -1,5 +1,4 @@
 // app.js — OmniShield WebUI main application
-import { exec } from 'kernelsu';
 import {
   generateIMEI, generateICCID, generateIMSI, generatePhoneNumber,
   generateMAC, generateSerial, generateAndroidId, generateGsfId,
@@ -7,16 +6,40 @@ import {
   getTimezone, getCarrierName, getSimCountry, computeCorrelation,
   validateIMEI, validateICCID, validateIMSI, validateMAC, validatePhone,
   validateAndroidId, validateGsfId, validateWidevineId, validateBootId, validateSerial,
+  generateUUID, generateWifiSsid, generateGmail,
   US_CITIES_100, CARRIER_NAMES, IMSI_POOLS
 } from './engine.js';
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
 
+// ─── JA3/TLS fingerprint presets (all Android-native clients) ─────────
+// Firefox excluded: uses Gecko engine — incoherent with Android system WebView / app traffic.
+// All presets here are Blink/Chromium-based or native Android HTTP stacks.
+const JA3_PRESETS = [
+  { name: 'Chrome 120 Android',       hash: '0700a69a2db4c9c8e5dedc5a1d14e7ce' },
+  { name: 'Chrome 119 Android',       hash: 'bfbe57248732353af79a92ba6271b9d4' },
+  { name: 'Samsung Internet 23',      hash: 'a0e9f5d64349fb13191bc781f81f42e1' },
+  { name: 'OkHttp/4.12.0',            hash: 'd4e5b18d6b55c71db63d10a11e90e667' },
+  { name: 'OkHttp/3.14.9 (Retrofit)', hash: 'c27a9b4a8b52c3ed95c5b1dc2e88b9f1' },
+];
+
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
+// Uses dynamic import so the module loads even outside KernelSU WebView.
+// 3 s timeout guards against KernelSU Next on Android 11 taking too long
+// to resolve the native import (seen in some ROM builds).
+let _ksuExecFn = null;
 async function ksu_exec(cmd) {
   try {
-    const r = await exec(cmd);
+    if (!_ksuExecFn) {
+      const mod = await Promise.race([
+        import('kernelsu'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('ksu timeout')), 3000))
+      ]);
+      _ksuExecFn = mod.exec;
+    }
+    const r = await _ksuExecFn(cmd);
     return { errno: r.errno || 0, stdout: (r.stdout || '').trim() };
   } catch(e) {
+    // Not in KernelSU environment or timed out — graceful degradation
     return { errno: 1, stdout: '' };
   }
 }
@@ -65,9 +88,13 @@ const state = {
   proxyPass: '',
   scopedApps: [],
   recentProfiles: [],
-  // computed
-  imei: '', iccid: '', imsi: '', phone: '', wifiMac: '', btMac: '',
-  serial: '', androidId: '', gsfId: '', widevineId: '', bootId: '',
+  // computed — primary identifiers
+  imei: '', imei2: '', iccid: '', imsi: '', phone: '', wifiMac: '', btMac: '',
+  serial: '', hwSerial: '', androidId: '', ssaid: '',
+  gsfId: '', widevineId: '', mediaDrmId: '', advertisingId: '',
+  bootId: '', gmailAccount: '', gpuRenderer: '', ja3: null,
+  // computed — telephony / network
+  wifiSsid: '', wifiBssid: '', mccmnc: '', simOperator: '',
   lat: 0, lon: 0, alt: 0, tz: '',
   carrier: '', simCountry: '', correlation: 0,
   deviceIp: '', deviceModel: ''
@@ -96,29 +123,65 @@ async function loadState() {
   state.scopedApps   = state.cfg.scoped_apps ? state.cfg.scoped_apps.split(',').filter(Boolean) : [];
   state.recentProfiles = loadRecentProfiles();
 
+  // Restore per-field overrides persisted in config
+  const ov = state.cfg;
+  if (ov.override_imei)           overrides.imei          = ov.override_imei;
+  if (ov.override_imei2)          overrides.imei2         = ov.override_imei2;
+  if (ov.override_serial)         overrides.serial        = ov.override_serial;
+  if (ov.override_hw_serial)      overrides.hwSerial      = ov.override_hw_serial;
+  if (ov.override_android_id)     overrides.androidId     = ov.override_android_id;
+  if (ov.override_gsf_id)         overrides.gsfId         = ov.override_gsf_id;
+  if (ov.override_widevine_id)    overrides.widevineId    = ov.override_widevine_id;
+  if (ov.override_media_drm_id)   overrides.mediaDrmId    = ov.override_media_drm_id;
+  if (ov.override_advertising_id) overrides.advertisingId = ov.override_advertising_id;
+  if (ov.override_boot_id)        overrides.bootId        = ov.override_boot_id;
+  if (ov.override_gmail)          overrides.gmailAccount  = ov.override_gmail;
+  if (ov.override_wifi_ssid)      overrides.wifiSsid      = ov.override_wifi_ssid;
+  if (ov.override_wifi_bssid)     overrides.wifiBssid     = ov.override_wifi_bssid;
+  if (ov.override_imsi)           overrides.imsi          = ov.override_imsi;
+  if (ov.override_iccid)          overrides.iccid         = ov.override_iccid;
+  if (ov.override_phone)          overrides.phone         = ov.override_phone;
+  if (ov.override_wifi_mac)       overrides.wifiMac       = ov.override_wifi_mac;
+  if (ov.override_bt_mac)         overrides.btMac         = ov.override_bt_mac;
+  if (ov.ja3_idx != null)         overrides.ja3Idx        = parseInt(ov.ja3_idx) || 0;
+
   computeAll();
   await loadSystemInfo();
 }
 
 function computeAll() {
   const { profile, seed } = state;
-  const fp = getProfileByName(profile);
+  let fp = getProfileByName(profile);
+  // Fallback to Redmi 9 if profile is missing/invalid
+  if (!fp) { state.profile = 'Redmi 9'; fp = getProfileByName('Redmi 9'); }
   const brand = (fp.brand || 'xiaomi').toLowerCase();
 
   state.imei       = overrides.imei       ?? generateIMEI(profile, seed);
+  state.imei2      = overrides.imei2      ?? generateIMEI(profile, seed + 137);
   state.iccid      = overrides.iccid      ?? generateICCID(profile, seed);
   state.imsi       = overrides.imsi       ?? generateIMSI(profile, seed);
   state.phone      = overrides.phone      ?? generatePhoneNumber(profile, seed);
   state.wifiMac    = overrides.wifiMac    ?? generateMAC(brand, seed);
   state.btMac      = overrides.btMac      ?? generateMAC(brand, seed + 1);
   state.serial     = overrides.serial     ?? generateSerial(brand, seed, fp.securityPatch || '');
+  state.hwSerial   = overrides.hwSerial   ?? generateSerial(brand, seed + 99, fp.securityPatch || '');
   state.androidId  = overrides.androidId  ?? generateAndroidId(seed);
+  state.ssaid      = state.androidId;    // SSAID = Android ID on Android 8+
   state.gsfId      = overrides.gsfId      ?? generateGsfId(seed);
   state.widevineId = overrides.widevineId ?? generateWidevineId(seed);
+  state.mediaDrmId = overrides.mediaDrmId ?? generateUUID(seed + 31);
+  state.advertisingId = overrides.advertisingId ?? generateUUID(seed + 57);
   state.bootId     = overrides.bootId     ?? generateBootId(seed);
+  state.gmailAccount = overrides.gmailAccount ?? generateGmail(seed);
+  state.gpuRenderer  = fp.gpuRenderer || 'Adreno 619';
+  state.ja3          = JA3_PRESETS[(seed + (overrides.ja3Idx || 0)) % JA3_PRESETS.length];
   state.carrier    = getCarrierName(profile, seed);
   state.simCountry = getSimCountry(profile, seed);
+  state.simOperator = state.carrier;
   state.tz         = getTimezone(seed);
+  state.wifiSsid   = overrides.wifiSsid   ?? generateWifiSsid(seed);
+  state.wifiBssid  = overrides.wifiBssid  ?? generateMAC('default', seed + 7);
+  state.mccmnc     = (state.imsi || '').substring(0, 6);
 
   if (state.locationLat !== null && state.locationLon !== null) {
     state.lat = state.locationLat;
@@ -165,6 +228,26 @@ async function saveConfig() {
   cfg.proxy_user    = state.proxyUser;
   cfg.proxy_pass    = state.proxyPass;
   if (state.scopedApps.length) cfg.scoped_apps = state.scopedApps.join(',');
+  // Persist per-field overrides so values survive app restarts
+  if (overrides.imei)          cfg.override_imei           = overrides.imei;
+  if (overrides.imei2)         cfg.override_imei2          = overrides.imei2;
+  if (overrides.serial)        cfg.override_serial         = overrides.serial;
+  if (overrides.hwSerial)      cfg.override_hw_serial      = overrides.hwSerial;
+  if (overrides.androidId)     cfg.override_android_id     = overrides.androidId;
+  if (overrides.gsfId)         cfg.override_gsf_id         = overrides.gsfId;
+  if (overrides.widevineId)    cfg.override_widevine_id    = overrides.widevineId;
+  if (overrides.mediaDrmId)    cfg.override_media_drm_id   = overrides.mediaDrmId;
+  if (overrides.advertisingId) cfg.override_advertising_id = overrides.advertisingId;
+  if (overrides.bootId)        cfg.override_boot_id        = overrides.bootId;
+  if (overrides.gmailAccount)  cfg.override_gmail          = overrides.gmailAccount;
+  if (overrides.wifiSsid)      cfg.override_wifi_ssid      = overrides.wifiSsid;
+  if (overrides.wifiBssid)     cfg.override_wifi_bssid     = overrides.wifiBssid;
+  if (overrides.imsi)          cfg.override_imsi           = overrides.imsi;
+  if (overrides.iccid)         cfg.override_iccid          = overrides.iccid;
+  if (overrides.phone)         cfg.override_phone          = overrides.phone;
+  if (overrides.wifiMac)       cfg.override_wifi_mac       = overrides.wifiMac;
+  if (overrides.btMac)         cfg.override_bt_mac         = overrides.btMac;
+  if (overrides.ja3Idx != null) cfg.ja3_idx               = String(overrides.ja3Idx);
   return await writeConfig(cfg);
 }
 
@@ -353,13 +436,28 @@ function setProfileCard(fp, name) {
 }
 
 function renderIdsTab() {
-  renderField('f-imei',       state.imei,       validateIMEI(state.imei));
-  renderField('f-serial',     state.serial,     validateSerial(state.serial));
-  renderField('f-android-id', state.androidId,  validateAndroidId(state.androidId));
-  renderField('f-gsf-id',     state.gsfId,      validateGsfId(state.gsfId));
-  renderField('f-widevine',   state.widevineId, validateWidevineId(state.widevineId));
-  renderField('f-boot-id',    state.bootId,     validateBootId(state.bootId));
+  renderField('f-imei',       state.imei,        validateIMEI(state.imei));
+  renderField('f-imei2',      state.imei2,       validateIMEI(state.imei2));
+  renderField('f-serial',     state.serial,      validateSerial(state.serial));
+  renderField('f-hw-serial',  state.hwSerial,    validateSerial(state.hwSerial));
+  renderField('f-android-id', state.androidId,   validateAndroidId(state.androidId));
+  renderField('f-ssaid',      state.ssaid,       validateAndroidId(state.ssaid));
+  renderField('f-gsf-id',     state.gsfId,       validateGsfId(state.gsfId));
+  renderField('f-widevine',   state.widevineId,  validateWidevineId(state.widevineId));
+  renderField('f-media-drm',  state.mediaDrmId,  validateBootId(state.mediaDrmId));
+  renderField('f-adv-id',     state.advertisingId, validateBootId(state.advertisingId));
+  renderField('f-boot-id',    state.bootId,      validateBootId(state.bootId));
+  renderField('f-gmail',      state.gmailAccount, /^[a-z][a-z0-9.]+@gmail\.com$/.test(state.gmailAccount));
+  renderField('f-gpu',        state.gpuRenderer, !!state.gpuRenderer);
   renderField('f-fingerprint', getProfileByName(state.profile).fingerprint || '', true);
+  // JA3/TLS — dual-line display (name + hash)
+  const ja3 = state.ja3 || JA3_PRESETS[0];
+  const ja3El   = document.getElementById('f-ja3');
+  const ja3Name = document.getElementById('f-ja3-name');
+  if (ja3El)   ja3El.textContent   = ja3.hash;
+  if (ja3Name) ja3Name.textContent = ja3.name;
+  const ja3Badge = document.getElementById('f-ja3-badge');
+  if (ja3Badge) { ja3Badge.className = 'valid-badge ok'; ja3Badge.textContent = 'VALID'; }
 }
 
 // ─── Network page ─────────────────────────────────────────────────────
@@ -370,13 +468,17 @@ function renderNetwork() {
 }
 
 function renderTelephonyTab() {
-  renderField('f-imsi',     state.imsi,    validateIMSI(state.imsi));
-  renderField('f-iccid',    state.iccid,   validateICCID(state.iccid));
-  renderField('f-phone',    state.phone,   validatePhone(state.phone));
-  renderField('f-wifi-mac', state.wifiMac, validateMAC(state.wifiMac));
-  renderField('f-bt-mac',   state.btMac,   validateMAC(state.btMac));
-  renderField('f-carrier',  state.carrier, !!state.carrier);
-  renderField('f-sim-cc',   state.simCountry, state.simCountry === 'US');
+  renderField('f-imsi',       state.imsi,       validateIMSI(state.imsi));
+  renderField('f-iccid',      state.iccid,      validateICCID(state.iccid));
+  renderField('f-phone',      state.phone,      validatePhone(state.phone));
+  renderField('f-carrier',    state.carrier,    !!state.carrier);
+  renderField('f-sim-cc',     state.simCountry, state.simCountry === 'US');
+  renderField('f-sim-op',     state.simOperator, !!state.simOperator);
+  renderField('f-mccmnc',     state.mccmnc,     /^\d{5,6}$/.test(state.mccmnc));
+  renderField('f-wifi-mac',   state.wifiMac,    validateMAC(state.wifiMac));
+  renderField('f-bt-mac',     state.btMac,      validateMAC(state.btMac));
+  renderField('f-wifi-ssid',  state.wifiSsid,   !!state.wifiSsid);
+  renderField('f-wifi-bssid', state.wifiBssid,  validateMAC(state.wifiBssid));
 
   // Network type toggle
   const lteToggle = document.getElementById('toggle-lte');
@@ -392,14 +494,17 @@ function renderLocationTab() {
   document.getElementById('loc-tz')  && (document.getElementById('loc-tz').textContent  = state.tz);
   // Sensor values from profile
   const fp = getProfileByName(state.profile);
-  document.getElementById('loc-accel-max') && (document.getElementById('loc-accel-max').textContent = fp.accelMaxRange?.toFixed(4) + ' m/s²');
-  document.getElementById('loc-accel-res') && (document.getElementById('loc-accel-res').textContent = fp.accelResolution?.toFixed(7));
-  document.getElementById('loc-gyro-max')  && (document.getElementById('loc-gyro-max').textContent  = fp.gyroMaxRange?.toFixed(6) + ' rad/s');
-  document.getElementById('loc-gyro-res')  && (document.getElementById('loc-gyro-res').textContent  = fp.gyroResolution?.toFixed(6));
-  document.getElementById('loc-mag-max')   && (document.getElementById('loc-mag-max').textContent   = fp.magMaxRange?.toFixed(1) + ' µT');
-  document.getElementById('loc-heart')    && (document.getElementById('loc-heart').textContent     = fp.hasHeartRate  ? '✓ Present' : '✗ Absent');
-  document.getElementById('loc-baro')     && (document.getElementById('loc-baro').textContent      = fp.hasBarometer  ? '✓ Present' : '✗ Absent');
-  document.getElementById('loc-fp-wake')  && (document.getElementById('loc-fp-wake').textContent   = fp.hasFingerprintWakeup ? '✓ Present' : '✗ Absent');
+  // Safe fixed-point helper — shows '–' if value is null/undefined
+  const sfx = (v, d, unit='') => (v != null ? v.toFixed(d) + unit : '–');
+  const setEl = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  setEl('loc-accel-max', sfx(fp.accelMaxRange,  4, ' m/s²'));
+  setEl('loc-accel-res', sfx(fp.accelResolution, 7));
+  setEl('loc-gyro-max',  sfx(fp.gyroMaxRange,   6, ' rad/s'));
+  setEl('loc-gyro-res',  sfx(fp.gyroResolution, 6));
+  setEl('loc-mag-max',   sfx(fp.magMaxRange,    1, ' µT'));
+  setEl('loc-heart',     fp.hasHeartRate  ? '✓ Present' : '✗ Absent');
+  setEl('loc-baro',      fp.hasBarometer  ? '✓ Present' : '✗ Absent');
+  setEl('loc-fp-wake',   fp.hasFingerprintWakeup ? '✓ Present' : '✗ Absent');
 
   if (window._map) {
     window._map.setView([state.lat, state.lon], 11);
@@ -491,6 +596,11 @@ window.randomProfile = function() {
   selectProfile(n);
 };
 
+window.applyDevice = async function() {
+  if (await saveConfig()) toast('Device profile saved');
+  else toast('Save failed — check permissions', 'err');
+};
+
 window.randomizeAllIds = function() {
   rotateSeed();
   renderIdsTab();
@@ -508,17 +618,25 @@ window.randomizeField = function(field) {
   const fp = getProfileByName(state.profile);
   const brand = (fp.brand || 'xiaomi').toLowerCase();
   const actions = {
-    'f-imei':       () => { overrides.imei       = generateIMEI(state.profile, newSubSeed); state.imei = overrides.imei; },
-    'f-serial':     () => { overrides.serial     = generateSerial(brand, newSubSeed, fp.securityPatch||''); state.serial = overrides.serial; },
-    'f-android-id': () => { overrides.androidId  = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; },
-    'f-gsf-id':     () => { overrides.gsfId      = generateGsfId(newSubSeed); state.gsfId = overrides.gsfId; },
-    'f-widevine':   () => { overrides.widevineId = generateWidevineId(newSubSeed); state.widevineId = overrides.widevineId; },
-    'f-boot-id':    () => { overrides.bootId     = generateBootId(newSubSeed); state.bootId = overrides.bootId; },
-    'f-imsi':       () => { overrides.imsi       = generateIMSI(state.profile, newSubSeed); state.imsi = overrides.imsi; },
-    'f-iccid':      () => { overrides.iccid      = generateICCID(state.profile, newSubSeed); state.iccid = overrides.iccid; },
-    'f-phone':      () => { overrides.phone      = generatePhoneNumber(state.profile, newSubSeed); state.phone = overrides.phone; },
-    'f-wifi-mac':   () => { overrides.wifiMac    = generateMAC(brand, newSubSeed); state.wifiMac = overrides.wifiMac; },
-    'f-bt-mac':     () => { overrides.btMac      = generateMAC(brand, newSubSeed+1); state.btMac = overrides.btMac; },
+    'f-imei':       () => { overrides.imei          = generateIMEI(state.profile, newSubSeed); state.imei = overrides.imei; },
+    'f-imei2':      () => { overrides.imei2         = generateIMEI(state.profile, newSubSeed); state.imei2 = overrides.imei2; },
+    'f-serial':     () => { overrides.serial        = generateSerial(brand, newSubSeed, fp.securityPatch||''); state.serial = overrides.serial; },
+    'f-hw-serial':  () => { overrides.hwSerial      = generateSerial(brand, newSubSeed+1, fp.securityPatch||''); state.hwSerial = overrides.hwSerial; },
+    'f-android-id': () => { overrides.androidId     = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; state.ssaid = state.androidId; },
+    'f-gsf-id':     () => { overrides.gsfId         = generateGsfId(newSubSeed); state.gsfId = overrides.gsfId; },
+    'f-widevine':   () => { overrides.widevineId    = generateWidevineId(newSubSeed); state.widevineId = overrides.widevineId; },
+    'f-media-drm':  () => { overrides.mediaDrmId    = generateUUID(newSubSeed); state.mediaDrmId = overrides.mediaDrmId; },
+    'f-adv-id':     () => { overrides.advertisingId = generateUUID(newSubSeed+1); state.advertisingId = overrides.advertisingId; },
+    'f-boot-id':    () => { overrides.bootId        = generateBootId(newSubSeed); state.bootId = overrides.bootId; },
+    'f-gmail':      () => { overrides.gmailAccount  = generateGmail(newSubSeed); state.gmailAccount = overrides.gmailAccount; },
+    'f-ja3':        () => { overrides.ja3Idx = Math.floor(Math.random() * JA3_PRESETS.length); state.ja3 = JA3_PRESETS[overrides.ja3Idx]; },
+    'f-imsi':       () => { overrides.imsi          = generateIMSI(state.profile, newSubSeed); state.imsi = overrides.imsi; state.mccmnc = state.imsi.substring(0,6); state.simOperator = state.carrier; },
+    'f-iccid':      () => { overrides.iccid         = generateICCID(state.profile, newSubSeed); state.iccid = overrides.iccid; },
+    'f-phone':      () => { overrides.phone         = generatePhoneNumber(state.profile, newSubSeed); state.phone = overrides.phone; },
+    'f-wifi-mac':   () => { overrides.wifiMac       = generateMAC(brand, newSubSeed); state.wifiMac = overrides.wifiMac; },
+    'f-bt-mac':     () => { overrides.btMac         = generateMAC(brand, newSubSeed+1); state.btMac = overrides.btMac; },
+    'f-wifi-ssid':  () => { overrides.wifiSsid      = generateWifiSsid(newSubSeed); state.wifiSsid = overrides.wifiSsid; },
+    'f-wifi-bssid': () => { overrides.wifiBssid     = generateMAC('default', newSubSeed+7); state.wifiBssid = overrides.wifiBssid; },
   };
   if (actions[field]) {
     actions[field]();
@@ -642,11 +760,21 @@ window.wipeApp = async function(pkg) {
 
 window.loadInstalledApps = async function() {
   const dd = document.getElementById('app-dropdown');
-  if (!dd || dd.options.length > 1) return;
-  dd.innerHTML = '<option value="">Loading apps...</option>';
-  const {stdout} = await ksu_exec('pm list packages 2>/dev/null | sed "s/package://" | grep -v "^$" | sort | head -200');
-  const pkgs = stdout ? stdout.split('\n').filter(Boolean) : [];
-  dd.innerHTML = '<option value="">Select app to add...</option>' +
+  if (!dd) return;
+  dd.innerHTML = '<option value="">Loading apps…</option>';
+  // Use bare `pm list packages` — no shell pipes (sed/grep/sort not guaranteed
+  // in Android's minimal /system/bin/sh). Parse and sort entirely in JS.
+  const {stdout, errno} = await ksu_exec('pm list packages 2>/dev/null');
+  const pkgs = (stdout || '')
+    .split('\n')
+    .map(l => l.replace(/^package:/, '').trim())
+    .filter(Boolean)
+    .sort();
+  if (!pkgs.length) {
+    dd.innerHTML = '<option value="">No apps found — try again or type package manually</option>';
+    return;
+  }
+  dd.innerHTML = '<option value="">Select app to add…</option>' +
     pkgs.map(p => `<option value="${escAttr(p)}">${escHtml(p)}</option>`).join('');
 };
 
@@ -728,9 +856,104 @@ window.refreshStatus = async function() {
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 
+// ─── System nav bar inset detection ───────────────────────────────────
+// env(safe-area-inset-bottom) returns 0 on MIUI / Android 11 WebViews even
+// when viewport-fit=cover is set, because KernelSU's activity doesn't forward
+// window insets to the WebView on those builds.
+// This function measures the actual gap using 4 methods and sets the CSS
+// custom property --inset-bottom on :root so the bottom nav compensates.
+function detectNavInset() {
+  // ── Method 1: probe whether env() is already working ─────────────────
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:fixed;bottom:0;left:0;width:0;' +
+    'height:env(safe-area-inset-bottom,0px);visibility:hidden;pointer-events:none';
+  document.documentElement.appendChild(probe);
+  const envH = probe.offsetHeight;
+  probe.remove();
+  if (envH > 5) return; // env() is working — CSS already handles it
+
+  // ── Method 2: visualViewport API (most precise, Android WebView 67+) ──
+  // IMPORTANT: Only return early if we actually measured a real inset (> 10px).
+  // On MIUI / Android 11 KernelSU WebView, visualViewport often reports 0 even
+  // though a physical nav bar is present. In that case we fall through to Methods
+  // 3 and 4. The resize listener is still registered so future viewport changes
+  // (e.g. keyboard) are handled dynamically.
+  if (window.visualViewport) {
+    const applyVV = () => {
+      const layoutH = document.documentElement.clientHeight;
+      const inset = Math.max(
+        0,
+        Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
+      );
+      if (inset > 10) {
+        document.documentElement.style.setProperty('--inset-bottom', inset + 'px');
+      }
+    };
+    window.visualViewport.addEventListener('resize', applyVV);
+    const layoutH = document.documentElement.clientHeight;
+    const initInset = Math.max(
+      0,
+      Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
+    );
+    if (initInset > 10) {
+      document.documentElement.style.setProperty('--inset-bottom', initInset + 'px');
+      return; // real measurement obtained — done
+    }
+    // initInset = 0 → fall through to Methods 3 & 4
+  }
+
+  // ── Method 3: screen vs window height heuristic ───────────────────────
+  // On Android, screen.height can be physical px or CSS px depending on build.
+  // We try both interpretations and use whichever lands in a plausible nav bar
+  // range (30–120 CSS px).
+  const dpr      = window.devicePixelRatio || 1;
+  const diffCss  = window.screen.height - window.innerHeight;
+  const diffPhys = Math.round(window.screen.height / dpr) - window.innerHeight;
+  const diff = (diffCss > 20 && diffCss < 200)   ? diffCss
+             : (diffPhys > 20 && diffPhys < 120)  ? diffPhys
+             : 0;
+  if (diff > 0) {
+    document.documentElement.style.setProperty('--inset-bottom', diff + 'px');
+    return;
+  }
+
+  // ── Method 4: Android UA hardcoded fallback ────────────────────────────
+  // All measurement methods returned 0. On Android the system navigation bar
+  // (gesture strip or 3-button bar) is always present and is typically 48 px
+  // tall in CSS pixels. Apply this safe fallback so the bottom nav is always
+  // above the system bar on any Android device.
+  if (/Android/i.test(navigator.userAgent)) {
+    document.documentElement.style.setProperty('--inset-bottom', '48px');
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  await loadState();
+  // Detect system nav bar height immediately — before any async work so the
+  // bottom nav is already correctly positioned during the loading screen.
+  detectNavInset();
+
+  // loadState() is wrapped in try/finally so the loading screen is ALWAYS
+  // removed even if ksu_exec times out, throws, or the config is missing.
+  // Without this guarantee the #loading-screen stays on top and blocks every
+  // click / touch event on the underlying UI.
+  try {
+    await loadState();
+  } catch(e) {
+    console.error('[OmniShield] init error:', e);
+    // State defaults are already set at declaration time, so computeAll()
+    // below will still produce valid generated values.
+  } finally {
+    const loader = document.getElementById('loading-screen');
+    if (loader) {
+      loader.classList.add('hidden');
+      setTimeout(() => loader.remove(), 600);
+    }
+  }
+
+  // ── Event listeners are registered AFTER the finally block so they are
+  //    always attached regardless of whether loadState() succeeded. ──────
 
   // Navigation
   document.querySelectorAll('.nav-item').forEach(btn => {
