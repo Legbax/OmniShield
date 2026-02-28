@@ -37,7 +37,7 @@ async function ksu_exec(cmd) {
       _ksuExecFn = mod.exec;
     }
     const r = await _ksuExecFn(cmd);
-    return { errno: r.errno || 0, stdout: (r.stdout || '').trim() };
+    return { errno: +r.errno || 0, stdout: (r.stdout || '').trim() };
   } catch(e) {
     // Not in KernelSU environment or timed out — graceful degradation
     return { errno: 1, stdout: '' };
@@ -63,9 +63,11 @@ async function readConfig() {
 
 async function writeConfig(cfg) {
   await ksu_exec(`mkdir -p /data/adb/.omni_data`);
-  const lines = Object.entries(cfg).map(([k,v]) => `${k}=${v}`).join('\n');
-  const safe = lines.replace(/'/g, "'\\''");
-  const r = await ksu_exec(`printf '%s\n' '${safe}' > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
+  const echos = Object.entries(cfg).map(([k, v]) => {
+    const safe = `${k}=${v}`.replace(/'/g, "'\\''");
+    return `echo '${safe}'`;
+  });
+  const r = await ksu_exec(`{ ${echos.join('; ')}; } > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
   return r.errno === 0;
 }
 
