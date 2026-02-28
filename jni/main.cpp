@@ -408,8 +408,9 @@ static void remapModuleMemory() {
         if (perms[0] == 'r') prot |= PROT_READ;
         if (perms[1] == 'w') prot |= PROT_WRITE;
         if (perms[2] == 'x') prot |= PROT_EXEC;
-        // Allocate anonymous memory
-        void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        // Allocate anonymous memory with original perms (so code pages stay
+        // executable after mremap — the function itself lives in this .so)
+        void *copy = mmap(nullptr, size, prot | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if (copy == MAP_FAILED) continue;
         // Ensure original is readable so we can copy
         if (!(prot & PROT_READ)) mprotect((void*)start, size, PROT_READ);
@@ -417,7 +418,10 @@ static void remapModuleMemory() {
         // Atomically replace file-backed mapping with anonymous copy
         void *result = mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)start);
         if (result != MAP_FAILED) {
+            // Strip PROT_WRITE from segments that shouldn't have it (e.g. r-xp code)
             mprotect((void*)start, size, prot);
+        } else {
+            munmap(copy, size);
         }
     }
     fclose(fp);
