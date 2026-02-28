@@ -3,10 +3,6 @@
 # Ensures prop file permissions
 chmod 644 /data/adb/.omni_data/.identity.cfg 2>/dev/null
 
-# PR65: Puente para que Zygisk (C++) pueda leer la configuración evadiendo SELinux
-cp /data/adb/.omni_data/.identity.cfg /data/adb/modules/omnishield/identity.cfg 2>/dev/null
-chmod 644 /data/adb/modules/omnishield/identity.cfg 2>/dev/null
-
 # ============================================================
 # PR37: SSAID Injection — OmniShield
 # ============================================================
