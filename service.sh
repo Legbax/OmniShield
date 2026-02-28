@@ -1,7 +1,9 @@
 #!/system/bin/sh
 # Omni-Shield Service
-# Ensures prop file permissions
+# Ensures prop file permissions and SELinux bypass bridge
 chmod 644 /data/adb/.omni_data/.identity.cfg 2>/dev/null
+cp /data/adb/.omni_data/.identity.cfg /data/local/tmp/.identity.cfg 2>/dev/null
+chmod 644 /data/local/tmp/.identity.cfg 2>/dev/null
 
 # ============================================================
 # PR37: SSAID Injection — OmniShield
