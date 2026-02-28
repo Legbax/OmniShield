@@ -55,6 +55,11 @@ static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
 static bool g_debugMode = true;  // PR53: activar con debug_mode=true en .identity.cfg
 
+// --- ZYGISK GLOBALS MOVIDAS AQUÍ ---
+static zygisk::Api *g_api = nullptr;
+static JavaVM *g_jvm = nullptr;
+static bool g_isTargetApp = false;
+
 // PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
 static double g_cachedLat       = 0.0;
 static double g_cachedLon       = 0.0;
@@ -2435,9 +2440,6 @@ static void my_native_setup(JNIEnv* env, jobject thiz,
 // -----------------------------------------------------------------------------
 // Module Main
 // -----------------------------------------------------------------------------
-static zygisk::Api *g_api = nullptr;  // PR56: Api global guardada en onLoad
-static JavaVM *g_jvm = nullptr;       // PR55: guardar JavaVM en lugar de JNIEnv raw
-static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en preAppSpecialize
 
 class OmniModule : public zygisk::ModuleBase {
 public:
