@@ -636,9 +636,20 @@ window.randomProfile = function() {
   selectProfile(n);
 };
 
+async function smartApply(label) {
+  if (!await saveConfig()) { toast('Save failed — check permissions', 'err'); return; }
+  const apps = state.scopedApps || [];
+  for (const pkg of apps) {
+    await ksu_exec(`am force-stop ${pkg}`);
+  }
+  if (apps.length > 0)
+    toast(`${label} saved — ${apps.length} app(s) will reload with new profile`);
+  else
+    toast(`${label} saved`);
+}
+
 window.applyDevice = async function() {
-  if (await saveConfig()) toast('Device profile saved');
-  else toast('Save failed — check permissions', 'err');
+  await smartApply('Device profile');
 };
 
 window.randomizeAllIds = function() {
@@ -648,8 +659,7 @@ window.randomizeAllIds = function() {
 };
 
 window.applyIds = async function() {
-  if (await saveConfig()) { toast('Identity changes saved'); }
-  else toast('Save failed — check permissions', 'err');
+  await smartApply('Identity changes');
 };
 
 // Per-field randomize (changes only that field via its sub-seed)
@@ -693,8 +703,7 @@ window.randomizeAllTelephony = function() {
 };
 
 window.applyTelephony = async function() {
-  if (await saveConfig()) toast('Network changes saved');
-  else toast('Save failed', 'err');
+  await smartApply('Network changes');
 };
 
 window.toggleNetworkType = function(checked) {
@@ -717,8 +726,7 @@ window.randomLocation = function() {
 };
 
 window.applyLocation = async function() {
-  if (await saveConfig()) toast('Location changes saved');
-  else toast('Save failed', 'err');
+  await smartApply('Location changes');
 };
 
 // ─── Map init ──────────────────────────────────────────────────────────

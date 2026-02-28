@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v12.9.57 (The Void)
+# Julia.md - Vortex Omni-Shield v12.9.58 (The Void)
 
 **Fecha:** 28 de febrero de 2026 (Estado Actual)
-**Agente:** Claude (PR71g)
-**Versión:** v12.9.57
+**Agente:** Claude (PR71h)
+**Versión:** v12.9.58
 
 ## 🌀 Filosofía: Virtualización Total (The Void)
 El Proyecto Omni-Shield ha alcanzado su estado final: "The Void".
@@ -62,6 +62,15 @@ jitter=true
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
 
 ### Registro de Actualizaciones
+
+**Fecha y agente:** 28 de febrero de 2026, Claude (PR71h — Smart Apply: force-stop scoped apps tras guardar config)
+**Resumen de cambios:** v12.9.58 — Los botones "Apply" ahora cierran automáticamente las apps en scope tras guardar, permitiendo hot-reload de identidad sin reboot.
+- **Fix 20 — Smart Apply (app.js):** Nueva función `smartApply(label)` que: (1) guarda config via `saveConfig()`, (2) ejecuta `am force-stop` sobre cada app en `state.scopedApps`, (3) muestra toast informando cuántas apps se reiniciarán. Aplicado a `applyDevice`, `applyIds`, `applyTelephony`, `applyLocation`. NO aplicado a `applyProxy` (proxy no requiere restart). Gracias al Companion Process (PR70c), cada app al ser reabierta por el usuario invoca `preAppSpecialize` → `connectCompanion()` → el daemon root re-lee `.identity.cfg` → la app recibe el perfil actualizado instantáneamente.
+- **Análisis de propuesta Palantir (Zygisk API v4 + Companion):** Se evaluó la propuesta completa. Resultado: 5 de 6 puntos ya estaban implementados desde PR70c (API v4, companion_handler, connectCompanion, onLoad, REGISTER_ZYGISK_COMPANION). Se rechazó la eliminación del fallback de lectura directa (necesario como safety net) y la inicialización de hooks en onLoad (incorrecto — hooks Dobby deben instalarse en postAppSpecialize, post-fork). Solo el Smart Apply era genuinamente nuevo.
+**Prompt del usuario:** Evaluación de propuesta de Palantir: migración a Zygisk API v4 y Hot-Reload con Companion Process.
+**Nota personal para el siguiente agente:** El companion process ya existía desde PR70c. La arquitectura es: `preAppSpecialize` → `readConfigViaCompanion()` (socket IPC con root daemon) → fallback `readConfig()` (lectura directa). NUNCA eliminar el fallback. NUNCA mover hooks Dobby a `onLoad` — se ejecuta en Zygote pre-fork y afectaría a todos los procesos. Los Apply buttons ahora hacen force-stop automático; si el usuario reporta que apps no se cierran, verificar que `state.scopedApps` no esté vacío y que `ksu_exec` funcione (global `ksu` inyectado por WebView).
+
+---
 
 **Fecha y agente:** 28 de febrero de 2026, Claude (PR71g — Toggle dedicado WebView Spoofing para evitar crash en Destroy Identity)
 **Resumen de cambios:** v12.9.57 — Destroy Identity crasheaba la WebUI porque `com.android.webview` estaba en el scope y se force-stoppaba/wipeaba junto con las demás apps. La WebUI corre DENTRO de un WebView, así que matar el proceso de WebView mata la interfaz.
