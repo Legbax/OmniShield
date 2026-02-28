@@ -162,6 +162,9 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
 
+// PR71: execve hook — intercept getprop exec to prevent property leak via child process
+static int (*orig_execve)(const char *pathname, char *const argv[], char *const envp[]);
+
 // PR44: Camera2 — CameraMetadataNative.nativeReadValues(int tag) : byte[]
 // Firma AOSP Android 11: instance method, (I)[B — SIN parámetro ptr explícito
 static jbyteArray (*orig_nativeReadValues)(JNIEnv*, jobject, jint);
@@ -875,7 +878,9 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.build.version.incremental")       dynamic_buffer = fp.incremental;
         else if (k == "ro.build.version.security_patch")    dynamic_buffer = fp.securityPatch;
-        else if (k == "ro.build.description")               dynamic_buffer = fp.buildDescription;
+        else if (k == "ro.build.description"       ||
+                 k == "ro.vendor.build.description" ||
+                 k == "ro.odm.build.description")            dynamic_buffer = fp.buildDescription;
         else if (k == "ro.build.flavor")                    dynamic_buffer = fp.buildFlavor;
         else if (k == "ro.build.host")                      dynamic_buffer = fp.buildHost;
         else if (k == "ro.build.user")                      dynamic_buffer = fp.buildUser;
@@ -955,6 +960,9 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.boot.flash.locked")         dynamic_buffer = "1";
         else if (k == "ro.boot.vbmeta.device_state")  dynamic_buffer = "locked";
         else if (k == "ro.boot.veritymode")           dynamic_buffer = "enforcing";
+        // PR71: ro.secureboot.lockstate leakeaba "unlocked" en VD-Infos
+        else if (k == "ro.secureboot.lockstate")      dynamic_buffer = "locked";
+        else if (k == "ro.secureboot.devicelock")     dynamic_buffer = "1";
         else if (k == "ro.boot.hardware")             dynamic_buffer = fp.hardware;
         else if (k == "ro.boot.hardware.platform")    dynamic_buffer = fp.boardPlatform;
         // --- PR22: Partition Fingerprints (Play Integrity v3+) ---
@@ -1095,13 +1103,17 @@ int my_system_property_get(const char *key, char *value) {
             // Android real reporta el driver gráfico ('adreno', 'mali', 'powervr')
             dynamic_buffer = fp.eglDriver;
         }
-        else if (k == "ro.mediatek.version.release" ||
-                 k == "ro.mediatek.platform") {
-            // Suppress MTK-specific props when not emulating MediaTek
+        else if (k == "ro.mediatek.platform") {
             std::string plat = toLowerStr(fp.boardPlatform);
             if (plat.find("mt") == std::string::npos) {
                 value[0] = '\0'; return 0;
             }
+            // PR71: Return profile's chipname (e.g. "MT6765") instead of real SoC
+            dynamic_buffer = fp.hardwareChipname;
+        }
+        else if (k == "ro.mediatek.version.release") {
+            // Suppress MTK version — ODM-specific string leaks manufacturer identity
+            value[0] = '\0'; return 0;
         }
 
         // ── PR70c: Leaked props detected by VD-Infos ─────────────────────
@@ -1164,7 +1176,8 @@ int my_system_property_get(const char *key, char *value) {
             else if (strcmp(fp.release, "12") == 0) dynamic_buffer = "31";
             else dynamic_buffer = "30";
         }
-        else if (k == "ro.vendor.build.version.security_patch") dynamic_buffer = fp.securityPatch;
+        else if (k == "ro.vendor.build.version.security_patch" ||
+                 k == "ro.vendor.build.security_patch")          dynamic_buffer = fp.securityPatch;
         // Build dates for all partitions
         else if (k == "ro.vendor.build.date.utc"    ||
                  k == "ro.odm.build.date.utc"       ||
@@ -1172,6 +1185,24 @@ int my_system_property_get(const char *key, char *value) {
                  k == "ro.system.build.date.utc"     ||
                  k == "ro.system_ext.build.date.utc" ||
                  k == "ro.bootimage.build.date.utc") dynamic_buffer = fp.buildDateUtc;
+        // PR71: Human-readable build dates — VD-Infos reads these alongside UTC variants
+        else if (k == "ro.build.date"           ||
+                 k == "ro.vendor.build.date"    ||
+                 k == "ro.odm.build.date"       ||
+                 k == "ro.product.build.date"   ||
+                 k == "ro.system.build.date"    ||
+                 k == "ro.system_ext.build.date"||
+                 k == "ro.bootimage.build.date") {
+            time_t t = 0;
+            try { t = std::stol(fp.buildDateUtc); } catch(...) {}
+            if (t > 0) {
+                struct tm tm_buf;
+                gmtime_r(&t, &tm_buf);
+                char date_str[64];
+                strftime(date_str, sizeof(date_str), "%a %b %e %H:%M:%S UTC %Y", &tm_buf);
+                dynamic_buffer = date_str;
+            }
+        }
         // Build IDs for all partitions
         else if (k == "ro.vendor.build.id"     ||
                  k == "ro.odm.build.id"        ||
@@ -1201,6 +1232,11 @@ int my_system_property_get(const char *key, char *value) {
             if (br != "redmi" && br != "xiaomi" && br != "poco") {
                 value[0] = '\0'; return 0;
             }
+        }
+        // PR71: Suppress vendor MTK version release — ODM-specific string leaks
+        // real device manufacturer (e.g. HUAQIN for Redmi 9)
+        else if (k == "ro.vendor.mediatek.version.release") {
+            value[0] = '\0'; return 0;
         }
         // Suppress MediaTek vendor props when NOT emulating MediaTek
         else if (k.find("ro.vendor.mediatek.") == 0 ||
@@ -2355,6 +2391,50 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
 }
 
 // -----------------------------------------------------------------------------
+// PR71: Hook execve — intercept getprop commands in child processes
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: VD-Infos and detection apps use Runtime.exec("getprop propname")
+// which forks a child process. After fork(), the child calls execve("getprop")
+// which replaces the process image and destroys all Dobby hooks. By hooking
+// execve itself, we intercept the call BEFORE the image is replaced, read the
+// property via our hooked my_system_property_get, write the spoofed value to
+// stdout, and _exit(0) — the real getprop binary never runs.
+static int my_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    if (pathname && argv) {
+        // Extract basename from path
+        const char* base = strrchr(pathname, '/');
+        base = base ? base + 1 : pathname;
+
+        if (strcmp(base, "getprop") == 0) {
+            if (argv[1] && argv[1][0] != '\0') {
+                // Single property read: getprop <name> [default]
+                char value[92] = {0};
+                int len = my_system_property_get(argv[1], value);
+                if (len > 0) {
+                    write(STDOUT_FILENO, value, len);
+                    write(STDOUT_FILENO, "\n", 1);
+                } else if (argv[2]) {
+                    // Property empty/hidden — use default value if provided
+                    size_t dlen = strlen(argv[2]);
+                    write(STDOUT_FILENO, argv[2], dlen);
+                    write(STDOUT_FILENO, "\n", 1);
+                }
+                // No output for non-existent properties (matches real getprop)
+                _exit(0);
+            }
+            // getprop with no args — suppress full property dump to prevent leaks
+            _exit(0);
+        }
+    }
+
+    if (!orig_execve) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return orig_execve(pathname, argv, envp);
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Telephony (JNI Bridge)
 // -----------------------------------------------------------------------------
 jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
@@ -2714,6 +2794,10 @@ public:
         if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
 
+        // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
+        void* execve_func = DobbySymbolResolver("libc.so", "execve");
+        if (execve_func) DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
+
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");
         if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
@@ -2797,6 +2881,12 @@ public:
                     setStr("FINGERPRINT",  bfp.fingerprint);
                     setStr("ID",           bfp.buildId);
                     setStr("DISPLAY",      bfp.display);
+
+                    // PR71: Build.HOST y Build.USER leakeaban valores reales del hardware
+                    // (VD-Infos reportó HOST=m1-xm-ota-bd014.bj.idc.xiaomi.com, USER=builder)
+                    setStr("HOST",         bfp.buildHost);
+                    setStr("USER",         bfp.buildUser);
+                    setStr("BOOTLOADER",   bfp.bootloader);
 
                     // PR40 (Gemini BUG-C1-02): Ocultar firmas de Custom ROMs.
                     // LineageOS/PixelOS reportan "test-keys"/"userdebug" en Zygote static fields.
