@@ -1097,11 +1097,117 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.mediatek.version.release" ||
                  k == "ro.mediatek.platform") {
-            // Si una app (o el DRM) busca explícitamente firmas MTK en las properties, las vaciamos
-            // a menos que estemos emulando un MediaTek
+            // Suppress MTK-specific props when not emulating MediaTek
             std::string plat = toLowerStr(fp.boardPlatform);
             if (plat.find("mt") == std::string::npos) {
-                dynamic_buffer = "";
+                value[0] = '\0'; return 0;
+            }
+        }
+
+        // ── PR70c: Leaked props detected by VD-Infos ─────────────────────
+
+        // Hostname — leaks "M2004J19C-Redmi9" (original model + brand)
+        else if (k == "net.hostname") {
+            dynamic_buffer = std::string(fp.model) + "-" + fp.brand;
+        }
+        // Modem serial / baseband project — leaks original SoC and serial
+        else if (k == "vendor.gsm.serial" || k == "vendor.gsm.project.baseband") {
+            value[0] = '\0'; return 0;
+        }
+        // ro.product.product.* namespace — Android reads these on some ROMs
+        else if (k == "ro.product.product.model")        dynamic_buffer = fp.model;
+        else if (k == "ro.product.product.brand")        dynamic_buffer = fp.brand;
+        else if (k == "ro.product.product.manufacturer") dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.product.device")       dynamic_buffer = fp.device;
+        else if (k == "ro.product.product.name")         dynamic_buffer = fp.product;
+        // ro.product.system_ext.* namespace
+        else if (k == "ro.product.system_ext.model")     dynamic_buffer = fp.model;
+        else if (k == "ro.product.system_ext.device")    dynamic_buffer = fp.device;
+        else if (k == "ro.product.system_ext.brand")     dynamic_buffer = fp.brand;
+        else if (k == "ro.product.system_ext.manufacturer") dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.system_ext.name")      dynamic_buffer = fp.product;
+        // Market name — all partitions leak "Redmi 9"
+        else if (k.find("marketname") != std::string::npos) dynamic_buffer = fp.model;
+        // Device name in Settings DB
+        else if (k == "device_name") dynamic_buffer = fp.model;
+        // Product identifiers
+        else if (k == "ro.product.mod_device")  dynamic_buffer = fp.product;
+        else if (k == "ro.product.cert")        dynamic_buffer = fp.model;
+        else if (k == "ro.build.product")       dynamic_buffer = fp.product;
+        // Boot props that leak original codename
+        else if (k == "ro.boot.product.hardware.sku") dynamic_buffer = fp.device;
+        else if (k == "ro.boot.rsc") dynamic_buffer = fp.device;
+        // OEM identifier
+        else if (k == "ro.fota.oem") dynamic_buffer = fp.manufacturer;
+        // Build version props for all partitions (leak MIUI incremental/dates)
+        else if (k == "ro.vendor.build.version.incremental" ||
+                 k == "ro.odm.build.version.incremental" ||
+                 k == "ro.product.build.version.incremental" ||
+                 k == "ro.system.build.version.incremental" ||
+                 k == "ro.system_ext.build.version.incremental") dynamic_buffer = fp.incremental;
+        else if (k == "ro.vendor.build.version.release" ||
+                 k == "ro.odm.build.version.release" ||
+                 k == "ro.product.build.version.release" ||
+                 k == "ro.system.build.version.release" ||
+                 k == "ro.system_ext.build.version.release" ||
+                 k == "ro.vendor.build.version.release_or_codename" ||
+                 k == "ro.product.build.version.release_or_codename" ||
+                 k == "ro.system.build.version.release_or_codename" ||
+                 k == "ro.system_ext.build.version.release_or_codename") dynamic_buffer = fp.release;
+        else if (k == "ro.vendor.build.version.sdk" ||
+                 k == "ro.odm.build.version.sdk" ||
+                 k == "ro.product.build.version.sdk" ||
+                 k == "ro.system.build.version.sdk" ||
+                 k == "ro.system_ext.build.version.sdk") {
+            if (strcmp(fp.release, "11") == 0) dynamic_buffer = "30";
+            else if (strcmp(fp.release, "10") == 0) dynamic_buffer = "29";
+            else if (strcmp(fp.release, "12") == 0) dynamic_buffer = "31";
+            else dynamic_buffer = "30";
+        }
+        else if (k == "ro.vendor.build.version.security_patch") dynamic_buffer = fp.securityPatch;
+        // Build dates for all partitions
+        else if (k == "ro.vendor.build.date.utc"    ||
+                 k == "ro.odm.build.date.utc"       ||
+                 k == "ro.product.build.date.utc"    ||
+                 k == "ro.system.build.date.utc"     ||
+                 k == "ro.system_ext.build.date.utc" ||
+                 k == "ro.bootimage.build.date.utc") dynamic_buffer = fp.buildDateUtc;
+        // Build IDs for all partitions
+        else if (k == "ro.vendor.build.id"     ||
+                 k == "ro.odm.build.id"        ||
+                 k == "ro.product.build.id"    ||
+                 k == "ro.system.build.id"     ||
+                 k == "ro.system_ext.build.id") dynamic_buffer = fp.buildId;
+        // Build types for all partitions
+        else if (k == "ro.vendor.build.type"     ||
+                 k == "ro.odm.build.type"        ||
+                 k == "ro.product.build.type"    ||
+                 k == "ro.system.build.type"     ||
+                 k == "ro.system_ext.build.type") dynamic_buffer = fp.type;
+        // Build tags for all partitions
+        else if (k == "ro.vendor.build.tags"     ||
+                 k == "ro.odm.build.tags"        ||
+                 k == "ro.product.build.tags"    ||
+                 k == "ro.system.build.tags"     ||
+                 k == "ro.system_ext.build.tags") dynamic_buffer = fp.tags;
+        // Partition build fingerprints (belt-and-suspenders with earlier handler)
+        else if (k == "ro.vendor.build.fingerprint" ||
+                 k == "ro.system.build.fingerprint") dynamic_buffer = fp.fingerprint;
+
+        // ── PR70c: Platform-specific prop suppression ────────────────────
+        // Suppress MIUI props when NOT emulating Xiaomi
+        else if (k.find("ro.miui.") == 0 || k.find("ro.vendor.miui.") == 0) {
+            std::string br = toLowerStr(fp.brand);
+            if (br != "redmi" && br != "xiaomi" && br != "poco") {
+                value[0] = '\0'; return 0;
+            }
+        }
+        // Suppress MediaTek vendor props when NOT emulating MediaTek
+        else if (k.find("ro.vendor.mediatek.") == 0 ||
+                 k.find("ro.mediatek.") == 0) {
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                value[0] = '\0'; return 0;
             }
         }
 
