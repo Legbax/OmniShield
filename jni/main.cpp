@@ -2422,7 +2422,29 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
                 // No output for non-existent properties (matches real getprop)
                 _exit(0);
             }
-            // getprop with no args — suppress full property dump to prevent leaks
+            // getprop with no args — emulate full property dump with spoofed values
+            __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
+                struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
+                __system_property_read_callback(pi,
+                    [](void* c, const char* n, const char*, unsigned) {
+                        auto* p = static_cast<decltype(&ctx)>(c);
+                        if (n) strncpy(p->name, n, PROP_NAME_MAX);
+                    }, &ctx);
+
+                if (ctx.name[0] == '\0') return;
+
+                // CRITICAL: Completely omit hidden/MTK/Xiaomi properties from the dump.
+                // A real Samsung has ZERO ro.vendor.mediatek.* or ro.miui.* entries.
+                // Printing them as empty [] would flag the device as spoofed.
+                if (shouldHide(ctx.name)) return;
+
+                char val[PROP_VALUE_MAX] = {0};
+                my_system_property_get(ctx.name, val);
+
+                char line[512];
+                int len = snprintf(line, sizeof(line), "[%s]: [%s]\n", ctx.name, val);
+                if (len > 0) write(STDOUT_FILENO, line, len);
+            }, nullptr);
             _exit(0);
         }
     }
@@ -2432,6 +2454,28 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
         return -1;
     }
     return orig_execve(pathname, argv, envp);
+}
+
+// -----------------------------------------------------------------------------
+// PR71b: Hook android.os.SystemProperties.native_get(String, String)
+// On Android 11+, apps can read properties via JNI without going through
+// __system_property_get. Detection apps use reflection to call native_get
+// directly, bypassing our libc hooks. This forces them through our spoofing.
+// -----------------------------------------------------------------------------
+static jstring my_SystemProperties_native_get(JNIEnv* env, jclass /*clazz*/,
+                                               jstring keyJ, jstring defJ) {
+    if (!keyJ) return defJ;
+    const char* key = env->GetStringUTFChars(keyJ, nullptr);
+    if (!key) return defJ;
+
+    char val[PROP_VALUE_MAX] = {0};
+    int ret = my_system_property_get(key, val);
+    env->ReleaseStringUTFChars(keyJ, key);
+
+    if (ret > 0) {
+        return env->NewStringUTF(val);
+    }
+    return defJ;
 }
 
 // -----------------------------------------------------------------------------
@@ -3090,6 +3134,17 @@ public:
         // DIRECTIVA ARQUITECTÓNICA: Para hookear métodos Java puros se requiere
         // DobbySymbolResolver sobre símbolos C++ mangleados en libandroid.so,
         // igual que el patrón exitoso de Sensor::getName()/getVendor().
+
+        // PR71b: Hook android.os.SystemProperties.native_get
+        // Closes the JNI-level property read bypass that skips libc hooks
+        {
+            JNINativeMethod propMethods[] = {
+                {"native_get", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                 (void*)my_SystemProperties_native_get},
+            };
+            g_api->hookJniNativeMethods(env, "android/os/SystemProperties", propMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
 
         LOGD("System Integrity loaded. Profile: %s | LTE: %s | GPS: %.4f,%.4f",
              g_currentProfileName.c_str(),

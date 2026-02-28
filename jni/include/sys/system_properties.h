@@ -16,6 +16,9 @@ const prop_info *__system_property_find(const char *name);
 void __system_property_read_callback(const prop_info *pi,
     void (*callback)(void *cookie, const char *name, const char *value, unsigned serial),
     void *cookie);
+int __system_property_foreach(
+    void (*callback)(const prop_info *pi, void *cookie),
+    void *cookie);
 
 #ifdef __cplusplus
 }
