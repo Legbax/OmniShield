@@ -165,6 +165,17 @@ static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, si
 // PR71: execve hook — intercept getprop exec to prevent property leak via child process
 static int (*orig_execve)(const char *pathname, char *const argv[], char *const envp[]);
 
+// PR71b: posix_spawn / posix_spawnp hooks — Android 10+ uses posix_spawn instead of execve
+// for Runtime.exec() and ProcessBuilder, bypassing our execve hook entirely.
+static int (*orig_posix_spawn)(pid_t *pid, const char *path,
+                               const void *file_actions,
+                               const void *attrp,
+                               char *const argv[], char *const envp[]);
+static int (*orig_posix_spawnp)(pid_t *pid, const char *file,
+                                const void *file_actions,
+                                const void *attrp,
+                                char *const argv[], char *const envp[]);
+
 // PR44: Camera2 — CameraMetadataNative.nativeReadValues(int tag) : byte[]
 // Firma AOSP Android 11: instance method, (I)[B — SIN parámetro ptr explícito
 static jbyteArray (*orig_nativeReadValues)(JNIEnv*, jobject, jint);
@@ -2457,6 +2468,100 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
 }
 
 // -----------------------------------------------------------------------------
+// PR71c: posix_spawn / posix_spawnp hooks
+// -----------------------------------------------------------------------------
+// On Android 10+ (API 28+), Runtime.exec() and ProcessBuilder use posix_spawn
+// instead of execve. The child process created via posix_spawn is born without
+// our Zygisk hooks and reads the real hardware properties. We apply the EXACT
+// same getprop interception logic as my_execve: if the command is getprop,
+// we fork ourselves, emulate the output with spoofed values, and _exit(0)
+// before the real binary ever runs.
+// -----------------------------------------------------------------------------
+
+// Helper: handles getprop interception for both posix_spawn and posix_spawnp.
+// If argv[0] is getprop, forks a child that writes spoofed output and returns true.
+// The caller should set *pid to the child PID and return 0.
+// If not getprop, returns false and the caller should fall through to the original.
+static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
+                               pid_t *pid) {
+    if (!resolved_path || !argv) return false;
+
+    // Extract basename
+    const char* base = strrchr(resolved_path, '/');
+    base = base ? base + 1 : resolved_path;
+
+    if (strcmp(base, "getprop") != 0) return false;
+
+    // Fork a child to emulate getprop with spoofed values
+    pid_t child = fork();
+    if (child < 0) return false;   // fork failed, fall through to original
+
+    if (child == 0) {
+        // === Child process ===
+        if (argv[1] && argv[1][0] != '\0') {
+            // Single property: getprop <name> [default]
+            char value[92] = {0};
+            int len = my_system_property_get(argv[1], value);
+            if (len > 0) {
+                write(STDOUT_FILENO, value, len);
+                write(STDOUT_FILENO, "\n", 1);
+            } else if (argv[2]) {
+                size_t dlen = strlen(argv[2]);
+                write(STDOUT_FILENO, argv[2], dlen);
+                write(STDOUT_FILENO, "\n", 1);
+            }
+            _exit(0);
+        }
+        // No args — full property dump with spoofed values
+        __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
+            struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
+            __system_property_read_callback(pi,
+                [](void* c, const char* n, const char*, unsigned) {
+                    auto* p = static_cast<decltype(&ctx)>(c);
+                    if (n) strncpy(p->name, n, PROP_NAME_MAX);
+                }, &ctx);
+
+            if (ctx.name[0] == '\0') return;
+            if (shouldHide(ctx.name)) return;
+
+            char val[PROP_VALUE_MAX] = {0};
+            my_system_property_get(ctx.name, val);
+
+            char line[512];
+            int len = snprintf(line, sizeof(line), "[%s]: [%s]\n", ctx.name, val);
+            if (len > 0) write(STDOUT_FILENO, line, len);
+        }, nullptr);
+        _exit(0);
+    }
+
+    // === Parent process ===
+    if (pid) *pid = child;
+    return true;
+}
+
+static int my_posix_spawn(pid_t *pid, const char *path,
+                          const void *file_actions,
+                          const void *attrp,
+                          char *const argv[], char *const envp[]) {
+    if (handleGetpropSpawn(path, argv, pid)) return 0;
+
+    if (!orig_posix_spawn) { errno = ENOSYS; return ENOSYS; }
+    return orig_posix_spawn(pid, path, file_actions, attrp, argv, envp);
+}
+
+static int my_posix_spawnp(pid_t *pid, const char *file,
+                           const void *file_actions,
+                           const void *attrp,
+                           char *const argv[], char *const envp[]) {
+    // posix_spawnp receives a filename (may be relative, searched in PATH)
+    // For getprop, the basename check in handleGetpropSpawn covers this
+    if (file && handleGetpropSpawn(file, argv, pid)) return 0;
+
+    if (!orig_posix_spawnp) { errno = ENOSYS; return ENOSYS; }
+    return orig_posix_spawnp(pid, file, file_actions, attrp, argv, envp);
+}
+
+// -----------------------------------------------------------------------------
 // PR71b: Hook android.os.SystemProperties.native_get(String, String)
 // On Android 11+, apps can read properties via JNI without going through
 // __system_property_get. Detection apps use reflection to call native_get
@@ -2841,6 +2946,13 @@ public:
         // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
         void* execve_func = DobbySymbolResolver("libc.so", "execve");
         if (execve_func) DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
+
+        // PR71c: posix_spawn/posix_spawnp hooks — Android 10+ uses these instead of execve
+        // for Runtime.exec() and ProcessBuilder, completely bypassing our execve hook.
+        void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
+        if (spawn_func) DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
+        void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
+        if (spawnp_func) DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");
