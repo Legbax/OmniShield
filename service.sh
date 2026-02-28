@@ -83,9 +83,11 @@ fi
 [ ! -f "${SSAID_FILE}.omni_bak" ] && cp "$SSAID_FILE" "${SSAID_FILE}.omni_bak"
 
 MODIFIED=0
-i=0
 for PKG in "$@"; do
-    NEW_SSAID=$(derive_ssaid "$MASTER_SEED" "$i")
+    # Derive SSAID from package name hash (deterministic, order-independent)
+    PKG_HASH=$(printf '%s' "$PKG" | cksum | cut -d' ' -f1)
+    PKG_SEED=$(( (MASTER_SEED ^ PKG_HASH) & 0xFFFFFFFFFFFFFFFF ))
+    NEW_SSAID=$(derive_ssaid "$PKG_SEED" "0")
 
     if grep -q "package=\"$PKG\"" "$SSAID_FILE" 2>/dev/null; then
         if command -v python3 >/dev/null 2>&1; then
@@ -114,7 +116,6 @@ open('$SSAID_FILE', 'w').write(new_content)
             MODIFIED=1
         fi
     fi
-    i=$((i + 1))
 done
 
 # Notificar al sistema que invalide el caché de Settings si se modificó algo

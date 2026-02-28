@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.48
-versionCode=12948
+version=v12.9.49
+versionCode=12949
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR69 — UI redesign: Void theme (magenta→cyan gradient), inline SVG shield logo replacing emoji in header & loader
+description=Total Invisibility (The Void). Zygisk module. PR70 — Fix process scope from config, writeConfig save, SSAID deterministic by package name
