@@ -234,26 +234,78 @@ inline std::string toLowerStr(const char* s) {
 
 // Config
 void readConfig() {
-    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
-    if (!file.is_open()) return;
+    std::string content;
+
+    // Intento 1: API Oficial de Zygisk (Zygisk clona los archivos a un tmpfs seguro para SELinux)
+    if (g_api) {
+        int dirfd = g_api->getModuleDir();
+        if (dirfd >= 0) {
+            int fd = openat(dirfd, "identity.cfg", O_RDONLY);
+            if (fd >= 0) {
+                char buf[4096];
+                ssize_t bytes = read(fd, buf, sizeof(buf) - 1);
+                close(fd);
+                if (bytes > 0) {
+                    buf[bytes] = '\0';
+                    content = buf;
+                }
+            }
+        }
+    }
+
+    // Intento 2: Ruta pública /data/local/tmp
+    if (content.empty()) {
+        std::ifstream file("/data/local/tmp/.identity.cfg");
+        if (file.is_open()) {
+            std::string line;
+            while (std::getline(file, line)) content += line + "\n";
+            file.close();
+        }
+    }
+
+    // Intento 3: Ruta original directa (Solo funciona si SELinux está en Permissive)
+    if (content.empty()) {
+        std::ifstream file("/data/adb/.omni_data/.identity.cfg");
+        if (file.is_open()) {
+            std::string line;
+            while (std::getline(file, line)) content += line + "\n";
+            file.close();
+        } else {
+            return; // Fallo total de lectura
+        }
+    }
+
+    std::istringstream iss(content);
     std::string line;
-    while (std::getline(file, line)) {
+    while (std::getline(iss, line)) {
         size_t eq = line.find('=');
         if (eq != std::string::npos) {
             std::string key = line.substr(0, eq);
             std::string val = line.substr(eq + 1);
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            val.erase(0, val.find_first_not_of(" \t"));
-            val.erase(val.find_last_not_of(" \t") + 1);
+
+            // LIMPIEZA ESTRICTA: Quitar espacios, \r y \n
+            size_t k_first = key.find_first_not_of(" \t\r\n");
+            if (k_first == std::string::npos) continue;
+            key.erase(0, k_first);
+            key.erase(key.find_last_not_of(" \t\r\n") + 1);
+
+            size_t v_first = val.find_first_not_of(" \t\r\n");
+            if (v_first != std::string::npos) {
+                val.erase(0, v_first);
+                val.erase(val.find_last_not_of(" \t\r\n") + 1);
+            } else {
+                val.clear();
+            }
             g_config[key] = val;
         }
     }
+
     if (g_config.count("profile"))       g_currentProfileName = g_config["profile"];
     if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
     if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
     if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
-    if (g_config.count("debug_mode")) g_debugMode = (g_config["debug_mode"] == "true");
+    if (g_config.count("debug_mode"))    g_debugMode = (g_config["debug_mode"] == "true");
+
     // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
     // Permite que el módulo invalide caches en el próximo arranque de la app
     if (g_config.count("seed_version")) {
@@ -2398,21 +2450,29 @@ public:
     }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         readConfig();
+
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+
         g_isTargetApp = false;
+
         if (env && args->nice_name) {
             const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
             if (p) {
-                std::string proc(p);
-                // Match process against scoped_apps from config (comma-separated)
+                std::string procName(p);
+
+                // Parsear las apps seleccionadas en el config
                 if (g_config.count("scoped_apps")) {
                     std::istringstream ss(g_config["scoped_apps"]);
                     std::string token;
                     while (std::getline(ss, token, ',')) {
-                        token.erase(0, token.find_first_not_of(" \t"));
-                        token.erase(token.find_last_not_of(" \t") + 1);
-                        if (!token.empty() && proc.find(token) != std::string::npos) {
+                        // Limpieza estricta de cada app separada por comas (\r, \n, espacios)
+                        size_t first = token.find_first_not_of(" \t\r\n");
+                        if (first == std::string::npos) continue;
+                        token.erase(0, first);
+                        token.erase(token.find_last_not_of(" \t\r\n") + 1);
+
+                        if (!token.empty() && procName.find(token) != std::string::npos) {
                             g_isTargetApp = true;
                             break;
                         }
@@ -2421,6 +2481,8 @@ public:
                 env->ReleaseStringUTFChars(args->nice_name, p);
             }
         }
+
+        // El desmontaje SOLO es seguro aquí (antes del fork de Zygote)
         if (g_api) {
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);

@@ -1291,3 +1291,4 @@ prompt quirúrgico para Jules." (PR40 — Combined Audit Seal)
 - **Settings tab** — eliminado `onclick` del `<select>`; añadido botón "Load Apps" con ícono de descarga que llama `loadInstalledApps()` explícitamente.
 
 **`module.prop`** — version bump `v12.9.46 → v12.9.47`, versionCode `12946 → 12947`.
+* Entrada PR64: "Fix en la selección de apps (Process Guard). Se implementó `g_api->getModuleDir()` en `readConfig()` para saltar el bloqueo de lectura de SELinux en Zygote. Se añadió limpieza estricta (`\r\n`) a los tokens del CSV de `scoped_apps`. Se mantuvo el uso de `JNIEnv` para `nice_name` acorde a API v4."
