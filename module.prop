@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.53
-versionCode=12953
+version=v12.9.54
+versionCode=12954
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR71c — Hook posix_spawn to seal native property leak
+description=Total Invisibility (The Void). Zygisk module. PR71d — Sync http.agent + scope WebView for User-Agent

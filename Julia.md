@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v12.9.53 (The Void)
+# Julia.md - Vortex Omni-Shield v12.9.54 (The Void)
 
 **Fecha:** 28 de febrero de 2026 (Estado Actual)
-**Agente:** Claude (PR71c)
-**Versión:** v12.9.53
+**Agente:** Claude (PR71d)
+**Versión:** v12.9.54
 
 ## 🌀 Filosofía: Virtualización Total (The Void)
 El Proyecto Omni-Shield ha alcanzado su estado final: "The Void".
@@ -62,6 +62,15 @@ jitter=true
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
 
 ### Registro de Actualizaciones
+
+**Fecha y agente:** 28 de febrero de 2026, Claude (PR71d — Sync http.agent + scope WebView para User-Agent)
+**Resumen de cambios:** v12.9.54 — Cierre del leak de User-Agent en `http.agent` y guía para WebView UA via scope.
+- **Fix 14 — http.agent Java System Property sync (main.cpp):** La propiedad `http.agent` de `java.lang.System` es cacheada por la ART VM al boot con el `Build.MODEL` REAL, ANTES de que `postAppSpecialize` ejecute. Resultado: apps que leen `System.getProperty("http.agent")` (como VD-Infos) ven el modelo real del dispositivo en el User-Agent Dalvik. **Fix:** Después del sync de `Build.*` fields, llamar `System.setProperty("http.agent", dalvikUA)` via JNI con formato `Dalvik/2.1.0 (Linux; U; Android <release>; <model> Build/<buildId>)` usando los valores del perfil activo. Esto sobreescribe el valor cacheado con el modelo spoofed.
+- **Scope — WebView User-Agent:** El User-Agent de WebView (`getUserAgentString`/`getDefaultUserAgent`) se construye desde `Build.MODEL` + propiedades nativas dentro del proceso de la app. Para que los hooks de OmniShield apliquen al proceso WebView, el usuario debe agregar `com.android.webview` (o `com.google.android.webview` según el ROM) al scope desde el app picker en Settings. No requiere cambio de código — acción manual del usuario desde la WebUI.
+**Prompt del usuario:** VD-Infos reportó que al usar Destroy Identity para cambiar perfil, `http.agent` y WebView UA mostraban el modelo real del dispositivo en vez del perfil activo.
+**Nota personal para el siguiente agente:** `http.agent` ahora se sincroniza automáticamente con cada perfil. WebView UA requiere que el usuario agregue el proceso WebView al scope manualmente. Leaks conocidos que NO se pueden arreglar: ENV variables (`BOOTCLASSPATH`/`DEX2OATBOOTCLASSPATH`) contienen jars de mediatek/miui — seteadas por Zygote pre-fork, no modificables post-init. Si aparecen nuevos leaks de User-Agent, verificar que `com.android.webview` está en el scope del usuario.
+
+---
 
 **Fecha y agente:** 28 de febrero de 2026, Claude (PR71c — Hook posix_spawn/posix_spawnp para sellar leak nativo de properties)
 **Resumen de cambios:** v12.9.53 — Cierre del bypass de posix_spawn que permitía a apps de detección leer propiedades nativas reales.

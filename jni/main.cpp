@@ -3090,6 +3090,23 @@ public:
                         jfieldID fid_sdk = env->GetStaticFieldID(build_version_class, "SDK_INT", "I");
                         if (fid_sdk) env->SetStaticIntField(build_version_class, fid_sdk, 30);
                     }
+
+                    // PR71d: Sync http.agent — ART VM lo cachea al boot con Build.MODEL REAL
+                    // antes de postAppSpecialize. Lo sobreescribimos con el modelo del perfil.
+                    jclass sys_class = env->FindClass("java/lang/System");
+                    if (sys_class) {
+                        jmethodID setProp = env->GetStaticMethodID(sys_class, "setProperty",
+                            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+                        if (setProp) {
+                            char dalvik_ua[256];
+                            snprintf(dalvik_ua, sizeof(dalvik_ua),
+                                     "Dalvik/2.1.0 (Linux; U; Android %s; %s Build/%s)",
+                                     bfp.release, bfp.model, bfp.buildId);
+                            env->CallStaticObjectMethod(sys_class, setProp,
+                                env->NewStringUTF("http.agent"),
+                                env->NewStringUTF(dalvik_ua));
+                        }
+                    }
                 }
             }
         }
