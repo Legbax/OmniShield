@@ -233,19 +233,20 @@ inline std::string toLowerStr(const char* s) {
 }
 
 // Config
-void readConfig() {
-    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
-    if (!file.is_open()) return;
+// PR70c: Shared config parser — used by both direct file read and companion IPC
+static void parseConfigString(const std::string& content) {
+    g_config.clear();
+    std::istringstream stream(content);
     std::string line;
-    while (std::getline(file, line)) {
+    while (std::getline(stream, line)) {
         size_t eq = line.find('=');
         if (eq != std::string::npos) {
             std::string key = line.substr(0, eq);
             std::string val = line.substr(eq + 1);
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            val.erase(0, val.find_first_not_of(" \t"));
-            val.erase(val.find_last_not_of(" \t") + 1);
+            key.erase(0, key.find_first_not_of(" \t\r"));
+            key.erase(key.find_last_not_of(" \t\r") + 1);
+            val.erase(0, val.find_first_not_of(" \t\r"));
+            val.erase(val.find_last_not_of(" \t\r") + 1);
             g_config[key] = val;
         }
     }
@@ -253,18 +254,67 @@ void readConfig() {
     if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
     if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
     if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
-    if (g_config.count("debug_mode")) g_debugMode = (g_config["debug_mode"] == "true");
-    // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
-    // Permite que el módulo invalide caches en el próximo arranque de la app
+    if (g_config.count("debug_mode"))    g_debugMode = (g_config["debug_mode"] == "true");
     if (g_config.count("seed_version")) {
         long newSeedVersion = 0;
         try { newSeedVersion = std::stol(g_config["seed_version"]); } catch(...) {}
         if (omni::engine::isSeedVersionChanged(newSeedVersion, g_seedVersion)) {
-            // Seed rotado: invalidar caché de GPS para forzar recálculo con nuevo seed
             g_locationCached = false;
             g_seedVersion    = newSeedVersion;
         }
     }
+}
+
+// Direct file read — fallback when companion is unavailable
+void readConfig() {
+    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
+    if (!file.is_open()) {
+        LOGD("[scope] readConfig: FAILED to open /data/adb/.omni_data/.identity.cfg (SELinux?)");
+        return;
+    }
+    std::string content((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+    LOGD("[scope] readConfig: file opened OK (%zu bytes)", content.size());
+    parseConfigString(content);
+    LOGD("[scope] readConfig: parsed %zu keys, scoped_apps=%s",
+         g_config.size(),
+         g_config.count("scoped_apps") ? g_config["scoped_apps"].c_str() : "(none)");
+}
+
+// PR70c: Companion-based config reader — bypasses SELinux restrictions.
+// The companion runs as root daemon in u:r:su:s0 context and can read any file.
+static bool readConfigViaCompanion(zygisk::Api *api) {
+    if (!api) return false;
+    int fd = api->connectCompanion();
+    if (fd < 0) {
+        LOGD("[scope] companion: connect failed (fd=%d)", fd);
+        return false;
+    }
+    uint32_t len = 0;
+    ssize_t n = read(fd, &len, sizeof(len));
+    if (n != (ssize_t)sizeof(len) || len == 0 || len > 65536) {
+        LOGD("[scope] companion: bad header (n=%zd len=%u)", n, len);
+        close(fd);
+        return false;
+    }
+    std::string buf(len, '\0');
+    ssize_t total = 0;
+    while (total < (ssize_t)len) {
+        ssize_t r = read(fd, &buf[total], len - total);
+        if (r <= 0) break;
+        total += r;
+    }
+    close(fd);
+    if (total != (ssize_t)len) {
+        LOGD("[scope] companion: incomplete read (%zd/%u)", total, len);
+        return false;
+    }
+    LOGD("[scope] companion: read OK (%u bytes)", len);
+    parseConfigString(buf);
+    LOGD("[scope] companion: parsed %zu keys, scoped_apps=%s",
+         g_config.size(),
+         g_config.count("scoped_apps") ? g_config["scoped_apps"].c_str() : "(none)");
+    return true;
 }
 
 bool shouldHide(const char* key) {
@@ -2395,9 +2445,15 @@ public:
         env->GetJavaVM(&g_jvm);
         this->api = api;
         this->env = env;
+        LOGD("[scope] onLoad: api=%p jvm=%p", (void*)api, (void*)g_jvm);
     }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
-        readConfig();
+        // PR70c: Try companion first (root daemon, bypasses SELinux), fall back to direct read
+        if (!readConfigViaCompanion(g_api)) {
+            LOGD("[scope] companion unavailable, trying direct file read");
+            readConfig();
+        }
+
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         g_isTargetApp = false;
@@ -2405,18 +2461,26 @@ public:
             const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
             if (p) {
                 std::string proc(p);
-                // Match process against scoped_apps from config (comma-separated)
+                LOGD("[scope] process='%s' config_keys=%zu", proc.c_str(), g_config.size());
                 if (g_config.count("scoped_apps")) {
-                    std::istringstream ss(g_config["scoped_apps"]);
+                    std::string scopedRaw = g_config["scoped_apps"];
+                    LOGD("[scope] scoped_apps='%s'", scopedRaw.c_str());
+                    std::istringstream ss(scopedRaw);
                     std::string token;
                     while (std::getline(ss, token, ',')) {
                         token.erase(0, token.find_first_not_of(" \t"));
                         token.erase(token.find_last_not_of(" \t") + 1);
                         if (!token.empty() && proc.find(token) != std::string::npos) {
                             g_isTargetApp = true;
+                            LOGD("[scope] MATCH: '%s' contains '%s' → hooking", proc.c_str(), token.c_str());
                             break;
                         }
                     }
+                } else {
+                    LOGD("[scope] NO scoped_apps key in config");
+                }
+                if (!g_isTargetApp) {
+                    LOGD("[scope] '%s' not in scope → DLCLOSE", proc.c_str());
                 }
                 env->ReleaseStringUTFChars(args->nice_name, p);
             }
@@ -2425,7 +2489,6 @@ public:
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
             } else {
-                // PR70: Unload module from non-target apps — removes .so from maps entirely
                 g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             }
         }
@@ -2985,3 +3048,22 @@ private:
 };
 
 REGISTER_ZYGISK_MODULE(OmniModule)
+
+// PR70c: Companion handler — runs in a root daemon process (u:r:su:s0).
+// Reads the config file and sends it back over the Unix domain socket.
+// This bypasses SELinux restrictions that prevent zygote from reading /data/adb/.
+static void companion_handler(int client) {
+    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
+    std::string content;
+    if (file.is_open()) {
+        content.assign(std::istreambuf_iterator<char>(file),
+                       std::istreambuf_iterator<char>());
+    }
+    uint32_t len = (uint32_t)content.size();
+    write(client, &len, sizeof(len));
+    if (len > 0) {
+        write(client, content.c_str(), len);
+    }
+}
+
+REGISTER_ZYGISK_COMPANION(companion_handler)

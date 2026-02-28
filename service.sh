@@ -2,6 +2,9 @@
 # Omni-Shield Service
 # Ensures prop file permissions
 chmod 644 /data/adb/.omni_data/.identity.cfg 2>/dev/null
+# PR70c: Set SELinux context so zygote can read the config (fallback path)
+chcon u:object_r:system_data_file:s0 /data/adb/.omni_data 2>/dev/null
+chcon u:object_r:system_data_file:s0 /data/adb/.omni_data/.identity.cfg 2>/dev/null
 
 # ============================================================
 # PR37: SSAID Injection — OmniShield

@@ -88,6 +88,10 @@ async function writeConfig(cfg) {
   );
   await ksu_exec(`printf '%s\\n' ${args.join(' ')} > "${CFG_PATH}"`);
   await ksu_exec(`chmod 644 "${CFG_PATH}"`);
+  // PR70c: Set SELinux context so zygote can read the config (companion is primary,
+  // but this ensures the direct-read fallback also works)
+  await ksu_exec(`chcon u:object_r:system_data_file:s0 /data/adb/.omni_data 2>/dev/null`);
+  await ksu_exec(`chcon u:object_r:system_data_file:s0 "${CFG_PATH}" 2>/dev/null`);
   // Never trust errno alone — always verify the write succeeded
   const check = await ksu_exec(`cat "${CFG_PATH}"`);
   return check.stdout.includes('master_seed=');
