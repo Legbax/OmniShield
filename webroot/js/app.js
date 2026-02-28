@@ -56,11 +56,11 @@ async function ksu_exec(cmd) {
         _ksuExecFn = mod.exec || mod.default?.exec || mod.default;
       }
     }
-    if (typeof _ksuExecFn !== 'function') return { errno: 1, stdout: '' };
+    if (typeof _ksuExecFn !== 'function') return { errno: 1, stdout: '', stderr: '' };
     const r = await _ksuExecFn(cmd);
-    return { errno: Number(r?.errno) || 0, stdout: (r?.stdout || '').trim() };
+    return { errno: Number(r?.errno) || 0, stdout: (r?.stdout || '').trim(), stderr: (r?.stderr || '').trim() };
   } catch(e) {
-    return { errno: 1, stdout: '' };
+    return { errno: 1, stdout: '', stderr: '' };
   }
 }
 
@@ -258,7 +258,7 @@ async function saveConfig() {
   cfg.proxy_port    = state.proxyPort;
   cfg.proxy_user    = state.proxyUser;
   cfg.proxy_pass    = state.proxyPass;
-  if (state.proxyDns) cfg.proxy_dns = state.proxyDns;
+  cfg.proxy_dns     = state.proxyDns;
   cfg.webview_spoof = String(state.webviewSpoof);
   if (state.scopedApps.length) cfg.scoped_apps = state.scopedApps.join(',');
   // Persist per-field overrides so values survive app restarts
@@ -779,20 +779,28 @@ window.applyProxy = async function() {
   if (state.proxyEnabled) {
     if (btn) btn.disabled = true;
     toast('Starting proxy tunnel...', 'info');
-    const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh start');
-    if (btn) btn.disabled = false;
-    if (r.errno !== 0) {
-      toast('Proxy failed: ' + (r.stderr || r.stdout || 'unknown error'), 'err');
-      if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }
-      return;
+    try {
+      const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh start');
+      if (r.errno !== 0) {
+        toast('Proxy failed: ' + (r.stderr || r.stdout || 'unknown error'), 'err');
+        if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }
+        // Revert config so toggle reflects reality on next load
+        state.proxyEnabled = false;
+        const toggle = document.getElementById('proxy-enabled');
+        if (toggle) toggle.checked = false;
+        await saveConfig();
+        return;
+      }
+      // Force-stop scoped apps so they restart inside the tunnel
+      const apps = state.scopedApps || [];
+      for (const pkg of apps) {
+        await ksu_exec(`am force-stop ${pkg}`);
+      }
+      if (badge) { badge.textContent = 'ACTIVE'; badge.className = 'proxy-badge proxy-badge-on'; }
+      toast(`Proxy active — ${apps.length} app(s) will reload through tunnel`);
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    // Force-stop scoped apps so they restart inside the tunnel
-    const apps = state.scopedApps || [];
-    for (const pkg of apps) {
-      await ksu_exec(`am force-stop ${pkg}`);
-    }
-    if (badge) { badge.textContent = 'ACTIVE'; badge.className = 'proxy-badge proxy-badge-on'; }
-    toast(`Proxy active — ${apps.length} app(s) will reload through tunnel`);
   } else {
     await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh stop');
     if (badge) { badge.textContent = 'OFF'; badge.className = 'proxy-badge proxy-badge-off'; }
