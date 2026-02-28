@@ -23,23 +23,43 @@ const JA3_PRESETS = [
 ];
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
-// Uses dynamic import so the module loads even outside KernelSU WebView.
-// 3 s timeout guards against KernelSU Next on Android 11 taking too long
-// to resolve the native import (seen in some ROM builds).
+// The KernelSU/APatch manager injects a global `ksu` object into the
+// WebView via @JavascriptInterface.  The `kernelsu` npm package is just
+// a thin Promise wrapper around `ksu.exec()`.  We call the global
+// directly to avoid dynamic-import timing issues that caused persistent
+// "Save failed" errors on certain ROMs and KernelSU Next builds.
+// Falls back to `import('kernelsu')` if the global is missing.
 let _ksuExecFn = null;
 async function ksu_exec(cmd) {
   try {
     if (!_ksuExecFn) {
-      const mod = await Promise.race([
-        import('kernelsu'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('ksu timeout')), 3000))
-      ]);
-      _ksuExecFn = mod.exec;
+      // Prefer the native bridge global — instant, no import needed
+      if (typeof ksu !== 'undefined' && typeof ksu.exec === 'function') {
+        _ksuExecFn = (command) => new Promise((resolve, reject) => {
+          const cb = '_omni_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+          const timer = setTimeout(() => {
+            delete window[cb]; resolve({ errno: 1, stdout: '', stderr: 'timeout' });
+          }, 30000);
+          window[cb] = (errno, stdout, stderr) => {
+            clearTimeout(timer); delete window[cb];
+            resolve({ errno, stdout, stderr: stderr || '' });
+          };
+          try { ksu.exec(command, '{}', cb); }
+          catch(e) { clearTimeout(timer); delete window[cb]; reject(e); }
+        });
+      } else {
+        // Fallback: dynamic import (dev environment or future managers)
+        const mod = await Promise.race([
+          import('kernelsu'),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('ksu import timeout')), 15000))
+        ]);
+        _ksuExecFn = mod.exec || mod.default?.exec || mod.default;
+      }
     }
+    if (typeof _ksuExecFn !== 'function') return { errno: 1, stdout: '' };
     const r = await _ksuExecFn(cmd);
-    return { errno: +r.errno || 0, stdout: (r.stdout || '').trim() };
+    return { errno: Number(r?.errno) || 0, stdout: (r?.stdout || '').trim() };
   } catch(e) {
-    // Not in KernelSU environment or timed out — graceful degradation
     return { errno: 1, stdout: '' };
   }
 }
@@ -62,15 +82,14 @@ async function readConfig() {
 }
 
 async function writeConfig(cfg) {
-  await ksu_exec(`mkdir -p /data/adb/.omni_data`);
+  await ksu_exec('mkdir -p /data/adb/.omni_data');
   const args = Object.entries(cfg).map(([k, v]) =>
     `'${`${k}=${v}`.replace(/'/g, "'\\''")}'`
   );
-  const r = await ksu_exec(`printf '%s\\n' ${args.join(' ')} > ${CFG_PATH}`);
-  await ksu_exec(`chmod 644 ${CFG_PATH}`);
-  if (r.errno === 0) return true;
-  // Fallback: errno may be unreliable — verify write by reading back
-  const check = await ksu_exec(`cat ${CFG_PATH}`);
+  await ksu_exec(`printf '%s\\n' ${args.join(' ')} > "${CFG_PATH}"`);
+  await ksu_exec(`chmod 644 "${CFG_PATH}"`);
+  // Never trust errno alone — always verify the write succeeded
+  const check = await ksu_exec(`cat "${CFG_PATH}"`);
   return check.stdout.includes('master_seed=');
 }
 
