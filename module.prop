@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.54
-versionCode=12954
+version=v12.9.55
+versionCode=12955
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR71d — Sync http.agent + scope WebView for User-Agent
+description=Total Invisibility (The Void). Zygisk module. PR71e — Fix cascading spoofing failure when orig_system_property_get is null

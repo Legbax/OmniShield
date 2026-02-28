@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v12.9.54 (The Void)
+# Julia.md - Vortex Omni-Shield v12.9.55 (The Void)
 
 **Fecha:** 28 de febrero de 2026 (Estado Actual)
-**Agente:** Claude (PR71d)
-**Versión:** v12.9.54
+**Agente:** Claude (PR71e)
+**Versión:** v12.9.55
 
 ## 🌀 Filosofía: Virtualización Total (The Void)
 El Proyecto Omni-Shield ha alcanzado su estado final: "The Void".
@@ -62,6 +62,14 @@ jitter=true
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
 
 ### Registro de Actualizaciones
+
+**Fecha y agente:** 28 de febrero de 2026, Claude (PR71e — Fix cascading spoofing failure when Dobby fails to hook __system_property_get)
+**Resumen de cambios:** v12.9.55 — Corrección CRÍTICA: todas las propiedades nativas filtraban valores reales del dispositivo.
+- **Fix 15 — my_system_property_get early-return bug (main.cpp) [CRITICAL]:** La línea `if (!orig_system_property_get) return 0;` mataba TODA la cadena de spoofing cuando Dobby fallaba al hookear `__system_property_get` (función inlined, ya hooked por otro módulo, o resolución de símbolo fallida). El efecto cascada: (1) `my_system_property_get` retornaba 0 sin ejecutar NINGUNA lógica de spoofing, (2) `my_system_property_read_callback` llamaba `my_system_property_get` → recibía 0 → pasaba el valor REAL al callback, (3) `my_SystemProperties_native_get` (PR71b) llamaba `my_system_property_get` → recibía 0 → retornaba el default vacío. VD-Infos confirmó: TODAS las 168+ propiedades nativas mostraban hardware real (Xiaomi M2004J19C, MT6768, MIUI V12.5.6.0, build host xiaomi.com) mientras Java Build.* mostraba el perfil correcto (Samsung Galaxy A52 / SM-A525F). Incluso `shouldHide()` no ejecutaba — propiedades MediaTek y lancelot que deberían suprimirse aparecían visibles. **Fix:** Reemplazar el early-return por un fallthrough seguro: si `orig_system_property_get` existe, llamarlo normalmente; si es null, inicializar `value[0] = '\0'` y continuar a la lógica de spoofing del perfil. La lógica de spoofing NO necesita el valor original — lo reemplaza completamente con datos del perfil activo.
+**Prompt del usuario:** Segundo reporte de VD-Infos tras PR71d: Java Build.* y http.agent correctos (Samsung Galaxy A52) pero TODAS las propiedades nativas (ro.product.model, ro.hardware, ro.build.host, etc.) filtraban hardware real (Xiaomi Redmi 9 / M2004J19C / MT6768 / MIUI).
+**Nota personal para el siguiente agente:** Este bug era la causa raíz de TODOS los leaks nativos desde el inicio del proyecto. La función `my_system_property_get` es el hub central — `my_system_property_read_callback` y `my_SystemProperties_native_get` dependen de ella. Cualquier early-return en `my_system_property_get` MATA las tres capas de hooking simultáneamente. REGLA: `my_system_property_get` NUNCA debe retornar antes de la lógica de spoofing del perfil, sin importar el estado de `orig_system_property_get`. Leaks pendientes que NO se arreglan con este fix: (1) WebView UA — usuario debe agregar `com.google.android.webview` al scope, (2) ENV variables (BOOTCLASSPATH/DEX2OATBOOTCLASSPATH) — inalterables post-fork, (3) GPU (Mali-G52 vs Adreno) — hardware real no spoofeable via properties, (4) /proc/cpuinfo Hardware: MT6769T — requeriría hook de read() para /proc/cpuinfo.
+
+---
 
 **Fecha y agente:** 28 de febrero de 2026, Claude (PR71d — Sync http.agent + scope WebView para User-Agent)
 **Resumen de cambios:** v12.9.54 — Cierre del leak de User-Agent en `http.agent` y guía para WebView UA via scope.

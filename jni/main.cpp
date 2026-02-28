@@ -837,9 +837,20 @@ static std::string generateBootId(long seed) {
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
 int my_system_property_get(const char *key, char *value) {
-    if (!orig_system_property_get) return 0;
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
-    int ret = orig_system_property_get(key, value);
+    // PR71e: Never short-circuit when orig is null — the spoofing logic below
+    // must run regardless, because my_system_property_read_callback and
+    // my_SystemProperties_native_get both depend on this function for ALL
+    // property spoofing.  When Dobby fails to hook __system_property_get
+    // (inlined, already hooked, etc.), orig stays null and the old early-return
+    // killed the ENTIRE spoofing chain: read_callback got 0 → passed real value,
+    // native_get got 0 → returned default.
+    int ret = 0;
+    if (orig_system_property_get) {
+        ret = orig_system_property_get(key, value);
+    } else if (value) {
+        value[0] = '\0';
+    }
 
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
