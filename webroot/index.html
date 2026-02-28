@@ -682,6 +682,19 @@
               Module Scope
             </div>
             <div class="text-sm" style="margin-bottom:10px">Apps in scope will receive spoofed identity values. Use Force Stop to restart with new identity.</div>
+
+            <!-- PR71g: WebView spoof toggle — separate from scope to avoid Destroy Identity crash -->
+            <div class="toggle-row" style="margin-bottom:10px;padding:10px 12px;background:var(--surface2);border-radius:10px;border:1px solid var(--border)">
+              <div>
+                <div class="toggle-label">WebView Spoofing</div>
+                <div class="toggle-desc">Hook WebView process for User-Agent & identity spoofing. Disable before Destroy Identity to avoid crash.</div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="toggle-webview-spoof">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
             <div class="input-row" style="margin-bottom:6px">
               <button class="btn btn-secondary" onclick="toggleAppPicker()" id="app-picker-trigger" style="flex:1;justify-content:center">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>

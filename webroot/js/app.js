@@ -114,6 +114,7 @@ const state = {
   proxyPort: '',
   proxyUser: '',
   proxyPass: '',
+  webviewSpoof: false,
   scopedApps: [],
   recentProfiles: [],
   // computed — primary identifiers
@@ -148,6 +149,7 @@ async function loadState() {
   state.proxyPort    = state.cfg.proxy_port    || '';
   state.proxyUser    = state.cfg.proxy_user    || '';
   state.proxyPass    = state.cfg.proxy_pass    || '';
+  state.webviewSpoof = state.cfg.webview_spoof === 'true';
   state.scopedApps   = state.cfg.scoped_apps ? state.cfg.scoped_apps.split(',').filter(Boolean) : [];
   state.recentProfiles = loadRecentProfiles();
 
@@ -255,6 +257,7 @@ async function saveConfig() {
   cfg.proxy_port    = state.proxyPort;
   cfg.proxy_user    = state.proxyUser;
   cfg.proxy_pass    = state.proxyPass;
+  cfg.webview_spoof = String(state.webviewSpoof);
   if (state.scopedApps.length) cfg.scoped_apps = state.scopedApps.join(',');
   // Persist per-field overrides so values survive app restarts
   if (overrides.imei)          cfg.override_imei           = overrides.imei;
@@ -568,6 +571,9 @@ function renderProxyTab() {
 }
 
 function renderSettingsTab() {
+  // PR71g: Sync WebView spoof toggle
+  const wvToggle = document.getElementById('toggle-webview-spoof');
+  if (wvToggle) wvToggle.checked = state.webviewSpoof;
   renderScopedApps();
 }
 
@@ -1118,6 +1124,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // LTE toggle
   document.getElementById('toggle-lte')?.addEventListener('change', e => toggleNetworkType(e.target.checked));
+
+  // PR71g: WebView spoof toggle — persists immediately on change
+  document.getElementById('toggle-webview-spoof')?.addEventListener('change', async e => {
+    state.webviewSpoof = e.target.checked;
+    if (await saveConfig()) toast(state.webviewSpoof ? 'WebView spoofing enabled — force stop apps to apply' : 'WebView spoofing disabled');
+    else toast('Failed to save setting', 'err');
+  });
 
   navigate('status');
 });
