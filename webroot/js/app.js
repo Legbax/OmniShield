@@ -23,23 +23,43 @@ const JA3_PRESETS = [
 ];
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
-// Uses dynamic import so the module loads even outside KernelSU WebView.
-// 3 s timeout guards against KernelSU Next on Android 11 taking too long
-// to resolve the native import (seen in some ROM builds).
+// The KernelSU/APatch manager injects a global `ksu` object into the
+// WebView via @JavascriptInterface.  The `kernelsu` npm package is just
+// a thin Promise wrapper around `ksu.exec()`.  We call the global
+// directly to avoid dynamic-import timing issues that caused persistent
+// "Save failed" errors on certain ROMs and KernelSU Next builds.
+// Falls back to `import('kernelsu')` if the global is missing.
 let _ksuExecFn = null;
 async function ksu_exec(cmd) {
   try {
     if (!_ksuExecFn) {
-      const mod = await Promise.race([
-        import('kernelsu'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('ksu timeout')), 3000))
-      ]);
-      _ksuExecFn = mod.exec;
+      // Prefer the native bridge global — instant, no import needed
+      if (typeof ksu !== 'undefined' && typeof ksu.exec === 'function') {
+        _ksuExecFn = (command) => new Promise((resolve, reject) => {
+          const cb = '_omni_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+          const timer = setTimeout(() => {
+            delete window[cb]; resolve({ errno: 1, stdout: '', stderr: 'timeout' });
+          }, 30000);
+          window[cb] = (errno, stdout, stderr) => {
+            clearTimeout(timer); delete window[cb];
+            resolve({ errno, stdout, stderr: stderr || '' });
+          };
+          try { ksu.exec(command, '{}', cb); }
+          catch(e) { clearTimeout(timer); delete window[cb]; reject(e); }
+        });
+      } else {
+        // Fallback: dynamic import (dev environment or future managers)
+        const mod = await Promise.race([
+          import('kernelsu'),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('ksu import timeout')), 15000))
+        ]);
+        _ksuExecFn = mod.exec || mod.default?.exec || mod.default;
+      }
     }
+    if (typeof _ksuExecFn !== 'function') return { errno: 1, stdout: '' };
     const r = await _ksuExecFn(cmd);
-    return { errno: r.errno || 0, stdout: (r.stdout || '').trim() };
+    return { errno: Number(r?.errno) || 0, stdout: (r?.stdout || '').trim() };
   } catch(e) {
-    // Not in KernelSU environment or timed out — graceful degradation
     return { errno: 1, stdout: '' };
   }
 }
@@ -62,11 +82,15 @@ async function readConfig() {
 }
 
 async function writeConfig(cfg) {
-  await ksu_exec(`mkdir -p /data/adb/.omni_data`);
-  const lines = Object.entries(cfg).map(([k,v]) => `${k}=${v}`).join('\n');
-  const b64 = btoa(unescape(encodeURIComponent(lines)));
-  const r = await ksu_exec(`echo '${b64}' | base64 -d > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
-  return r.errno === 0;
+  await ksu_exec('mkdir -p /data/adb/.omni_data');
+  const args = Object.entries(cfg).map(([k, v]) =>
+    `'${`${k}=${v}`.replace(/'/g, "'\\''")}'`
+  );
+  await ksu_exec(`printf '%s\\n' ${args.join(' ')} > "${CFG_PATH}"`);
+  await ksu_exec(`chmod 644 "${CFG_PATH}"`);
+  // Never trust errno alone — always verify the write succeeded
+  const check = await ksu_exec(`cat "${CFG_PATH}"`);
+  return check.stdout.includes('master_seed=');
 }
 
 // ─── App state ──────────────────────────────────────────────────────
@@ -550,8 +574,12 @@ function renderScopedApps() {
     list.innerHTML = '<div class="text-sm" style="padding:12px 0;text-align:center">No apps in scope. Add apps above.</div>';
     return;
   }
-  list.innerHTML = state.scopedApps.map(pkg => `
-    <div class="scope-app-item">
+  const appSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><rect x="3" y="3" width="18" height="18" rx="3"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/></svg>';
+  list.innerHTML = state.scopedApps.map(pkg => {
+    const isSystem = _systemApps.has(pkg);
+    const cls = isSystem ? 'system' : 'user';
+    return `<div class="scope-app-item">
+      <div class="scope-app-icon ${cls}">${appSvg}</div>
       <div class="scope-app-name">${escHtml(pkg)}</div>
       <div class="scope-app-actions">
         <button class="btn btn-warning btn-icon" onclick="forcestopApp('${escAttr(pkg)}')" title="Force Stop">
@@ -564,7 +592,9 @@ function renderScopedApps() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+  refreshPickerAdded();
 }
 
 // ─── Field render helper ──────────────────────────────────────────────
@@ -720,26 +750,35 @@ window.applyProxy = async function() {
 };
 
 // ─── App scope management ──────────────────────────────────────────────
+let _userApps = [];
+let _systemApps = new Set();
+let _appsLoaded = false;
+
 window.addScopedApp = async function() {
   const input = document.getElementById('app-search-input');
-  const val = input?.value?.trim() || '';
-  const dropdown = document.getElementById('app-dropdown');
-  const selected = dropdown?.value?.trim() || '';
-  const pkg = selected || val;
+  const pkg = input?.value?.trim() || '';
   if (!pkg) { toast('Enter a package name', 'warn'); return; }
   if (state.scopedApps.includes(pkg)) { toast('App already in scope', 'warn'); return; }
   state.scopedApps.push(pkg);
   if (input) input.value = '';
-  if (dropdown) dropdown.value = '';
   renderScopedApps();
-  await saveConfig();
-  toast(`Added ${pkg} to scope`);
+  if (await saveConfig()) toast(`Added ${pkg} — force stop the app to apply`);
+  else toast('Failed to save scope — check permissions', 'err');
+};
+
+window.addScopedAppFromPicker = async function(pkg) {
+  if (!pkg || state.scopedApps.includes(pkg)) return;
+  state.scopedApps.push(pkg);
+  renderScopedApps();
+  if (await saveConfig()) toast(`Added ${pkg} — force stop the app to apply`);
+  else toast('Failed to save scope — check permissions', 'err');
 };
 
 window.removeScopedApp = async function(pkg) {
   state.scopedApps = state.scopedApps.filter(p => p !== pkg);
   renderScopedApps();
-  await saveConfig();
+  if (await saveConfig()) toast(`Removed ${pkg}`);
+  else toast('Failed to save scope', 'err');
 };
 
 window.forcestopApp = async function(pkg) {
@@ -758,25 +797,85 @@ window.wipeApp = async function(pkg) {
   toast(r.errno === 0 ? `${pkg} wiped` : 'Wipe failed', r.errno === 0 ? 'ok' : 'err');
 };
 
-window.loadInstalledApps = async function() {
-  const dd = document.getElementById('app-dropdown');
-  if (!dd) return;
-  dd.innerHTML = '<option value="">Loading apps…</option>';
-  // Use bare `pm list packages` — no shell pipes (sed/grep/sort not guaranteed
-  // in Android's minimal /system/bin/sh). Parse and sort entirely in JS.
-  const {stdout, errno} = await ksu_exec('pm list packages 2>/dev/null');
-  const pkgs = (stdout || '')
-    .split('\n')
+function parsePkgList(stdout) {
+  return (stdout || '').split('\n')
     .map(l => l.replace(/^package:/, '').trim())
     .filter(Boolean)
     .sort();
-  if (!pkgs.length) {
-    dd.innerHTML = '<option value="">No apps found — try again or type package manually</option>';
-    return;
+}
+
+async function loadAppLists() {
+  const [userRes, sysRes] = await Promise.all([
+    ksu_exec('pm list packages -3 2>/dev/null'),
+    ksu_exec('pm list packages -s 2>/dev/null')
+  ]);
+  _userApps = parsePkgList(userRes.stdout);
+  const sysList = parsePkgList(sysRes.stdout);
+  _systemApps = new Set(sysList);
+  _appsLoaded = true;
+  return { user: _userApps, system: sysList };
+}
+
+function renderPickerList(user, system, filter) {
+  const q = (filter || '').toLowerCase();
+  const fUser = q ? user.filter(p => p.toLowerCase().includes(q)) : user;
+  const fSys = q ? system.filter(p => p.toLowerCase().includes(q)) : system;
+  if (!fUser.length && !fSys.length) {
+    return '<div class="app-picker-empty">No apps match the filter</div>';
   }
-  dd.innerHTML = '<option value="">Select app to add…</option>' +
-    pkgs.map(p => `<option value="${escAttr(p)}">${escHtml(p)}</option>`).join('');
+  const addIcon = '<svg class="app-picker-add-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  let html = '';
+  if (fUser.length) {
+    html += `<div class="app-picker-group user"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> Installed Apps <span class="count">${fUser.length}</span></div>`;
+    html += fUser.map(p =>
+      `<div class="app-picker-item${state.scopedApps.includes(p) ? ' added' : ''}" data-pkg="${escAttr(p)}" onclick="addScopedAppFromPicker('${escAttr(p)}')"><span class="app-picker-dot user"></span><span class="app-picker-pkg">${escHtml(p)}</span>${addIcon}</div>`
+    ).join('');
+  }
+  if (fSys.length) {
+    html += `<div class="app-picker-group system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> System Apps <span class="count">${fSys.length}</span></div>`;
+    html += fSys.map(p =>
+      `<div class="app-picker-item${state.scopedApps.includes(p) ? ' added' : ''}" data-pkg="${escAttr(p)}" onclick="addScopedAppFromPicker('${escAttr(p)}')"><span class="app-picker-dot system"></span><span class="app-picker-pkg">${escHtml(p)}</span>${addIcon}</div>`
+    ).join('');
+  }
+  return html;
+}
+
+function refreshPickerAdded() {
+  document.querySelectorAll('.app-picker-item').forEach(el => {
+    el.classList.toggle('added', state.scopedApps.includes(el.dataset.pkg));
+  });
+}
+
+window.toggleAppPicker = async function() {
+  const panel = document.getElementById('app-picker-panel');
+  if (!panel) return;
+  if (panel.classList.contains('open')) { closeAppPicker(); return; }
+  panel.classList.add('open');
+  const list = document.getElementById('app-picker-list');
+  const search = document.getElementById('app-picker-search');
+  if (search) search.value = '';
+  if (!_appsLoaded) {
+    list.innerHTML = '<div class="app-picker-loading"><span class="spinner"></span>Loading apps…</div>';
+    const { user, system } = await loadAppLists();
+    list.innerHTML = renderPickerList(user, system, '');
+  } else {
+    list.innerHTML = renderPickerList(_userApps, [..._systemApps].sort(), '');
+  }
+  if (search) search.focus();
 };
+
+window.closeAppPicker = function() {
+  const panel = document.getElementById('app-picker-panel');
+  if (panel) panel.classList.remove('open');
+};
+
+// Live search filter for app picker
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'app-picker-search') return;
+  const list = document.getElementById('app-picker-list');
+  if (!list || !_appsLoaded) return;
+  list.innerHTML = renderPickerList(_userApps, [..._systemApps].sort(), e.target.value);
+});
 
 // ─── Reboot ────────────────────────────────────────────────────────────
 window.rebootDevice = async function() {

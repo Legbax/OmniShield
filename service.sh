@@ -59,12 +59,21 @@ derive_ssaid() {
     fi
 }
 
-# Apps objetivo: Snapchat primero (SSAID crítico para ban tracking)
-TARGET_PACKAGES=(
-    "com.snapchat.android"
-    "com.instagram.android"
-    "com.tinder.app"
-)
+# Read scoped_apps from config (comma-separated)
+SCOPED_APPS=""
+if [ -f "$OMNI_CONFIG" ]; then
+    SCOPED_APPS=$(grep "^scoped_apps=" "$OMNI_CONFIG" | cut -d'=' -f2-)
+fi
+
+# POSIX sh compatible: split by comma into positional params ($1, $2, ...)
+if [ -n "$SCOPED_APPS" ]; then
+    OLDIFS="$IFS"
+    IFS=','
+    set -- $SCOPED_APPS
+    IFS="$OLDIFS"
+else
+    set --
+fi
 
 if [ ! -f "$SSAID_FILE" ]; then
     exit 0
@@ -74,9 +83,11 @@ fi
 [ ! -f "${SSAID_FILE}.omni_bak" ] && cp "$SSAID_FILE" "${SSAID_FILE}.omni_bak"
 
 MODIFIED=0
-for i in "${!TARGET_PACKAGES[@]}"; do
-    PKG="${TARGET_PACKAGES[$i]}"
-    NEW_SSAID=$(derive_ssaid "$MASTER_SEED" "$i")
+for PKG in "$@"; do
+    # Derive SSAID from package name hash (deterministic, order-independent)
+    PKG_HASH=$(printf '%s' "$PKG" | cksum | cut -d' ' -f1)
+    PKG_SEED=$(( (MASTER_SEED ^ PKG_HASH) & 0xFFFFFFFFFFFFFFFF ))
+    NEW_SSAID=$(derive_ssaid "$PKG_SEED" "0")
 
     if grep -q "package=\"$PKG\"" "$SSAID_FILE" 2>/dev/null; then
         if command -v python3 >/dev/null 2>&1; then
