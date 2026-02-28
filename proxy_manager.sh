@@ -16,7 +16,7 @@ TUN2SOCKS="$MODULE_DIR/bin/tun2socks"
 TUN2SOCKS_CFG="$OMNI_DIR/tun2socks.yml"
 PID_FILE="$OMNI_DIR/tun2socks.pid"
 LOG_FILE="$OMNI_DIR/proxy.log"
-LOCK_FILE="$OMNI_DIR/.proxy.lock"
+LOCK_DIR="$OMNI_DIR/.proxy.lock"
 
 # TUN interface config
 TUN_NAME="tun_omni"
@@ -33,13 +33,21 @@ ROUTE_TABLE="100"
 # Default DNS when no DNS server is configured
 DEFAULT_DNS="8.8.8.8"
 
-# ─── Locking ──────────────────────────────────────────────────────────
+# ─── Locking (mkdir is atomic on all filesystems, works on Android) ───
 acquire_lock() {
-    exec 200>"$LOCK_FILE"
-    if ! flock -n 200; then
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        # Check if stale (older than 2 min) via find
+        if [ -d "$LOCK_DIR" ] && find "$LOCK_DIR" -maxdepth 0 -mmin +2 2>/dev/null | grep -q .; then
+            rmdir "$LOCK_DIR" 2>/dev/null
+            mkdir "$LOCK_DIR" 2>/dev/null && return 0
+        fi
         log "ERROR: Another proxy_manager instance is running"
         return 1
     fi
+}
+
+release_lock() {
+    rmdir "$LOCK_DIR" 2>/dev/null
 }
 
 # ─── Logging ───────────────────────────────────────────────────────────
@@ -256,30 +264,31 @@ do_start() {
     log "=== PROXY START ==="
 
     acquire_lock || return 1
-    read_config || return 1
+
+    read_config || { release_lock; return 1; }
 
     # Validate
     if [ "$PROXY_ENABLED" != "true" ]; then
         log "Proxy is disabled in config"
-        return 1
+        release_lock; return 1
     fi
     if [ "$PROXY_TYPE" != "socks5" ]; then
         log "ERROR: Only SOCKS5 proxies are supported (got: $PROXY_TYPE)"
-        return 1
+        release_lock; return 1
     fi
     if [ -z "$PROXY_HOST" ]; then
         log "ERROR: No proxy host configured"
-        return 1
+        release_lock; return 1
     fi
     if [ -z "$PROXY_PORT" ]; then
         log "ERROR: No proxy port configured"
-        return 1
+        release_lock; return 1
     fi
     if [ ! -x "$TUN2SOCKS" ]; then
         log "ERROR: tun2socks binary not found or not executable at $TUN2SOCKS"
         log "Download from: https://github.com/heiher/hev-socks5-tunnel/releases"
         log "Place ARM64 static binary at: $TUN2SOCKS"
-        return 1
+        release_lock; return 1
     fi
 
     # Clean previous state
@@ -317,12 +326,12 @@ do_start() {
         else
             log "ERROR: Daemon started but died immediately — check $LOG_FILE"
             cleanup_tun
-            return 1
+            release_lock; return 1
         fi
     else
         log "ERROR: Daemon failed to create PID file after 5s — check $LOG_FILE"
         cleanup_tun
-        return 1
+        release_lock; return 1
     fi
 
     # Setup routing (TUN was created by hev-socks5-tunnel)
@@ -336,6 +345,7 @@ do_start() {
     log "  Server: $PROXY_HOST:$PROXY_PORT (SOCKS5)"
     log "  DNS:    $PROXY_DNS"
     log "  Apps:   $(echo $UIDS | wc -w) UIDs"
+    release_lock
     return 0
 }
 
@@ -343,6 +353,7 @@ do_stop() {
     log "=== PROXY STOP ==="
     acquire_lock || return 1
     do_stop_quiet
+    release_lock
     log "=== PROXY STOPPED ==="
 }
 
