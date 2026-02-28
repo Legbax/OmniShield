@@ -33,21 +33,31 @@ ROUTE_TABLE="100"
 # Default DNS when no DNS server is configured
 DEFAULT_DNS="8.8.8.8"
 
-# ─── Locking (mkdir is atomic on all filesystems, works on Android) ───
+# ─── Locking (mkdir is atomic, PID check detects stale locks) ─────────
 acquire_lock() {
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        # Check if stale (older than 2 min) via find
-        if [ -d "$LOCK_DIR" ] && find "$LOCK_DIR" -maxdepth 0 -mmin +2 2>/dev/null | grep -q .; then
-            rmdir "$LOCK_DIR" 2>/dev/null
-            mkdir "$LOCK_DIR" 2>/dev/null && return 0
-        fi
-        log "ERROR: Another proxy_manager instance is running"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        return 0
+    fi
+    # Lock exists — check if the owning process is still alive
+    local owner_pid
+    owner_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+    if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+        log "ERROR: Another proxy_manager instance is running (PID $owner_pid)"
         return 1
     fi
+    # Owner is dead — stale lock, reclaim it
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid"
+        return 0
+    fi
+    log "ERROR: Could not acquire lock"
+    return 1
 }
 
 release_lock() {
-    rmdir "$LOCK_DIR" 2>/dev/null
+    rm -rf "$LOCK_DIR" 2>/dev/null
 }
 
 # ─── Logging ───────────────────────────────────────────────────────────
