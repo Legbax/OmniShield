@@ -395,41 +395,6 @@ static inline bool isProcPidPath(const char* path, const char* suffix) {
     return strcmp(p + 1, suffix) == 0;
 }
 
-// PR70: Remap module .so memory from file-backed to anonymous.
-// After hooks are installed, the .so code/data stays at the same virtual
-// addresses but /proc/self/maps shows device 00:00 inode 0 (anonymous)
-// instead of the file path.  This hides the module from maps readers even
-// if they bypass our openat/read hooks (e.g. direct syscall).
-static void remapModuleMemory() {
-    FILE *fp = fopen("/proc/self/maps", "re");
-    if (!fp) return;
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        if (!isHiddenPath(line)) continue;
-        uintptr_t start, end;
-        char perms[5];
-        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3) continue;
-        size_t size = end - start;
-        if (size == 0) continue;
-        int prot = 0;
-        if (perms[0] == 'r') prot |= PROT_READ;
-        if (perms[1] == 'w') prot |= PROT_WRITE;
-        if (perms[2] == 'x') prot |= PROT_EXEC;
-        // Allocate anonymous memory
-        void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (copy == MAP_FAILED) continue;
-        // Ensure original is readable so we can copy
-        if (!(prot & PROT_READ)) mprotect((void*)start, size, PROT_READ);
-        memcpy(copy, (void*)start, size);
-        // Atomically replace file-backed mapping with anonymous copy
-        void *result = mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)start);
-        if (result != MAP_FAILED) {
-            mprotect((void*)start, size, prot);
-        }
-    }
-    fclose(fp);
-}
-
 int my_stat(const char* pathname, struct stat* statbuf) {
     if (!orig_stat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
@@ -3033,10 +2998,6 @@ public:
                         codecMethods[0].fnPtr);
             }
         }
-
-        // PR70: Remap module .so from file-backed to anonymous memory.
-        // All hooks are installed above — now make the .so invisible in maps.
-        remapModuleMemory();
 
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
