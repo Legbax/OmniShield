@@ -137,3 +137,22 @@ fi
 # ============================================================
 # FIN PR37/PR40 SSAID Injection
 # ============================================================
+
+# ============================================================
+# PR72: Auto-start Transparent Proxy if enabled
+# ============================================================
+PROXY_SCRIPT="/data/adb/modules/omnishield/proxy_manager.sh"
+if [ -f "$PROXY_SCRIPT" ] && grep -q "^proxy_enabled=true" "$OMNI_CONFIG" 2>/dev/null; then
+    # Wait for network availability (max 30s)
+    _net_ok=0
+    for _i in $(seq 1 30); do
+        ping -c1 -W1 8.8.8.8 >/dev/null 2>&1 && { _net_ok=1; break; }
+        sleep 1
+    done
+    if [ "$_net_ok" -eq 1 ]; then
+        sh "$PROXY_SCRIPT" start &
+    fi
+fi
+# ============================================================
+# FIN PR72
+# ============================================================

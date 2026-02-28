@@ -144,11 +144,12 @@ async function loadState() {
   state.locationLon  = state.cfg.location_lon  ? parseFloat(state.cfg.location_lon)  : null;
   state.locationAlt  = state.cfg.location_alt  ? parseFloat(state.cfg.location_alt)  : null;
   state.proxyEnabled = state.cfg.proxy_enabled === 'true';
-  state.proxyType    = state.cfg.proxy_type    || 'http';
+  state.proxyType    = state.cfg.proxy_type    || 'socks5';
   state.proxyHost    = state.cfg.proxy_host    || '';
   state.proxyPort    = state.cfg.proxy_port    || '';
   state.proxyUser    = state.cfg.proxy_user    || '';
   state.proxyPass    = state.cfg.proxy_pass    || '';
+  state.proxyDns     = state.cfg.proxy_dns     || '';
   state.webviewSpoof = state.cfg.webview_spoof === 'true';
   state.scopedApps   = state.cfg.scoped_apps ? state.cfg.scoped_apps.split(',').filter(Boolean) : [];
   state.recentProfiles = loadRecentProfiles();
@@ -257,6 +258,7 @@ async function saveConfig() {
   cfg.proxy_port    = state.proxyPort;
   cfg.proxy_user    = state.proxyUser;
   cfg.proxy_pass    = state.proxyPass;
+  if (state.proxyDns) cfg.proxy_dns = state.proxyDns;
   cfg.webview_spoof = String(state.webviewSpoof);
   if (state.scopedApps.length) cfg.scoped_apps = state.scopedApps.join(',');
   // Persist per-field overrides so values survive app restarts
@@ -568,6 +570,9 @@ function renderProxyTab() {
   if (user) user.value = state.proxyUser;
   const pass = document.getElementById('proxy-pass');
   if (pass) pass.value = state.proxyPass;
+  const dns = document.getElementById('proxy-dns');
+  if (dns) dns.value = state.proxyDns;
+  checkProxyStatus();
 }
 
 function renderSettingsTab() {
@@ -756,16 +761,60 @@ function initMap() {
 // ─── Event handlers: Advanced/Proxy ───────────────────────────────────
 window.applyProxy = async function() {
   state.proxyEnabled = document.getElementById('proxy-enabled')?.checked || false;
-  state.proxyType = document.getElementById('proxy-type')?.value || 'http';
+  state.proxyType = document.getElementById('proxy-type')?.value || 'socks5';
   state.proxyHost = document.getElementById('proxy-host')?.value || '';
   state.proxyPort = document.getElementById('proxy-port')?.value || '';
   state.proxyUser = document.getElementById('proxy-user')?.value || '';
   state.proxyPass = document.getElementById('proxy-pass')?.value || '';
+  state.proxyDns  = document.getElementById('proxy-dns')?.value || '';
   if (state.proxyEnabled && !state.proxyHost) { toast('Enter a proxy host', 'warn'); return; }
   if (state.proxyEnabled && !state.proxyPort) { toast('Enter a proxy port', 'warn'); return; }
-  if (await saveConfig()) toast('Proxy settings saved');
-  else toast('Save failed', 'err');
+  if (state.proxyEnabled && state.proxyType !== 'socks5') { toast('Only SOCKS5 proxies are supported', 'warn'); return; }
+
+  if (!await saveConfig()) { toast('Save failed', 'err'); return; }
+
+  const btn = document.querySelector('#adv-tab-proxy .btn-primary');
+  const badge = document.getElementById('proxy-status-badge');
+
+  if (state.proxyEnabled) {
+    if (btn) btn.disabled = true;
+    toast('Starting proxy tunnel...', 'info');
+    const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh start');
+    if (btn) btn.disabled = false;
+    if (r.errno !== 0) {
+      toast('Proxy failed: ' + (r.stderr || r.stdout || 'unknown error'), 'err');
+      if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }
+      return;
+    }
+    // Force-stop scoped apps so they restart inside the tunnel
+    const apps = state.scopedApps || [];
+    for (const pkg of apps) {
+      await ksu_exec(`am force-stop ${pkg}`);
+    }
+    if (badge) { badge.textContent = 'ACTIVE'; badge.className = 'proxy-badge proxy-badge-on'; }
+    toast(`Proxy active — ${apps.length} app(s) will reload through tunnel`);
+  } else {
+    await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh stop');
+    if (badge) { badge.textContent = 'OFF'; badge.className = 'proxy-badge proxy-badge-off'; }
+    toast('Proxy stopped');
+  }
 };
+
+// PR72: Check proxy status on page load
+async function checkProxyStatus() {
+  const badge = document.getElementById('proxy-status-badge');
+  if (!badge) return;
+  try {
+    const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh status');
+    if (r.stdout && r.stdout.trim() === 'running') {
+      badge.textContent = 'ACTIVE'; badge.className = 'proxy-badge proxy-badge-on';
+    } else {
+      badge.textContent = 'OFF'; badge.className = 'proxy-badge proxy-badge-off';
+    }
+  } catch(e) {
+    badge.textContent = 'OFF'; badge.className = 'proxy-badge proxy-badge-off';
+  }
+}
 
 // ─── App scope management ──────────────────────────────────────────────
 let _userApps = [];
