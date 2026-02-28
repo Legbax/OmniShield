@@ -917,7 +917,7 @@ window.destroyIdentity = async function() {
       <li>Randomize all IDs &amp; telephony</li>
       <li>Set a random US location</li>
     </ul>
-    <br><b>Profile coherence is preserved.</b> Save config and reboot to fully apply.`,
+    <br><b>Profile coherence is preserved.</b> Apps will reload with the new identity on next launch.`,
     [{label:'Cancel',cls:'btn-secondary',value:false},{label:'Destroy Identity',cls:'destroy-btn btn',value:true}]);
   if (!ok) return;
 
