@@ -86,7 +86,7 @@ async function writeConfig(cfg) {
   const args = Object.entries(cfg).map(([k, v]) =>
     `'${`${k}=${v}`.replace(/'/g, "'\\''")}'`
   );
-  await ksu_exec(`printf '%s\\n' ${args.join(' ')} > "${CFG_PATH}" && cp /data/adb/.omni_data/.identity.cfg /data/local/tmp/.identity.cfg && chmod 644 /data/local/tmp/.identity.cfg`);
+  await ksu_exec(`printf '%s\\n' ${args.join(' ')} > "${CFG_PATH}" && cp /data/adb/.omni_data/.identity.cfg /data/adb/modules/omnishield/identity.cfg && chmod 644 /data/adb/modules/omnishield/identity.cfg`);
   await ksu_exec(`chmod 644 "${CFG_PATH}"`);
   // Never trust errno alone — always verify the write succeeded
   const check = await ksu_exec(`cat "${CFG_PATH}"`);
