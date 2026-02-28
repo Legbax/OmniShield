@@ -683,18 +683,25 @@
             </div>
             <div class="text-sm" style="margin-bottom:10px">Apps in scope will receive spoofed identity values. Use Force Stop to restart with new identity.</div>
             <div class="input-row" style="margin-bottom:6px">
-              <div style="flex:1">
-                <select id="app-dropdown" class="select" onchange="document.getElementById('app-search-input').value=this.value">
-                  <option value="">Click "Load Apps" first…</option>
-                </select>
-              </div>
-              <button class="btn btn-secondary" onclick="loadInstalledApps()" style="flex-shrink:0">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;vertical-align:-2px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Load Apps
+              <button class="btn btn-secondary" onclick="toggleAppPicker()" id="app-picker-trigger" style="flex:1;justify-content:center">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Browse Installed Apps
               </button>
             </div>
+            <div class="app-picker-panel" id="app-picker-panel">
+              <div class="app-picker-header">
+                <div class="app-picker-search-wrap">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <input id="app-picker-search" class="app-picker-search" type="text" placeholder="Filter apps…">
+                </div>
+                <button class="app-picker-close" onclick="closeAppPicker()">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+              </div>
+              <div class="app-picker-list" id="app-picker-list"></div>
+            </div>
             <div class="input-row" style="margin-top:6px">
-              <input id="app-search-input" class="input" type="text" placeholder="Or type package name (e.g. com.snapchat.android)">
+              <input id="app-search-input" class="input" type="text" placeholder="Or type package name manually">
               <button class="btn btn-primary" onclick="addScopedApp()" style="flex-shrink:0">Add</button>
             </div>
             <div id="scoped-apps-list" style="margin-top:10px"></div>
