@@ -233,19 +233,20 @@ inline std::string toLowerStr(const char* s) {
 }
 
 // Config
-void readConfig() {
-    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
-    if (!file.is_open()) return;
+// PR70c: Shared config parser — used by both direct file read and companion IPC
+static void parseConfigString(const std::string& content) {
+    g_config.clear();
+    std::istringstream stream(content);
     std::string line;
-    while (std::getline(file, line)) {
+    while (std::getline(stream, line)) {
         size_t eq = line.find('=');
         if (eq != std::string::npos) {
             std::string key = line.substr(0, eq);
             std::string val = line.substr(eq + 1);
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            val.erase(0, val.find_first_not_of(" \t"));
-            val.erase(val.find_last_not_of(" \t") + 1);
+            key.erase(0, key.find_first_not_of(" \t\r"));
+            key.erase(key.find_last_not_of(" \t\r") + 1);
+            val.erase(0, val.find_first_not_of(" \t\r"));
+            val.erase(val.find_last_not_of(" \t\r") + 1);
             g_config[key] = val;
         }
     }
@@ -253,18 +254,67 @@ void readConfig() {
     if (g_config.count("master_seed"))   try { g_masterSeed = std::stol(g_config["master_seed"]); } catch(...) {}
     if (g_config.count("jitter"))        g_enableJitter = (g_config["jitter"] == "true");
     if (g_config.count("network_type"))  g_spoofMobileNetwork = (g_config["network_type"] == "lte" || g_config["network_type"] == "mobile");
-    if (g_config.count("debug_mode")) g_debugMode = (g_config["debug_mode"] == "true");
-    // PR38+39: seed_version — la UI lo incrementa cuando rota el master_seed
-    // Permite que el módulo invalide caches en el próximo arranque de la app
+    if (g_config.count("debug_mode"))    g_debugMode = (g_config["debug_mode"] == "true");
     if (g_config.count("seed_version")) {
         long newSeedVersion = 0;
         try { newSeedVersion = std::stol(g_config["seed_version"]); } catch(...) {}
         if (omni::engine::isSeedVersionChanged(newSeedVersion, g_seedVersion)) {
-            // Seed rotado: invalidar caché de GPS para forzar recálculo con nuevo seed
             g_locationCached = false;
             g_seedVersion    = newSeedVersion;
         }
     }
+}
+
+// Direct file read — fallback when companion is unavailable
+void readConfig() {
+    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
+    if (!file.is_open()) {
+        LOGD("[scope] readConfig: FAILED to open /data/adb/.omni_data/.identity.cfg (SELinux?)");
+        return;
+    }
+    std::string content((std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+    LOGD("[scope] readConfig: file opened OK (%zu bytes)", content.size());
+    parseConfigString(content);
+    LOGD("[scope] readConfig: parsed %zu keys, scoped_apps=%s",
+         g_config.size(),
+         g_config.count("scoped_apps") ? g_config["scoped_apps"].c_str() : "(none)");
+}
+
+// PR70c: Companion-based config reader — bypasses SELinux restrictions.
+// The companion runs as root daemon in u:r:su:s0 context and can read any file.
+static bool readConfigViaCompanion(zygisk::Api *api) {
+    if (!api) return false;
+    int fd = api->connectCompanion();
+    if (fd < 0) {
+        LOGD("[scope] companion: connect failed (fd=%d)", fd);
+        return false;
+    }
+    uint32_t len = 0;
+    ssize_t n = read(fd, &len, sizeof(len));
+    if (n != (ssize_t)sizeof(len) || len == 0 || len > 65536) {
+        LOGD("[scope] companion: bad header (n=%zd len=%u)", n, len);
+        close(fd);
+        return false;
+    }
+    std::string buf(len, '\0');
+    ssize_t total = 0;
+    while (total < (ssize_t)len) {
+        ssize_t r = read(fd, &buf[total], len - total);
+        if (r <= 0) break;
+        total += r;
+    }
+    close(fd);
+    if (total != (ssize_t)len) {
+        LOGD("[scope] companion: incomplete read (%zd/%u)", total, len);
+        return false;
+    }
+    LOGD("[scope] companion: read OK (%u bytes)", len);
+    parseConfigString(buf);
+    LOGD("[scope] companion: parsed %zu keys, scoped_apps=%s",
+         g_config.size(),
+         g_config.count("scoped_apps") ? g_config["scoped_apps"].c_str() : "(none)");
+    return true;
 }
 
 bool shouldHide(const char* key) {
@@ -358,8 +408,9 @@ static void remapModuleMemory() {
         if (perms[0] == 'r') prot |= PROT_READ;
         if (perms[1] == 'w') prot |= PROT_WRITE;
         if (perms[2] == 'x') prot |= PROT_EXEC;
-        // Allocate anonymous memory
-        void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        // Allocate anonymous memory with original perms (so code pages stay
+        // executable after mremap — the function itself lives in this .so)
+        void *copy = mmap(nullptr, size, prot | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if (copy == MAP_FAILED) continue;
         // Ensure original is readable so we can copy
         if (!(prot & PROT_READ)) mprotect((void*)start, size, PROT_READ);
@@ -367,7 +418,10 @@ static void remapModuleMemory() {
         // Atomically replace file-backed mapping with anonymous copy
         void *result = mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)start);
         if (result != MAP_FAILED) {
+            // Strip PROT_WRITE from segments that shouldn't have it (e.g. r-xp code)
             mprotect((void*)start, size, prot);
+        } else {
+            munmap(copy, size);
         }
     }
     fclose(fp);
@@ -1043,11 +1097,117 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.mediatek.version.release" ||
                  k == "ro.mediatek.platform") {
-            // Si una app (o el DRM) busca explícitamente firmas MTK en las properties, las vaciamos
-            // a menos que estemos emulando un MediaTek
+            // Suppress MTK-specific props when not emulating MediaTek
             std::string plat = toLowerStr(fp.boardPlatform);
             if (plat.find("mt") == std::string::npos) {
-                dynamic_buffer = "";
+                value[0] = '\0'; return 0;
+            }
+        }
+
+        // ── PR70c: Leaked props detected by VD-Infos ─────────────────────
+
+        // Hostname — leaks "M2004J19C-Redmi9" (original model + brand)
+        else if (k == "net.hostname") {
+            dynamic_buffer = std::string(fp.model) + "-" + fp.brand;
+        }
+        // Modem serial / baseband project — leaks original SoC and serial
+        else if (k == "vendor.gsm.serial" || k == "vendor.gsm.project.baseband") {
+            value[0] = '\0'; return 0;
+        }
+        // ro.product.product.* namespace — Android reads these on some ROMs
+        else if (k == "ro.product.product.model")        dynamic_buffer = fp.model;
+        else if (k == "ro.product.product.brand")        dynamic_buffer = fp.brand;
+        else if (k == "ro.product.product.manufacturer") dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.product.device")       dynamic_buffer = fp.device;
+        else if (k == "ro.product.product.name")         dynamic_buffer = fp.product;
+        // ro.product.system_ext.* namespace
+        else if (k == "ro.product.system_ext.model")     dynamic_buffer = fp.model;
+        else if (k == "ro.product.system_ext.device")    dynamic_buffer = fp.device;
+        else if (k == "ro.product.system_ext.brand")     dynamic_buffer = fp.brand;
+        else if (k == "ro.product.system_ext.manufacturer") dynamic_buffer = fp.manufacturer;
+        else if (k == "ro.product.system_ext.name")      dynamic_buffer = fp.product;
+        // Market name — all partitions leak "Redmi 9"
+        else if (k.find("marketname") != std::string::npos) dynamic_buffer = fp.model;
+        // Device name in Settings DB
+        else if (k == "device_name") dynamic_buffer = fp.model;
+        // Product identifiers
+        else if (k == "ro.product.mod_device")  dynamic_buffer = fp.product;
+        else if (k == "ro.product.cert")        dynamic_buffer = fp.model;
+        else if (k == "ro.build.product")       dynamic_buffer = fp.product;
+        // Boot props that leak original codename
+        else if (k == "ro.boot.product.hardware.sku") dynamic_buffer = fp.device;
+        else if (k == "ro.boot.rsc") dynamic_buffer = fp.device;
+        // OEM identifier
+        else if (k == "ro.fota.oem") dynamic_buffer = fp.manufacturer;
+        // Build version props for all partitions (leak MIUI incremental/dates)
+        else if (k == "ro.vendor.build.version.incremental" ||
+                 k == "ro.odm.build.version.incremental" ||
+                 k == "ro.product.build.version.incremental" ||
+                 k == "ro.system.build.version.incremental" ||
+                 k == "ro.system_ext.build.version.incremental") dynamic_buffer = fp.incremental;
+        else if (k == "ro.vendor.build.version.release" ||
+                 k == "ro.odm.build.version.release" ||
+                 k == "ro.product.build.version.release" ||
+                 k == "ro.system.build.version.release" ||
+                 k == "ro.system_ext.build.version.release" ||
+                 k == "ro.vendor.build.version.release_or_codename" ||
+                 k == "ro.product.build.version.release_or_codename" ||
+                 k == "ro.system.build.version.release_or_codename" ||
+                 k == "ro.system_ext.build.version.release_or_codename") dynamic_buffer = fp.release;
+        else if (k == "ro.vendor.build.version.sdk" ||
+                 k == "ro.odm.build.version.sdk" ||
+                 k == "ro.product.build.version.sdk" ||
+                 k == "ro.system.build.version.sdk" ||
+                 k == "ro.system_ext.build.version.sdk") {
+            if (strcmp(fp.release, "11") == 0) dynamic_buffer = "30";
+            else if (strcmp(fp.release, "10") == 0) dynamic_buffer = "29";
+            else if (strcmp(fp.release, "12") == 0) dynamic_buffer = "31";
+            else dynamic_buffer = "30";
+        }
+        else if (k == "ro.vendor.build.version.security_patch") dynamic_buffer = fp.securityPatch;
+        // Build dates for all partitions
+        else if (k == "ro.vendor.build.date.utc"    ||
+                 k == "ro.odm.build.date.utc"       ||
+                 k == "ro.product.build.date.utc"    ||
+                 k == "ro.system.build.date.utc"     ||
+                 k == "ro.system_ext.build.date.utc" ||
+                 k == "ro.bootimage.build.date.utc") dynamic_buffer = fp.buildDateUtc;
+        // Build IDs for all partitions
+        else if (k == "ro.vendor.build.id"     ||
+                 k == "ro.odm.build.id"        ||
+                 k == "ro.product.build.id"    ||
+                 k == "ro.system.build.id"     ||
+                 k == "ro.system_ext.build.id") dynamic_buffer = fp.buildId;
+        // Build types for all partitions
+        else if (k == "ro.vendor.build.type"     ||
+                 k == "ro.odm.build.type"        ||
+                 k == "ro.product.build.type"    ||
+                 k == "ro.system.build.type"     ||
+                 k == "ro.system_ext.build.type") dynamic_buffer = fp.type;
+        // Build tags for all partitions
+        else if (k == "ro.vendor.build.tags"     ||
+                 k == "ro.odm.build.tags"        ||
+                 k == "ro.product.build.tags"    ||
+                 k == "ro.system.build.tags"     ||
+                 k == "ro.system_ext.build.tags") dynamic_buffer = fp.tags;
+        // Partition build fingerprints (belt-and-suspenders with earlier handler)
+        else if (k == "ro.vendor.build.fingerprint" ||
+                 k == "ro.system.build.fingerprint") dynamic_buffer = fp.fingerprint;
+
+        // ── PR70c: Platform-specific prop suppression ────────────────────
+        // Suppress MIUI props when NOT emulating Xiaomi
+        else if (k.find("ro.miui.") == 0 || k.find("ro.vendor.miui.") == 0) {
+            std::string br = toLowerStr(fp.brand);
+            if (br != "redmi" && br != "xiaomi" && br != "poco") {
+                value[0] = '\0'; return 0;
+            }
+        }
+        // Suppress MediaTek vendor props when NOT emulating MediaTek
+        else if (k.find("ro.vendor.mediatek.") == 0 ||
+                 k.find("ro.mediatek.") == 0) {
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                value[0] = '\0'; return 0;
             }
         }
 
@@ -2395,9 +2555,15 @@ public:
         env->GetJavaVM(&g_jvm);
         this->api = api;
         this->env = env;
+        LOGD("[scope] onLoad: api=%p jvm=%p", (void*)api, (void*)g_jvm);
     }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
-        readConfig();
+        // PR70c: Try companion first (root daemon, bypasses SELinux), fall back to direct read
+        if (!readConfigViaCompanion(g_api)) {
+            LOGD("[scope] companion unavailable, trying direct file read");
+            readConfig();
+        }
+
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         g_isTargetApp = false;
@@ -2405,18 +2571,26 @@ public:
             const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
             if (p) {
                 std::string proc(p);
-                // Match process against scoped_apps from config (comma-separated)
+                LOGD("[scope] process='%s' config_keys=%zu", proc.c_str(), g_config.size());
                 if (g_config.count("scoped_apps")) {
-                    std::istringstream ss(g_config["scoped_apps"]);
+                    std::string scopedRaw = g_config["scoped_apps"];
+                    LOGD("[scope] scoped_apps='%s'", scopedRaw.c_str());
+                    std::istringstream ss(scopedRaw);
                     std::string token;
                     while (std::getline(ss, token, ',')) {
                         token.erase(0, token.find_first_not_of(" \t"));
                         token.erase(token.find_last_not_of(" \t") + 1);
                         if (!token.empty() && proc.find(token) != std::string::npos) {
                             g_isTargetApp = true;
+                            LOGD("[scope] MATCH: '%s' contains '%s' → hooking", proc.c_str(), token.c_str());
                             break;
                         }
                     }
+                } else {
+                    LOGD("[scope] NO scoped_apps key in config");
+                }
+                if (!g_isTargetApp) {
+                    LOGD("[scope] '%s' not in scope → DLCLOSE", proc.c_str());
                 }
                 env->ReleaseStringUTFChars(args->nice_name, p);
             }
@@ -2425,7 +2599,6 @@ public:
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
             } else {
-                // PR70: Unload module from non-target apps — removes .so from maps entirely
                 g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             }
         }
@@ -2985,3 +3158,22 @@ private:
 };
 
 REGISTER_ZYGISK_MODULE(OmniModule)
+
+// PR70c: Companion handler — runs in a root daemon process (u:r:su:s0).
+// Reads the config file and sends it back over the Unix domain socket.
+// This bypasses SELinux restrictions that prevent zygote from reading /data/adb/.
+static void companion_handler(int client) {
+    std::ifstream file("/data/adb/.omni_data/.identity.cfg");
+    std::string content;
+    if (file.is_open()) {
+        content.assign(std::istreambuf_iterator<char>(file),
+                       std::istreambuf_iterator<char>());
+    }
+    uint32_t len = (uint32_t)content.size();
+    write(client, &len, sizeof(len));
+    if (len > 0) {
+        write(client, content.c_str(), len);
+    }
+}
+
+REGISTER_ZYGISK_COMPANION(companion_handler)
