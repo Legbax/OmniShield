@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v12.0 (The Void)
+# Julia.md - Vortex Omni-Shield v12.9.53 (The Void)
 
-**Fecha:** 25 de febrero de 2026 (Estado Final Absoluto)
-**Agente:** Jules
-**Versión:** v12.0 (The Void)
+**Fecha:** 28 de febrero de 2026 (Estado Actual)
+**Agente:** Claude (PR71c)
+**Versión:** v12.9.53
 
 ## 🌀 Filosofía: Virtualización Total (The Void)
 El Proyecto Omni-Shield ha alcanzado su estado final: "The Void".
@@ -62,6 +62,17 @@ jitter=true
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
 
 ### Registro de Actualizaciones
+
+**Fecha y agente:** 28 de febrero de 2026, Claude (PR71c — Hook posix_spawn/posix_spawnp para sellar leak nativo de properties)
+**Resumen de cambios:** v12.9.53 — Cierre del bypass de posix_spawn que permitía a apps de detección leer propiedades nativas reales.
+- **Fix 13 — posix_spawn / posix_spawnp hooks (main.cpp) [CRITICAL]:** En Android 10+ (API 28+), `Runtime.exec()` y `ProcessBuilder` NO usan `execve` para crear subprocesos — usan `posix_spawn` / `posix_spawnp` de Bionic libc. Nuestro hook de `execve` (PR71) era completamente evadido: el proceso hijo de `/system/bin/getprop` nacía SIN hooks de Zygisk y leía las propiedades de hardware reales. VD-Infos confirmó: Java `Build.*` mostraba el perfil correcto (Pixel 3a XL) pero TODAS las propiedades nativas (`ro.product.model`, `ro.build.host`, `ro.product.manufacturer`, etc.) filtraban el hardware real (Xiaomi M2004J19C / Redmi 9). **Fix:** Nuevos punteros `orig_posix_spawn` y `orig_posix_spawnp`. Nueva función helper `handleGetpropSpawn()` que detecta si argv[0] es `getprop`, hace `fork()` de un hijo que emula la salida: con argumentos → `my_system_property_get()` retorna valor spoofed; sin argumentos → `__system_property_foreach()` con `shouldHide()` filtrando properties que delatan el hardware real. `_exit(0)` antes de que el binario real ejecute. Hooks registrados via `DobbyHook` en `postAppSpecialize` sobre `libc.so`.
+- **Fix 12 — getprop full dump emulation (main.cpp, PR71b):** Hook de `SystemProperties.native_get(String, String)` via JNI para interceptar lecturas de propiedades desde Java sin pasar por `__system_property_get`. Emulación del dump completo de `getprop` (sin argumentos) via `__system_property_foreach` con valores spoofed y propiedades ocultas omitidas.
+- **Fix 11 — execve hook para getprop (main.cpp, PR71):** Hook base de `execve` en `libc.so` para interceptar ejecuciones de `/system/bin/getprop` desde procesos hijo. Lógica: si el comando es `getprop`, el hook emula la respuesta con propiedades spoofed y llama `_exit(0)`. Incluye 40+ property leaks sellados detectados por reporte de VD-Infos: `vendor.gsm.serial`, `net.hostname`, `ro.product.cert`, `ro.fota.oem`, `ro.product.system_ext.*`, `ro.product.product.*`, propiedades MIUI/MediaTek suprimidas cuando el perfil no es Xiaomi/MTK, build dates/tags/types para todas las particiones.
+- **Docs — CLAUDE.md:** Añadido archivo de instrucciones para agentes AI: no usar `WebFetch` para gists de GitHub (dominio bloqueado), usar `curl -sL` o `gh gist view` en su lugar.
+**Prompt del usuario:** Reporte de VD-Infos mostraba que Java Build.* tenía valores correctos del perfil (Pixel 3a XL) pero las propiedades nativas filtraban hardware real (Xiaomi M2004J19C). Diagnóstico de Gemini identificó posix_spawn como vector de bypass.
+**Nota personal para el siguiente agente:** El perfil activo del usuario es "Pixel 3a XL" (no "Redmi 9" — el default). El config `.identity.cfg` lo setea. El dispositivo real es un Xiaomi Redmi 9 (M2004J19C, MT6768, MIUI). Tres vectores de ejecución de getprop están ahora cubiertos: `execve` (clásico), `posix_spawn` (Android 10+), `posix_spawnp` (path-based). Si VD-Infos aún muestra leaks después de este parche, el siguiente vector a investigar es `__system_property_find()` + lectura directa de memoria compartida (mmap del property area). Leaks pendientes que NO se pueden arreglar con hooks de properties: (1) WebView User-Agent (`getUserAgentString` muestra modelo real — requiere hook de `WebSettings`), (2) ENV variables (`BOOTCLASSPATH`/`DEX2OATBOOTCLASSPATH` contienen jars de mediatek/miui — seteadas por Zygote pre-fork, no modificables post-init).
+
+---
 
 **Fecha y agente:** 28 de febrero de 2026, Claude (PR70c — Memory mapping stealth + UX scope picker + scope save feedback + companion config reader)
 **Resumen de cambios:** v12.9.50 — Ocultación de memory mappings del módulo, UX mejorada en scope picker, feedback de save en scope, companion process para lectura de config.
