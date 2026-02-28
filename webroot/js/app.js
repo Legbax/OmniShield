@@ -762,22 +762,23 @@ window.addScopedApp = async function() {
   state.scopedApps.push(pkg);
   if (input) input.value = '';
   renderScopedApps();
-  await saveConfig();
-  toast(`Added ${pkg} to scope`);
+  if (await saveConfig()) toast(`Added ${pkg} — force stop the app to apply`);
+  else toast('Failed to save scope — check permissions', 'err');
 };
 
 window.addScopedAppFromPicker = async function(pkg) {
   if (!pkg || state.scopedApps.includes(pkg)) return;
   state.scopedApps.push(pkg);
   renderScopedApps();
-  await saveConfig();
-  toast(`Added ${pkg} to scope`);
+  if (await saveConfig()) toast(`Added ${pkg} — force stop the app to apply`);
+  else toast('Failed to save scope — check permissions', 'err');
 };
 
 window.removeScopedApp = async function(pkg) {
   state.scopedApps = state.scopedApps.filter(p => p !== pkg);
   renderScopedApps();
-  await saveConfig();
+  if (await saveConfig()) toast(`Removed ${pkg}`);
+  else toast('Failed to save scope', 'err');
 };
 
 window.forcestopApp = async function(pkg) {

@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.49
-versionCode=12949
+version=v12.9.50
+versionCode=12950
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR70 — Fix process scope from config, writeConfig save, SSAID deterministic by package name
+description=Total Invisibility (The Void). Zygisk module. PR70c — Memory mapping stealth, scope save fix, custom app picker

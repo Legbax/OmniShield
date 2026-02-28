@@ -33,6 +33,9 @@
 #include <dirent.h>
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
+#include <link.h>
+#include <dlfcn.h>
+#include <sys/mman.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -171,6 +174,9 @@ static void (*orig_native_setup)(JNIEnv*, jobject, jstring, jboolean, jboolean);
 static int (*orig_sysinfo)(struct sysinfo *info);
 static struct dirent* (*orig_readdir)(DIR *dirp);
 static unsigned long (*orig_getauxval)(unsigned long type);
+
+// PR70: dl_iterate_phdr — hide module from ELF object enumeration
+static int (*orig_dl_iterate_phdr)(int (*callback)(struct dl_phdr_info *, size_t, void *), void *data);
 
 // PR41: dup family — cerrar bypass de caché VFS
 static int (*orig_dup)(int oldfd);
@@ -319,6 +325,52 @@ static inline bool isHiddenPath(const char* path) {
         if (strcasestr(path, HIDDEN_TOKENS[i])) return true;
     }
     return false;
+}
+
+// PR70: Match /proc/<digits>/<suffix> — detection apps use /proc/<getpid()>/maps
+// instead of /proc/self/maps to bypass self-only filtering.
+static inline bool isProcPidPath(const char* path, const char* suffix) {
+    if (!path || strncmp(path, "/proc/", 6) != 0) return false;
+    const char* p = path + 6;
+    if (*p < '1' || *p > '9') return false;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p != '/') return false;
+    return strcmp(p + 1, suffix) == 0;
+}
+
+// PR70: Remap module .so memory from file-backed to anonymous.
+// After hooks are installed, the .so code/data stays at the same virtual
+// addresses but /proc/self/maps shows device 00:00 inode 0 (anonymous)
+// instead of the file path.  This hides the module from maps readers even
+// if they bypass our openat/read hooks (e.g. direct syscall).
+static void remapModuleMemory() {
+    FILE *fp = fopen("/proc/self/maps", "re");
+    if (!fp) return;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        if (!isHiddenPath(line)) continue;
+        uintptr_t start, end;
+        char perms[5];
+        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3) continue;
+        size_t size = end - start;
+        if (size == 0) continue;
+        int prot = 0;
+        if (perms[0] == 'r') prot |= PROT_READ;
+        if (perms[1] == 'w') prot |= PROT_WRITE;
+        if (perms[2] == 'x') prot |= PROT_EXEC;
+        // Allocate anonymous memory
+        void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (copy == MAP_FAILED) continue;
+        // Ensure original is readable so we can copy
+        if (!(prot & PROT_READ)) mprotect((void*)start, size, PROT_READ);
+        memcpy(copy, (void*)start, size);
+        // Atomically replace file-backed mapping with anonymous copy
+        void *result = mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)start);
+        if (result != MAP_FAILED) {
+            mprotect((void*)start, size, prot);
+        }
+    }
+    fclose(fp);
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -1022,7 +1074,8 @@ int my_open(const char *pathname, int flags, mode_t mode) {
     if (!pathname) return orig_openat(AT_FDCWD, pathname, flags, mode);
 
     std::string path_str(pathname);
-    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" ||
+        path_str == "/proc/self/smaps_rollup" || isProcPidPath(pathname, "smaps_rollup")) {
         errno = EACCES;
         return -1;
     }
@@ -1069,7 +1122,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/android_usb") && strstr(pathname, "iSerial")) type = USB_SERIAL;
         else if (strstr(pathname, "/sys/class/net/wlan0/address")) type = WIFI_MAC;
         // PR22: Hardware Topology & TracerPid
-        else if (strstr(pathname, "/proc/self/status")) type = PROC_SELF_STATUS;
+        else if (strstr(pathname, "/proc/self/status") || isProcPidPath(pathname, "status")) type = PROC_SELF_STATUS;
         else if (strstr(pathname, "/sys/devices/system/cpu/online") ||
                  strstr(pathname, "/sys/devices/system/cpu/possible") ||
                  strstr(pathname, "/sys/devices/system/cpu/present")) type = SYS_CPU_TOPOLOGY;
@@ -1092,10 +1145,13 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         } else if (strncmp(pathname, "/sys/class/net/eth0/address", 27) == 0) {
             type = PROC_ETH0_MAC;
         }
-        else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps")) type = PROC_MAPS;
+        // PR70: Also match /proc/<pid>/maps — detection apps bypass /proc/self/ filtering
+        else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps") ||
+                 isProcPidPath(pathname, "maps") || isProcPidPath(pathname, "smaps")) type = PROC_MAPS;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
-        else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo")) type = PROC_MOUNTS;
+        else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo") ||
+                 isProcPidPath(pathname, "mounts") || isProcPidPath(pathname, "mountinfo")) type = PROC_MOUNTS;
         else if (strstr(pathname, "/sys/devices/system/cpu/") && strstr(pathname, "cpuinfo_max_freq")) type = SYS_CPU_FREQ;
         else if (strstr(pathname, "/sys/devices/soc0/machine")) type = SYS_SOC_MACHINE;
         else if (strstr(pathname, "/sys/devices/soc0/family")) type = SYS_SOC_FAMILY;
@@ -1122,7 +1178,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/proc/net/ipv6_route")) type = PROC_NET_IPV6_ROUTE;
         // PR37: Nuevos VFS handlers
         else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
-        else if (strcmp(pathname, "/proc/self/cgroup") == 0)               type = PROC_SELF_CGROUP;
+        else if (strcmp(pathname, "/proc/self/cgroup") == 0 || isProcPidPath(pathname, "cgroup")) type = PROC_SELF_CGROUP;
         else if (strstr(pathname, "scaling_available_frequencies"))         type = SYS_CPU_FREQ_AVAIL;
         // Bloqueo directo de KSU/Batería MTK
         else if (strstr(pathname, "mtk_battery") || strstr(pathname, "mt_bat")) { errno = ENOENT; return -1; }
@@ -1615,7 +1671,8 @@ int my_openat(int dirfd, const char *pathname, int flags, mode_t mode) {
     if (!pathname) return orig_openat(dirfd, pathname, flags, mode);
 
     std::string path_str(pathname);
-    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" || path_str == "/proc/self/smaps_rollup") {
+    if (path_str == "/proc/modules" || path_str == "/proc/interrupts" ||
+        path_str == "/proc/self/smaps_rollup" || isProcPidPath(pathname, "smaps_rollup")) {
         errno = EACCES;
         return -1;
     }
@@ -2019,6 +2076,30 @@ struct dirent* my_readdir(DIR *dirp) {
 }
 
 // -----------------------------------------------------------------------------
+// PR70: dl_iterate_phdr — hide module .so from ELF shared object enumeration.
+// Detection apps call dl_iterate_phdr() to list all loaded .so files without
+// going through /proc/self/maps — must filter entries containing hidden paths.
+// -----------------------------------------------------------------------------
+struct DlIterateFilterCtx {
+    int (*userCallback)(struct dl_phdr_info *, size_t, void *);
+    void *userData;
+};
+
+static int dl_iterate_filter_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    auto *ctx = static_cast<DlIterateFilterCtx*>(data);
+    if (info && info->dlpi_name && isHiddenPath(info->dlpi_name)) {
+        return 0; // skip this entry
+    }
+    return ctx->userCallback(info, size, ctx->userData);
+}
+
+int my_dl_iterate_phdr(int (*callback)(struct dl_phdr_info *info, size_t size, void *data), void *data) {
+    if (!orig_dl_iterate_phdr) return -1;
+    DlIterateFilterCtx ctx = { callback, data };
+    return orig_dl_iterate_phdr(dl_iterate_filter_cb, &ctx);
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Hardware Capabilities (getauxval)
 // -----------------------------------------------------------------------------
 #ifndef HWCAP_ATOMICS
@@ -2340,7 +2421,14 @@ public:
                 env->ReleaseStringUTFChars(args->nice_name, p);
             }
         }
-        if (g_isTargetApp && g_api) g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+        if (g_api) {
+            if (g_isTargetApp) {
+                g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+            } else {
+                // PR70: Unload module from non-target apps — removes .so from maps entirely
+                g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            }
+        }
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (!g_isTargetApp) return;
@@ -2447,6 +2535,11 @@ public:
 
         void* getauxval_func = DobbySymbolResolver("libc.so", "getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
+
+        // PR70: dl_iterate_phdr — hide module .so from ELF enumeration
+        void* dl_iter_func = DobbySymbolResolver("libc.so", "dl_iterate_phdr");
+        if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
+        if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");
@@ -2876,6 +2969,10 @@ public:
                         codecMethods[0].fnPtr);
             }
         }
+
+        // PR70: Remap module .so from file-backed to anonymous memory.
+        // All hooks are installed above — now make the .so invisible in maps.
+        remapModuleMemory();
 
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
