@@ -778,26 +778,9 @@ window.applyProxy = async function() {
 
   if (state.proxyEnabled) {
     if (btn) btn.disabled = true;
+    toast('Starting proxy tunnel...', 'info');
     try {
-      // Ensure tun2socks binary is available (auto-download if missing)
-      const chk = await ksu_exec('[ -x /data/adb/modules/omnishield/bin/tun2socks ] && echo ok');
-      if (chk.stdout !== 'ok') {
-        toast('Downloading tun2socks binary...', 'info');
-        const dl = await ksu_exec('sh /data/adb/modules/omnishield/bin/download_tun2socks.sh 2>&1');
-        if (dl.errno !== 0) {
-          toast('Download failed: ' + (dl.stdout || dl.stderr || 'no internet?'), 'err');
-          if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }
-          state.proxyEnabled = false;
-          const toggle = document.getElementById('proxy-enabled');
-          if (toggle) toggle.checked = false;
-          await saveConfig();
-          return;
-        }
-        toast('tun2socks downloaded', 'info');
-      }
-
-      toast('Starting proxy tunnel...', 'info');
-      const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh start');
+      const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh start 2>&1');
       if (r.errno !== 0) {
         toast('Proxy failed: ' + (r.stderr || r.stdout || 'unknown error'), 'err');
         if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }

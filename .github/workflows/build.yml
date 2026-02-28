@@ -34,6 +34,17 @@ jobs:
       id: version
       run: echo "VERSION=$(grep '^version=' module.prop | cut -d'=' -f2)" >> $GITHUB_OUTPUT
 
+    - name: Download hev-socks5-tunnel (tun2socks)
+      run: |
+        REPO="heiher/hev-socks5-tunnel"
+        ARCH="linux-aarch64"
+        DL_URL=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | \
+          grep "browser_download_url.*$ARCH" | head -1 | sed 's/.*"\(http[^"]*\)".*/\1/')
+        echo "Downloading: $DL_URL"
+        curl -sL -o tun2socks "$DL_URL"
+        file tun2socks
+        chmod 755 tun2socks
+
     - name: Package Module
       run: |
         mkdir -p dist/zygisk dist/bin
@@ -42,7 +53,7 @@ jobs:
         cp post-fs-data.sh dist/
         cp service.sh dist/
         cp proxy_manager.sh dist/
-        cp bin/download_tun2socks.sh dist/bin/
+        cp tun2socks dist/bin/tun2socks
         cp -r webroot dist/
         cd dist
         zip -r omnishield-${{ steps.version.outputs.VERSION }}-release.zip .
