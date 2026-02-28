@@ -432,7 +432,7 @@ inline const DeviceFingerprint* findProfile(const std::string& name) {
     } },
     { "OnePlus 8T", {
         "OnePlus", "OnePlus", "KB2001", "OnePlus8T",
-        "OnePlus8T", "qcom", "kona", "2107142215",
+        "kebab", "qcom", "kona", "2107142215",
         "OnePlus/kebab/OnePlus8T:11/RP1A.200720.011/2107142215:user/release-keys", "RP1A.200720.011", "release-keys", "user",
         "MPSS.HI.3.2.c1.1-00085-SM8250_GEN_PACK-1", "2107142215", "2021-07-05", "11",
         "kona", "adreno", "196610", "SM8250",

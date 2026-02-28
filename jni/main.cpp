@@ -36,6 +36,7 @@
 #include <link.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -161,6 +162,20 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+
+// PR71: execve hook — intercept getprop exec to prevent property leak via child process
+static int (*orig_execve)(const char *pathname, char *const argv[], char *const envp[]);
+
+// PR71b: posix_spawn / posix_spawnp hooks — Android 10+ uses posix_spawn instead of execve
+// for Runtime.exec() and ProcessBuilder, bypassing our execve hook entirely.
+static int (*orig_posix_spawn)(pid_t *pid, const char *path,
+                               const void *file_actions,
+                               const void *attrp,
+                               char *const argv[], char *const envp[]);
+static int (*orig_posix_spawnp)(pid_t *pid, const char *file,
+                                const void *file_actions,
+                                const void *attrp,
+                                char *const argv[], char *const envp[]);
 
 // PR44: Camera2 — CameraMetadataNative.nativeReadValues(int tag) : byte[]
 // Firma AOSP Android 11: instance method, (I)[B — SIN parámetro ptr explícito
@@ -453,9 +468,54 @@ int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
     }
     return orig_fstatat(dirfd, pathname, statbuf, flags);
 }
+// PR71f: Cached cpuinfo content — avoids regenerating the full string on every
+// fopen/cat call (some scanners read /proc/cpuinfo in tight loops).
+// Invalidated when g_configGeneration changes (profile switch / Destroy Identity).
+static std::string g_cpuinfoCached;
+static uint64_t g_cpuinfoCachedGen = 0;
+
+static const std::string& getCachedCpuInfo(const DeviceFingerprint& fp) {
+    if (g_cpuinfoCached.empty() || g_cpuinfoCachedGen != g_configGeneration) {
+        g_cpuinfoCached = generateMulticoreCpuInfo(fp);
+        g_cpuinfoCachedGen = g_configGeneration;
+    }
+    return g_cpuinfoCached;
+}
+
 FILE* my_fopen(const char* pathname, const char* mode) {
     if (!orig_fopen) { errno = ENOENT; return nullptr; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
+
+    // PR71f: Serve faked files via memfd — immune to fread() bypassing read() hook.
+    // bionic's fread uses internal __sread which may do direct syscalls, skipping
+    // our Dobby hook on read(). memfd sidesteps this entirely: all FILE* ops
+    // (fread, fgets, fgetc) read from the memfd's kernel buffer directly.
+    if (pathname) {
+        const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+        if (fp_ptr) {
+            const char* content_ptr = nullptr;
+            size_t content_len = 0;
+            std::string tmp_content;
+
+            if (strstr(pathname, "/proc/cpuinfo")) {
+                const std::string& cached = getCachedCpuInfo(*fp_ptr);
+                content_ptr = cached.c_str();
+                content_len = cached.size();
+            }
+
+            if (content_ptr && content_len > 0) {
+                // MFD_CLOEXEC (0x0001): FD won't leak to child processes via exec
+                int mfd = syscall(__NR_memfd_create, "vfs", 0x0001u);
+                if (mfd >= 0) {
+                    write(mfd, content_ptr, content_len);
+                    lseek(mfd, 0, SEEK_SET);
+                    FILE* f = fdopen(mfd, mode);
+                    if (f) return f;
+                    close(mfd);
+                }
+            }
+        }
+    }
     return orig_fopen(pathname, mode);
 }
 
@@ -823,9 +883,20 @@ static std::string generateBootId(long seed) {
 // Hooks: System Properties
 // -----------------------------------------------------------------------------
 int my_system_property_get(const char *key, char *value) {
-    if (!orig_system_property_get) return 0;
     if (shouldHide(key)) { if(value) value[0] = '\0'; return 0; }
-    int ret = orig_system_property_get(key, value);
+    // PR71e: Never short-circuit when orig is null — the spoofing logic below
+    // must run regardless, because my_system_property_read_callback and
+    // my_SystemProperties_native_get both depend on this function for ALL
+    // property spoofing.  When Dobby fails to hook __system_property_get
+    // (inlined, already hooked, etc.), orig stays null and the old early-return
+    // killed the ENTIRE spoofing chain: read_callback got 0 → passed real value,
+    // native_get got 0 → returned default.
+    int ret = 0;
+    if (orig_system_property_get) {
+        ret = orig_system_property_get(key, value);
+    } else if (value) {
+        value[0] = '\0';
+    }
 
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
@@ -875,7 +946,9 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.build.version.incremental")       dynamic_buffer = fp.incremental;
         else if (k == "ro.build.version.security_patch")    dynamic_buffer = fp.securityPatch;
-        else if (k == "ro.build.description")               dynamic_buffer = fp.buildDescription;
+        else if (k == "ro.build.description"       ||
+                 k == "ro.vendor.build.description" ||
+                 k == "ro.odm.build.description")            dynamic_buffer = fp.buildDescription;
         else if (k == "ro.build.flavor")                    dynamic_buffer = fp.buildFlavor;
         else if (k == "ro.build.host")                      dynamic_buffer = fp.buildHost;
         else if (k == "ro.build.user")                      dynamic_buffer = fp.buildUser;
@@ -955,6 +1028,9 @@ int my_system_property_get(const char *key, char *value) {
         else if (k == "ro.boot.flash.locked")         dynamic_buffer = "1";
         else if (k == "ro.boot.vbmeta.device_state")  dynamic_buffer = "locked";
         else if (k == "ro.boot.veritymode")           dynamic_buffer = "enforcing";
+        // PR71: ro.secureboot.lockstate leakeaba "unlocked" en VD-Infos
+        else if (k == "ro.secureboot.lockstate")      dynamic_buffer = "locked";
+        else if (k == "ro.secureboot.devicelock")     dynamic_buffer = "1";
         else if (k == "ro.boot.hardware")             dynamic_buffer = fp.hardware;
         else if (k == "ro.boot.hardware.platform")    dynamic_buffer = fp.boardPlatform;
         // --- PR22: Partition Fingerprints (Play Integrity v3+) ---
@@ -1095,13 +1171,17 @@ int my_system_property_get(const char *key, char *value) {
             // Android real reporta el driver gráfico ('adreno', 'mali', 'powervr')
             dynamic_buffer = fp.eglDriver;
         }
-        else if (k == "ro.mediatek.version.release" ||
-                 k == "ro.mediatek.platform") {
-            // Suppress MTK-specific props when not emulating MediaTek
+        else if (k == "ro.mediatek.platform") {
             std::string plat = toLowerStr(fp.boardPlatform);
             if (plat.find("mt") == std::string::npos) {
                 value[0] = '\0'; return 0;
             }
+            // PR71: Return profile's chipname (e.g. "MT6765") instead of real SoC
+            dynamic_buffer = fp.hardwareChipname;
+        }
+        else if (k == "ro.mediatek.version.release") {
+            // Suppress MTK version — ODM-specific string leaks manufacturer identity
+            value[0] = '\0'; return 0;
         }
 
         // ── PR70c: Leaked props detected by VD-Infos ─────────────────────
@@ -1164,7 +1244,8 @@ int my_system_property_get(const char *key, char *value) {
             else if (strcmp(fp.release, "12") == 0) dynamic_buffer = "31";
             else dynamic_buffer = "30";
         }
-        else if (k == "ro.vendor.build.version.security_patch") dynamic_buffer = fp.securityPatch;
+        else if (k == "ro.vendor.build.version.security_patch" ||
+                 k == "ro.vendor.build.security_patch")          dynamic_buffer = fp.securityPatch;
         // Build dates for all partitions
         else if (k == "ro.vendor.build.date.utc"    ||
                  k == "ro.odm.build.date.utc"       ||
@@ -1172,6 +1253,24 @@ int my_system_property_get(const char *key, char *value) {
                  k == "ro.system.build.date.utc"     ||
                  k == "ro.system_ext.build.date.utc" ||
                  k == "ro.bootimage.build.date.utc") dynamic_buffer = fp.buildDateUtc;
+        // PR71: Human-readable build dates — VD-Infos reads these alongside UTC variants
+        else if (k == "ro.build.date"           ||
+                 k == "ro.vendor.build.date"    ||
+                 k == "ro.odm.build.date"       ||
+                 k == "ro.product.build.date"   ||
+                 k == "ro.system.build.date"    ||
+                 k == "ro.system_ext.build.date"||
+                 k == "ro.bootimage.build.date") {
+            time_t t = 0;
+            try { t = std::stol(fp.buildDateUtc); } catch(...) {}
+            if (t > 0) {
+                struct tm tm_buf;
+                gmtime_r(&t, &tm_buf);
+                char date_str[64];
+                strftime(date_str, sizeof(date_str), "%a %b %e %H:%M:%S UTC %Y", &tm_buf);
+                dynamic_buffer = date_str;
+            }
+        }
         // Build IDs for all partitions
         else if (k == "ro.vendor.build.id"     ||
                  k == "ro.odm.build.id"        ||
@@ -1201,6 +1300,11 @@ int my_system_property_get(const char *key, char *value) {
             if (br != "redmi" && br != "xiaomi" && br != "poco") {
                 value[0] = '\0'; return 0;
             }
+        }
+        // PR71: Suppress vendor MTK version release — ODM-specific string leaks
+        // real device manufacturer (e.g. HUAQIN for Redmi 9)
+        else if (k == "ro.vendor.mediatek.version.release") {
+            value[0] = '\0'; return 0;
         }
         // Suppress MediaTek vendor props when NOT emulating MediaTek
         else if (k.find("ro.vendor.mediatek.") == 0 ||
@@ -2355,6 +2459,214 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
 }
 
 // -----------------------------------------------------------------------------
+// PR71: Hook execve — intercept getprop commands in child processes
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: VD-Infos and detection apps use Runtime.exec("getprop propname")
+// which forks a child process. After fork(), the child calls execve("getprop")
+// which replaces the process image and destroys all Dobby hooks. By hooking
+// execve itself, we intercept the call BEFORE the image is replaced, read the
+// property via our hooked my_system_property_get, write the spoofed value to
+// stdout, and _exit(0) — the real getprop binary never runs.
+static int my_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    if (pathname && argv) {
+        // Extract basename from path
+        const char* base = strrchr(pathname, '/');
+        base = base ? base + 1 : pathname;
+
+        if (strcmp(base, "getprop") == 0) {
+            if (argv[1] && argv[1][0] != '\0') {
+                // Single property read: getprop <name> [default]
+                char value[92] = {0};
+                int len = my_system_property_get(argv[1], value);
+                if (len > 0) {
+                    write(STDOUT_FILENO, value, len);
+                    write(STDOUT_FILENO, "\n", 1);
+                } else if (argv[2]) {
+                    // Property empty/hidden — use default value if provided
+                    size_t dlen = strlen(argv[2]);
+                    write(STDOUT_FILENO, argv[2], dlen);
+                    write(STDOUT_FILENO, "\n", 1);
+                }
+                // No output for non-existent properties (matches real getprop)
+                _exit(0);
+            }
+            // getprop with no args — emulate full property dump with spoofed values
+            __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
+                struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
+                __system_property_read_callback(pi,
+                    [](void* c, const char* n, const char*, unsigned) {
+                        auto* p = static_cast<decltype(&ctx)>(c);
+                        if (n) strncpy(p->name, n, PROP_NAME_MAX);
+                    }, &ctx);
+
+                if (ctx.name[0] == '\0') return;
+
+                // CRITICAL: Completely omit hidden/MTK/Xiaomi properties from the dump.
+                // A real Samsung has ZERO ro.vendor.mediatek.* or ro.miui.* entries.
+                // Printing them as empty [] would flag the device as spoofed.
+                if (shouldHide(ctx.name)) return;
+
+                char val[PROP_VALUE_MAX] = {0};
+                my_system_property_get(ctx.name, val);
+
+                char line[512];
+                int len = snprintf(line, sizeof(line), "[%s]: [%s]\n", ctx.name, val);
+                if (len > 0) write(STDOUT_FILENO, line, len);
+            }, nullptr);
+            _exit(0);
+        }
+    }
+
+    if (!orig_execve) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return orig_execve(pathname, argv, envp);
+}
+
+// -----------------------------------------------------------------------------
+// PR71c: posix_spawn / posix_spawnp hooks
+// -----------------------------------------------------------------------------
+// On Android 10+ (API 28+), Runtime.exec() and ProcessBuilder use posix_spawn
+// instead of execve. The child process created via posix_spawn is born without
+// our Zygisk hooks and reads the real hardware properties. We apply the EXACT
+// same getprop interception logic as my_execve: if the command is getprop,
+// we fork ourselves, emulate the output with spoofed values, and _exit(0)
+// before the real binary ever runs.
+// -----------------------------------------------------------------------------
+
+// Helper: handles subprocess interception for posix_spawn/posix_spawnp/execve.
+// Intercepts: getprop (spoofed properties), cat (faked VFS files like /proc/cpuinfo).
+// Returns true if the command was intercepted (child forked with spoofed output).
+// Returns false if the caller should fall through to the original syscall.
+static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
+                               pid_t *pid) {
+    if (!resolved_path || !argv) return false;
+
+    // Extract basename
+    const char* base = strrchr(resolved_path, '/');
+    base = base ? base + 1 : resolved_path;
+
+    // PR71f: Intercept "cat <path>" for files we fake (cpuinfo, version, etc.)
+    // Without this, `Runtime.exec("cat /proc/cpuinfo")` spawns a child that reads
+    // the real kernel file — our Dobby hooks are destroyed by the execve image replace.
+    if (strcmp(base, "cat") == 0 && argv[1] && argv[1][0] != '\0') {
+        const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+        if (fp_ptr) {
+            const char* target = argv[1];
+            const std::string* content = nullptr;
+
+            if (strstr(target, "/proc/cpuinfo")) {
+                content = &getCachedCpuInfo(*fp_ptr);
+            }
+
+            if (content && !content->empty()) {
+                pid_t child = fork();
+                if (child < 0) return false;
+                if (child == 0) {
+                    write(STDOUT_FILENO, content->c_str(), content->size());
+                    _exit(0);
+                }
+                if (pid) *pid = child;
+                return true;
+            }
+        }
+    }
+
+    if (strcmp(base, "getprop") != 0) return false;
+
+    // Fork a child to emulate getprop with spoofed values
+    pid_t child = fork();
+    if (child < 0) return false;   // fork failed, fall through to original
+
+    if (child == 0) {
+        // === Child process ===
+        if (argv[1] && argv[1][0] != '\0') {
+            // Single property: getprop <name> [default]
+            char value[92] = {0};
+            int len = my_system_property_get(argv[1], value);
+            if (len > 0) {
+                write(STDOUT_FILENO, value, len);
+                write(STDOUT_FILENO, "\n", 1);
+            } else if (argv[2]) {
+                size_t dlen = strlen(argv[2]);
+                write(STDOUT_FILENO, argv[2], dlen);
+                write(STDOUT_FILENO, "\n", 1);
+            }
+            _exit(0);
+        }
+        // No args — full property dump with spoofed values
+        __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
+            struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
+            __system_property_read_callback(pi,
+                [](void* c, const char* n, const char*, unsigned) {
+                    auto* p = static_cast<decltype(&ctx)>(c);
+                    if (n) strncpy(p->name, n, PROP_NAME_MAX);
+                }, &ctx);
+
+            if (ctx.name[0] == '\0') return;
+            if (shouldHide(ctx.name)) return;
+
+            char val[PROP_VALUE_MAX] = {0};
+            my_system_property_get(ctx.name, val);
+
+            char line[512];
+            int len = snprintf(line, sizeof(line), "[%s]: [%s]\n", ctx.name, val);
+            if (len > 0) write(STDOUT_FILENO, line, len);
+        }, nullptr);
+        _exit(0);
+    }
+
+    // === Parent process ===
+    if (pid) *pid = child;
+    return true;
+}
+
+static int my_posix_spawn(pid_t *pid, const char *path,
+                          const void *file_actions,
+                          const void *attrp,
+                          char *const argv[], char *const envp[]) {
+    if (handleGetpropSpawn(path, argv, pid)) return 0;
+
+    if (!orig_posix_spawn) { errno = ENOSYS; return ENOSYS; }
+    return orig_posix_spawn(pid, path, file_actions, attrp, argv, envp);
+}
+
+static int my_posix_spawnp(pid_t *pid, const char *file,
+                           const void *file_actions,
+                           const void *attrp,
+                           char *const argv[], char *const envp[]) {
+    // posix_spawnp receives a filename (may be relative, searched in PATH)
+    // For getprop, the basename check in handleGetpropSpawn covers this
+    if (file && handleGetpropSpawn(file, argv, pid)) return 0;
+
+    if (!orig_posix_spawnp) { errno = ENOSYS; return ENOSYS; }
+    return orig_posix_spawnp(pid, file, file_actions, attrp, argv, envp);
+}
+
+// -----------------------------------------------------------------------------
+// PR71b: Hook android.os.SystemProperties.native_get(String, String)
+// On Android 11+, apps can read properties via JNI without going through
+// __system_property_get. Detection apps use reflection to call native_get
+// directly, bypassing our libc hooks. This forces them through our spoofing.
+// -----------------------------------------------------------------------------
+static jstring my_SystemProperties_native_get(JNIEnv* env, jclass /*clazz*/,
+                                               jstring keyJ, jstring defJ) {
+    if (!keyJ) return defJ;
+    const char* key = env->GetStringUTFChars(keyJ, nullptr);
+    if (!key) return defJ;
+
+    char val[PROP_VALUE_MAX] = {0};
+    int ret = my_system_property_get(key, val);
+    env->ReleaseStringUTFChars(keyJ, key);
+
+    if (ret > 0) {
+        return env->NewStringUTF(val);
+    }
+    return defJ;
+}
+
+// -----------------------------------------------------------------------------
 // Hooks: Telephony (JNI Bridge)
 // -----------------------------------------------------------------------------
 jstring JNICALL my_getDeviceId(JNIEnv* env, jobject thiz, jint slotId) {
@@ -2714,6 +3026,17 @@ public:
         if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
 
+        // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
+        void* execve_func = DobbySymbolResolver("libc.so", "execve");
+        if (execve_func) DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
+
+        // PR71c: posix_spawn/posix_spawnp hooks — Android 10+ uses these instead of execve
+        // for Runtime.exec() and ProcessBuilder, completely bypassing our execve hook.
+        void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
+        if (spawn_func) DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
+        void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
+        if (spawnp_func) DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
+
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");
         if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
@@ -2798,6 +3121,12 @@ public:
                     setStr("ID",           bfp.buildId);
                     setStr("DISPLAY",      bfp.display);
 
+                    // PR71: Build.HOST y Build.USER leakeaban valores reales del hardware
+                    // (VD-Infos reportó HOST=m1-xm-ota-bd014.bj.idc.xiaomi.com, USER=builder)
+                    setStr("HOST",         bfp.buildHost);
+                    setStr("USER",         bfp.buildUser);
+                    setStr("BOOTLOADER",   bfp.bootloader);
+
                     // PR40 (Gemini BUG-C1-02): Ocultar firmas de Custom ROMs.
                     // LineageOS/PixelOS reportan "test-keys"/"userdebug" en Zygote static fields.
                     // Nota: bfp.tags y bfp.type ya existen en el struct (posiciones 11 y 12)
@@ -2843,6 +3172,23 @@ public:
                         // Nota: signature "I" = int. NO confundir con "J" (long) de Build.TIME.
                         jfieldID fid_sdk = env->GetStaticFieldID(build_version_class, "SDK_INT", "I");
                         if (fid_sdk) env->SetStaticIntField(build_version_class, fid_sdk, 30);
+                    }
+
+                    // PR71d: Sync http.agent — ART VM lo cachea al boot con Build.MODEL REAL
+                    // antes de postAppSpecialize. Lo sobreescribimos con el modelo del perfil.
+                    jclass sys_class = env->FindClass("java/lang/System");
+                    if (sys_class) {
+                        jmethodID setProp = env->GetStaticMethodID(sys_class, "setProperty",
+                            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+                        if (setProp) {
+                            char dalvik_ua[256];
+                            snprintf(dalvik_ua, sizeof(dalvik_ua),
+                                     "Dalvik/2.1.0 (Linux; U; Android %s; %s Build/%s)",
+                                     bfp.release, bfp.model, bfp.buildId);
+                            env->CallStaticObjectMethod(sys_class, setProp,
+                                env->NewStringUTF("http.agent"),
+                                env->NewStringUTF(dalvik_ua));
+                        }
                     }
                 }
             }
@@ -3000,6 +3346,17 @@ public:
         // DIRECTIVA ARQUITECTÓNICA: Para hookear métodos Java puros se requiere
         // DobbySymbolResolver sobre símbolos C++ mangleados en libandroid.so,
         // igual que el patrón exitoso de Sensor::getName()/getVendor().
+
+        // PR71b: Hook android.os.SystemProperties.native_get
+        // Closes the JNI-level property read bypass that skips libc hooks
+        {
+            JNINativeMethod propMethods[] = {
+                {"native_get", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                 (void*)my_SystemProperties_native_get},
+            };
+            g_api->hookJniNativeMethods(env, "android/os/SystemProperties", propMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
 
         LOGD("System Integrity loaded. Profile: %s | LTE: %s | GPS: %.4f,%.4f",
              g_currentProfileName.c_str(),

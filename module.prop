@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.50
-versionCode=12950
+version=v12.9.56
+versionCode=12956
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR70c — Companion config reader, memory mapping stealth, scope fix, custom app picker
+description=Total Invisibility (The Void). Zygisk module. PR71f — Close /proc/cpuinfo bypass via subprocess cat and fread memfd
