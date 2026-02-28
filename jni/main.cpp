@@ -36,6 +36,7 @@
 #include <link.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -467,9 +468,54 @@ int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
     }
     return orig_fstatat(dirfd, pathname, statbuf, flags);
 }
+// PR71f: Cached cpuinfo content — avoids regenerating the full string on every
+// fopen/cat call (some scanners read /proc/cpuinfo in tight loops).
+// Invalidated when g_configGeneration changes (profile switch / Destroy Identity).
+static std::string g_cpuinfoCached;
+static uint64_t g_cpuinfoCachedGen = 0;
+
+static const std::string& getCachedCpuInfo(const DeviceFingerprint& fp) {
+    if (g_cpuinfoCached.empty() || g_cpuinfoCachedGen != g_configGeneration) {
+        g_cpuinfoCached = generateMulticoreCpuInfo(fp);
+        g_cpuinfoCachedGen = g_configGeneration;
+    }
+    return g_cpuinfoCached;
+}
+
 FILE* my_fopen(const char* pathname, const char* mode) {
     if (!orig_fopen) { errno = ENOENT; return nullptr; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return nullptr; }
+
+    // PR71f: Serve faked files via memfd — immune to fread() bypassing read() hook.
+    // bionic's fread uses internal __sread which may do direct syscalls, skipping
+    // our Dobby hook on read(). memfd sidesteps this entirely: all FILE* ops
+    // (fread, fgets, fgetc) read from the memfd's kernel buffer directly.
+    if (pathname) {
+        const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+        if (fp_ptr) {
+            const char* content_ptr = nullptr;
+            size_t content_len = 0;
+            std::string tmp_content;
+
+            if (strstr(pathname, "/proc/cpuinfo")) {
+                const std::string& cached = getCachedCpuInfo(*fp_ptr);
+                content_ptr = cached.c_str();
+                content_len = cached.size();
+            }
+
+            if (content_ptr && content_len > 0) {
+                // MFD_CLOEXEC (0x0001): FD won't leak to child processes via exec
+                int mfd = syscall(__NR_memfd_create, "vfs", 0x0001u);
+                if (mfd >= 0) {
+                    write(mfd, content_ptr, content_len);
+                    lseek(mfd, 0, SEEK_SET);
+                    FILE* f = fdopen(mfd, mode);
+                    if (f) return f;
+                    close(mfd);
+                }
+            }
+        }
+    }
     return orig_fopen(pathname, mode);
 }
 
@@ -2489,10 +2535,10 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
 // before the real binary ever runs.
 // -----------------------------------------------------------------------------
 
-// Helper: handles getprop interception for both posix_spawn and posix_spawnp.
-// If argv[0] is getprop, forks a child that writes spoofed output and returns true.
-// The caller should set *pid to the child PID and return 0.
-// If not getprop, returns false and the caller should fall through to the original.
+// Helper: handles subprocess interception for posix_spawn/posix_spawnp/execve.
+// Intercepts: getprop (spoofed properties), cat (faked VFS files like /proc/cpuinfo).
+// Returns true if the command was intercepted (child forked with spoofed output).
+// Returns false if the caller should fall through to the original syscall.
 static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
                                pid_t *pid) {
     if (!resolved_path || !argv) return false;
@@ -2500,6 +2546,32 @@ static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
     // Extract basename
     const char* base = strrchr(resolved_path, '/');
     base = base ? base + 1 : resolved_path;
+
+    // PR71f: Intercept "cat <path>" for files we fake (cpuinfo, version, etc.)
+    // Without this, `Runtime.exec("cat /proc/cpuinfo")` spawns a child that reads
+    // the real kernel file — our Dobby hooks are destroyed by the execve image replace.
+    if (strcmp(base, "cat") == 0 && argv[1] && argv[1][0] != '\0') {
+        const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
+        if (fp_ptr) {
+            const char* target = argv[1];
+            const std::string* content = nullptr;
+
+            if (strstr(target, "/proc/cpuinfo")) {
+                content = &getCachedCpuInfo(*fp_ptr);
+            }
+
+            if (content && !content->empty()) {
+                pid_t child = fork();
+                if (child < 0) return false;
+                if (child == 0) {
+                    write(STDOUT_FILENO, content->c_str(), content->size());
+                    _exit(0);
+                }
+                if (pid) *pid = child;
+                return true;
+            }
+        }
+    }
 
     if (strcmp(base, "getprop") != 0) return false;
 

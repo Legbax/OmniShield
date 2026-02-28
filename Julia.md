@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v12.9.55 (The Void)
+# Julia.md - Vortex Omni-Shield v12.9.56 (The Void)
 
 **Fecha:** 28 de febrero de 2026 (Estado Actual)
-**Agente:** Claude (PR71e)
-**Versión:** v12.9.55
+**Agente:** Claude (PR71f)
+**Versión:** v12.9.56
 
 ## 🌀 Filosofía: Virtualización Total (The Void)
 El Proyecto Omni-Shield ha alcanzado su estado final: "The Void".
@@ -62,6 +62,16 @@ jitter=true
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
 
 ### Registro de Actualizaciones
+
+**Fecha y agente:** 28 de febrero de 2026, Claude (PR71f — Cerrar bypass de /proc/cpuinfo vía subprocess cat y fread)
+**Resumen de cambios:** v12.9.56 — VD-Infos reportaba `Hardware: MT6769T` real en ambas secciones CpuInfo_CAT y CpuInfo_FILE.
+- **Fix 16 — Interceptar `cat /proc/cpuinfo` en posix_spawn/execve (main.cpp):** El hook de posix_spawn/execve solo interceptaba `getprop`. Cuando VD-Infos ejecutaba `Runtime.exec("cat /proc/cpuinfo")`, el child process corría el binario real de `cat` que leía `/proc/cpuinfo` directamente del kernel — nuestros hooks Dobby se destruyen con el image replace de execve. **Fix:** Extender `handleGetpropSpawn()` para detectar `cat` con argumentos de archivos que ya fake-amos. Cuando el target es `/proc/cpuinfo`, fork un child que escribe el contenido de `getCachedCpuInfo()` a stdout y hace `_exit(0)`. El binario real de cat nunca ejecuta.
+- **Fix 17 — Servir /proc/cpuinfo fake desde fopen via memfd (main.cpp):** El pipeline openat→read cacheaba contenido fake en `g_fdContentCache`, pero `fread()` de bionic puede usar `__sread` con syscalls directos que bypasean nuestro hook de `read()`. **Fix:** `my_fopen` ahora detecta `/proc/cpuinfo` y crea un `memfd` (con `MFD_CLOEXEC`) conteniendo el cpuinfo fake. `fdopen(memfd)` retorna un FILE* que cualquier operación (`fread`/`fgets`/`fgetc`) lee directamente del buffer kernel — completamente inmune a bypasses de bionic.
+- **Optimización — Cache de cpuinfo por proceso:** `getCachedCpuInfo()` genera el string de cpuinfo UNA vez y lo cachea con invalidación por `g_configGeneration`. Scanners que abren `/proc/cpuinfo` repetidamente en loop no regeneran el contenido.
+**Prompt del usuario:** Gemini sugirió hookear glGetString y /proc/cpuinfo. Análisis reveló que glGetString YA está implementado. El problema real era que `cat /proc/cpuinfo` y `fread("/proc/cpuinfo")` bypasseaban los hooks existentes.
+**Nota personal para el siguiente agente:** glGetString (línea 2150), eglQueryString (línea 479), y generateMulticoreCpuInfo (línea 695) ya existían ANTES de este PR. Este PR solo cierra los bypasses de subprocess `cat` y `fread` bionic. Si VD-Infos sigue mostrando Hardware real, verificar que el memfd se crea correctamente (kernel >=3.17 para memfd_create) y que libGLESv2.so está cargada al momento del hook (DobbySymbolResolver podría retornar null si no está en memoria).
+
+---
 
 **Fecha y agente:** 28 de febrero de 2026, Claude (PR71e — Fix cascading spoofing failure when Dobby fails to hook __system_property_get)
 **Resumen de cambios:** v12.9.55 — Corrección CRÍTICA: todas las propiedades nativas filtraban valores reales del dispositivo.
