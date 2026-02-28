@@ -36,11 +36,13 @@ jobs:
 
     - name: Package Module
       run: |
-        mkdir -p dist/zygisk
+        mkdir -p dist/zygisk dist/bin
         cp build/libomnishield.so dist/zygisk/arm64-v8a.so
         cp module.prop dist/
         cp post-fs-data.sh dist/
         cp service.sh dist/
+        cp proxy_manager.sh dist/
+        cp bin/download_tun2socks.sh dist/bin/
         cp -r webroot dist/
         cd dist
         zip -r omnishield-${{ steps.version.outputs.VERSION }}-release.zip .
