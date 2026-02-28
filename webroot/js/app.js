@@ -63,12 +63,15 @@ async function readConfig() {
 
 async function writeConfig(cfg) {
   await ksu_exec(`mkdir -p /data/adb/.omni_data`);
-  const echos = Object.entries(cfg).map(([k, v]) => {
-    const safe = `${k}=${v}`.replace(/'/g, "'\\''");
-    return `echo '${safe}'`;
-  });
-  const r = await ksu_exec(`{ ${echos.join('; ')}; } > "${CFG_PATH}" && chmod 644 "${CFG_PATH}"`);
-  return r.errno === 0;
+  const args = Object.entries(cfg).map(([k, v]) =>
+    `'${`${k}=${v}`.replace(/'/g, "'\\''")}'`
+  );
+  const r = await ksu_exec(`printf '%s\\n' ${args.join(' ')} > ${CFG_PATH}`);
+  await ksu_exec(`chmod 644 ${CFG_PATH}`);
+  if (r.errno === 0) return true;
+  // Fallback: errno may be unreliable — verify write by reading back
+  const check = await ksu_exec(`cat ${CFG_PATH}`);
+  return check.stdout.includes('master_seed=');
 }
 
 // ─── App state ──────────────────────────────────────────────────────
