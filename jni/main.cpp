@@ -468,6 +468,9 @@ int my_fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
     }
     return orig_fstatat(dirfd, pathname, statbuf, flags);
 }
+// Forward declaration — defined at ~line 744, needed here for getCachedCpuInfo
+std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp);
+
 // PR71f: Cached cpuinfo content — avoids regenerating the full string on every
 // fopen/cat call (some scanners read /proc/cpuinfo in tight loops).
 // Invalidated when g_configGeneration changes (profile switch / Destroy Identity).
@@ -2900,6 +2903,17 @@ public:
                     }
                 } else {
                     LOGD("[scope] NO scoped_apps key in config");
+                }
+                // PR71g: WebView spoof toggle — hook WebView processes without
+                // them being in scoped_apps. This avoids the Destroy Identity
+                // crash (which force-stops + wipes all scoped_apps, killing the
+                // WebView process that hosts the WebUI).
+                if (!g_isTargetApp && g_config.count("webview_spoof") &&
+                    g_config["webview_spoof"] == "true") {
+                    if (proc.find("webview") != std::string::npos) {
+                        g_isTargetApp = true;
+                        LOGD("[scope] WEBVIEW MATCH: '%s' → hooking (webview_spoof=true)", proc.c_str());
+                    }
                 }
                 if (!g_isTargetApp) {
                     LOGD("[scope] '%s' not in scope → DLCLOSE", proc.c_str());

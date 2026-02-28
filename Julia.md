@@ -1,8 +1,8 @@
-# Julia.md - Vortex Omni-Shield v12.9.56 (The Void)
+# Julia.md - Vortex Omni-Shield v12.9.57 (The Void)
 
 **Fecha:** 28 de febrero de 2026 (Estado Actual)
-**Agente:** Claude (PR71f)
-**Versión:** v12.9.56
+**Agente:** Claude (PR71g)
+**Versión:** v12.9.57
 
 ## 🌀 Filosofía: Virtualización Total (The Void)
 El Proyecto Omni-Shield ha alcanzado su estado final: "The Void".
@@ -62,6 +62,15 @@ jitter=true
 4.  **Nota personal para el siguiente agente:** Contexto o advertencias para quien tome el relevo.
 
 ### Registro de Actualizaciones
+
+**Fecha y agente:** 28 de febrero de 2026, Claude (PR71g — Toggle dedicado WebView Spoofing para evitar crash en Destroy Identity)
+**Resumen de cambios:** v12.9.57 — Destroy Identity crasheaba la WebUI porque `com.android.webview` estaba en el scope y se force-stoppaba/wipeaba junto con las demás apps. La WebUI corre DENTRO de un WebView, así que matar el proceso de WebView mata la interfaz.
+- **Fix 18 — Toggle WebView Spoofing en WebUI (index.html + app.js):** Nuevo toggle dedicado "WebView Spoofing" en Advanced → Settings, visualmente destacado con borde y fondo. Persiste como `webview_spoof=true/false` en `.identity.cfg`, independiente de `scoped_apps`. El usuario desactiva el toggle antes de Destroy Identity para evitar el crash.
+- **Fix 19 — Hook WebView sin estar en scoped_apps (main.cpp):** En `preAppSpecialize`, después del loop de `scoped_apps`, se chequea `webview_spoof=true` en config. Si está activo y el proceso contiene "webview", se activa el hooking (`g_isTargetApp = true`). Esto permite hookear WebView para User-Agent/identity spoofing sin que Destroy Identity lo toque.
+- **Fix de compilación — Forward declaration de generateMulticoreCpuInfo:** El `getCachedCpuInfo` helper de PR71f estaba antes de la definición de `generateMulticoreCpuInfo`. Agregada forward declaration.
+**Prompt del usuario:** Destroy Identity crashea porque detiene com.android.webview (donde corre la WebUI). Solución: quitar WebView del scope y agregar toggle dedicado.
+
+---
 
 **Fecha y agente:** 28 de febrero de 2026, Claude (PR71f — Cerrar bypass de /proc/cpuinfo vía subprocess cat y fread)
 **Resumen de cambios:** v12.9.56 — VD-Infos reportaba `Hardware: MT6769T` real en ambas secciones CpuInfo_CAT y CpuInfo_FILE.
