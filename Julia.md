@@ -1,7 +1,7 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.58 (The Void)
-**Last updated:** 2026-03-01 (PR72-QA: VD Info leak fixes)
+**Version:** v12.9.60 (The Void)
+**Last updated:** 2026-03-01 (PR73b: `__system_property_read` hook, os.version MIUI fix, uname shell wrapper, Dobby diagnostics)
 
 ---
 
@@ -13,7 +13,7 @@ OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the 
 
 | Layer | What | How |
 |-------|------|-----|
-| 1. Properties | `__system_property_get`, `__system_property_read_callback`, `SystemProperties.native_get` JNI | 168+ keys mapped to profile fields |
+| 1. Properties | `__system_property_get`, `__system_property_read_callback`, `__system_property_read`, `SystemProperties.native_get` JNI | 168+ keys mapped to profile fields |
 | 2. VFS | `openat`, `read`, `fopen` (memfd for `/proc/cpuinfo`) | Fake `/proc/{cpuinfo,version,cmdline,status}`, `/sys/{cpu,battery,thermal,net}` |
 | 3. Subprocess | `execve`, `posix_spawn`, `posix_spawnp` | Emulate `getprop` and `cat /proc/cpuinfo` output in forked child |
 | 4. JNI Fields | `Build.*`, `Build.VERSION.*` static fields via `SetStaticObjectField` | 25+ fields overwritten in `postAppSpecialize` |
@@ -210,7 +210,7 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 **libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
 **libc (Process):** execve, posix_spawn, posix_spawnp
 **libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
-**libc (Properties):** __system_property_get, __system_property_read_callback
+**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_read
 **Stealth:** dl_iterate_phdr
 **Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
 **Crypto:** SSL_CTX_set_ciphersuites, SSL_set1_tls13_ciphersuites, SSL_set_ciphersuites, SSL_set_cipher_list (libssl)
@@ -226,6 +226,7 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 **Sensor (16):** getMaximumRange, getResolution, getPower, getMinDelay, getMaxDelay, getVersion, getFifoMaxEventCount, getFifoReservedEventCount, getName, getVendor, getStringType (×8 + custom sensor filter via getSensorList)
 **Network (8):** getType, getSubtype, getExtraInfo, isConnected, isAvailable, isRoaming, isWifiEnabled, startScan
 **SystemProperties (1):** native_get
+**Kernel (1):** uname (libcore/io/Linux — intercepts android.system.Os.uname())
 
 ---
 
@@ -292,6 +293,8 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
+| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4), `dlsym(RTLD_DEFAULT)` fallback for execve/posix_spawn/posix_spawnp — DobbySymbolResolver fails on some Bionic builds (Fix5), `syscall(__NR_execve)` + `fork+execve` fallback when DobbyHook returns `orig=0x0` from PLT stubs (Fix6), `__system_property_read` dlsym fallback + diagnostic (Fix7a), posix_spawn fallback now calls hooked `execve()` instead of `syscall(__NR_execve)` which bypassed interception (Fix7b), LOGD→LOGE for hook entry diagnostics (Fix7c) |
+| 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
 | 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |
 | 71g | v12.9.57 | WebView spoof toggle (separate from scope to avoid Destroy Identity crash) |
