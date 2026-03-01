@@ -484,16 +484,14 @@ static std::vector<ElfEntry> enumerateLoadedElfs() {
         if (n >= 8 && strstr(path, ".so")) {
             // Fix9: Skip our own module to prevent self-referential PLT hooks.
             if (isHiddenPath(path)) continue;
-            // Fix10: Skip /apex/ paths (bionic libc.so and libart.so live here).
-            // These 200+ ELFs cause pltHookCommit() to return false (they often
-            // lack PLT entries for posix_spawnp / __system_property_read), which
-            // then triggers the Dobby fallback.  When PLT hooks and Dobby hooks
-            // both target the same function, orig_* ends up pointing to the
-            // already-hooked function address → infinite recursion → heap corruption
-            // in jemalloc (SIGSEGV SEGV_ACCERR, "beginning of crash" in logcat).
-            // The subprocess hooks we care about live in /system/lib64/ and /data/,
-            // NOT in /apex/; skipping /apex/ has zero impact on spoofing coverage.
-            if (strstr(path, "/apex/")) continue;
+            // Fix11: /apex/ filter REMOVED. Fix10 added this filter to prevent
+            // pltHookCommit()=false from triggering the Dobby fallback (which caused
+            // double-hook infinite recursion → SIGSEGV). But Fix10 also removed the
+            // Dobby fallback itself, making this filter unnecessary and harmful:
+            // it excluded libjavacore.so (/apex/com.android.art/lib64/) which is where
+            // ProcessBuilder.start() calls posix_spawnp() — breaking ALL subprocess
+            // interception. pltHookCommit() returning false (partial success) is now
+            // harmless since the return value is ignored.
             dev_t dev = makedev(dev_maj, dev_min);
             auto key = std::make_pair((unsigned int)dev, ino);
             if (seen.insert(key).second)
@@ -2824,6 +2822,11 @@ static std::string generateSpoofedContent(const char *resolved_path,
                 const std::string& cpuinfo = getCachedCpuInfo(*fp_ptr);
                 if (!cpuinfo.empty()) return cpuinfo;
             }
+            // Fix11: Intercept cat /proc/version subprocess
+            if (strstr(target, "/proc/version")) {
+                std::string kv = getSpoofedKernelVersion();
+                return "Linux version " + kv + " (build@server) (gcc) #1 SMP PREEMPT\n";
+            }
         }
         return ""; // cat of non-intercepted file
     }
@@ -3276,7 +3279,14 @@ static bool installPltHooks() {
     // The real originals were already set above via dlsym.
     void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr;
 
-    LOGE("Fix9: Registering PLT hooks across %zu ELFs", elfs.size());
+    // Fix11: Pre-resolve glGetString for PLT hook fallback (GPU spoofing).
+    // Dobby hook on glGetString may fail if libGLESv2.so wasn't loaded at
+    // hook time. PLT hooks provide a second layer of coverage.
+    void *d5 = nullptr;
+    if (!orig_glGetString)
+        orig_glGetString = reinterpret_cast<decltype(orig_glGetString)>(dlsym(RTLD_DEFAULT, "glGetString"));
+
+    LOGE("Fix11: Registering PLT hooks across %zu ELFs (incl. /apex/)", elfs.size());
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "execve",
                                (void*)my_execve, &d1);
@@ -3286,6 +3296,8 @@ static bool installPltHooks() {
                                (void*)my_posix_spawnp, &d3);
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
                                (void*)my_system_property_read, &d4);
+        g_api->pltHookRegister(elf.dev, elf.inode, "glGetString",
+                               (void*)my_glGetString, &d5);
     }
 
     bool ok = g_api->pltHookCommit();
@@ -3743,14 +3755,21 @@ public:
         if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
 
         // GPU Hooks
+        // Fix11: Force-load GPU libraries — on some ROMs (MIUI, etc.) they are
+        // lazy-loaded after postAppSpecialize, causing DobbySymbolResolver to
+        // return NULL and leaving GL_RENDERER/GL_VENDOR unspoofed.
+        dlopen("libGLESv2.so", RTLD_NOW);
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
+        else LOGE("Fix11: glGetString not resolved after dlopen");
 
         // Vulkan
+        dlopen("libvulkan.so", RTLD_NOW);
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
         if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
 
         // OpenCL
+        dlopen("libOpenCL.so", RTLD_NOW);
         void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
         if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
