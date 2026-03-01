@@ -37,6 +37,8 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <set>              // Fix8: deduplicar ELFs en PLT hooks
+#include <sys/sysmacros.h>  // Fix8: makedev()
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -457,6 +459,37 @@ static void remapModuleMemory() {
         }
     }
     fclose(fp);
+}
+
+// Fix8: Parsear /proc/self/maps para obtener (dev, inode) de cada .so cargada.
+// Usado por installPltHooks() para registrar PLT hooks en todas las librerías.
+struct ElfEntry { dev_t dev; ino_t inode; };
+
+static std::vector<ElfEntry> enumerateLoadedElfs() {
+    std::vector<ElfEntry> result;
+    std::set<std::pair<unsigned int, unsigned long>> seen;
+
+    FILE *fp = fopen("/proc/self/maps", "re");
+    if (!fp) return result;
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long addr_s, addr_e, offset, ino;
+        unsigned int dev_maj, dev_min;
+        char perms[5] = {}, path[256] = {};
+
+        int n = sscanf(line, "%lx-%lx %4s %lx %x:%x %lu %255s",
+                        &addr_s, &addr_e, perms, &offset, &dev_maj, &dev_min, &ino, path);
+        if (n < 7 || ino == 0) continue;
+        if (n >= 8 && strstr(path, ".so")) {
+            dev_t dev = makedev(dev_maj, dev_min);
+            auto key = std::make_pair((unsigned int)dev, ino);
+            if (seen.insert(key).second)
+                result.push_back({dev, (ino_t)ino});
+        }
+    }
+    fclose(fp);
+    return result;
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -2530,6 +2563,22 @@ int my_system_property_read(const prop_info *pi, char *name, char *value) {
     char real_value[PROP_VALUE_MAX] = {0};
     if (orig_system_property_read) {
         ret = orig_system_property_read(pi, real_name, real_value);
+    } else if (orig_system_property_read_callback) {
+        // Fix8: orig_system_property_read is NULL (Dobby trampoline failed on thin
+        // syscall wrapper). Use the working __system_property_read_callback as fallback
+        // to extract property name and value from the prop_info pointer.
+        struct ReadCtx { char n[PROP_NAME_MAX+1]; char v[PROP_VALUE_MAX]; uint32_t s; };
+        ReadCtx ctx = {};
+        orig_system_property_read_callback(pi,
+            [](void* cookie, const char* n, const char* v, uint32_t s) {
+                auto* c = static_cast<ReadCtx*>(cookie);
+                if (n) strncpy(c->n, n, PROP_NAME_MAX);
+                if (v) strncpy(c->v, v, PROP_VALUE_MAX - 1);
+                c->s = s;
+            }, &ctx);
+        strncpy(real_name, ctx.n, PROP_NAME_MAX);
+        strncpy(real_value, ctx.v, PROP_VALUE_MAX - 1);
+        ret = (int)ctx.s;
     }
 
     // Copy name to caller's buffer
@@ -3106,6 +3155,49 @@ static zygisk::Api *g_api = nullptr;  // PR56: Api global guardada en onLoad
 static JavaVM *g_jvm = nullptr;       // PR55: guardar JavaVM en lugar de JNIEnv raw
 static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en preAppSpecialize
 
+// Fix8: Forward declarations for PLT hook targets (defined earlier in the file)
+int my_system_property_read(const prop_info *pi, char *name, char *value);
+static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
+static int my_posix_spawn(pid_t *pid, const char *path,
+                          const void *file_actions, const void *attrp,
+                          char *const argv[], char *const envp[]);
+static int my_posix_spawnp(pid_t *pid, const char *file,
+                           const void *file_actions, const void *attrp,
+                           char *const argv[], char *const envp[]);
+
+// Fix8: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
+// En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
+// thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
+// PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
+static bool installPltHooks() {
+    if (!g_api) return false;
+
+    auto elfs = enumerateLoadedElfs();
+    if (elfs.empty()) {
+        LOGE("Fix8: No ELFs found in /proc/self/maps");
+        return false;
+    }
+
+    LOGE("Fix8: Registering PLT hooks across %zu ELFs", elfs.size());
+
+    for (const auto& elf : elfs) {
+        g_api->pltHookRegister(elf.dev, elf.inode, "execve",
+                               (void*)my_execve, (void**)&orig_execve);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                               (void*)my_posix_spawn, (void**)&orig_posix_spawn);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                               (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
+                               (void*)my_system_property_read, (void**)&orig_system_property_read);
+    }
+
+    bool ok = g_api->pltHookCommit();
+    LOGE("Fix8: pltHookCommit()=%s orig_execve=%p orig_spawn=%p orig_spawnp=%p orig_prop_read=%p",
+         ok ? "true" : "false",
+         orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read);
+    return ok;
+}
+
 class OmniModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
@@ -3240,18 +3332,44 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
-        // PR73b-Fix1 + Fix7a: Hook __system_property_read() — API legacy (deprecated API 26).
-        // VD Info uses __system_property_find() + __system_property_read() to read
-        // properties directly from shared memory, completely bypassing our hooks on
-        // __system_property_get and __system_property_read_callback.
-        // Fix7a: Added dlsym fallback (same issue as execve) + diagnostic logging.
-        void* sysprop_read_func = DobbySymbolResolver("libc.so", "__system_property_read");
-        if (!sysprop_read_func) sysprop_read_func = dlsym(RTLD_DEFAULT, "__system_property_read");
-        if (sysprop_read_func) {
-            int dret = DobbyHook(sysprop_read_func, (void*)my_system_property_read, (void**)&orig_system_property_read);
-            LOGE("PR73b: __system_property_read hook: sym=%p ret=%d orig=%p", sysprop_read_func, dret, orig_system_property_read);
-        } else {
-            LOGE("PR73b: __system_property_read symbol NOT FOUND (DobbySymbolResolver + dlsym)");
+        // Fix8: PLT hooks para funciones donde Dobby inline hooks fallan.
+        // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
+        // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
+        // DobbyHook retorna ret=0 (éxito) pero orig=0x0 Y los handlers nunca se invocan.
+        // PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
+        bool pltOk = installPltHooks();
+
+        if (!pltOk) {
+            // Fallback: Dobby hooks (pueden fallar silenciosamente en funciones pequeñas)
+            LOGE("Fix8: PLT hooks failed, falling back to Dobby for prop_read/execve/posix_spawn");
+
+            void* sysprop_read_func = DobbySymbolResolver("libc.so", "__system_property_read");
+            if (!sysprop_read_func) sysprop_read_func = dlsym(RTLD_DEFAULT, "__system_property_read");
+            if (sysprop_read_func) {
+                int dret = DobbyHook(sysprop_read_func, (void*)my_system_property_read, (void**)&orig_system_property_read);
+                LOGE("Fix8-fallback: prop_read: sym=%p ret=%d orig=%p", sysprop_read_func, dret, orig_system_property_read);
+            }
+
+            void* execve_func = DobbySymbolResolver("libc.so", "execve");
+            if (!execve_func) execve_func = dlsym(RTLD_DEFAULT, "execve");
+            if (execve_func) {
+                int dret = DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
+                LOGE("Fix8-fallback: execve: sym=%p ret=%d orig=%p", execve_func, dret, orig_execve);
+            }
+
+            void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
+            if (!spawn_func) spawn_func = dlsym(RTLD_DEFAULT, "posix_spawn");
+            if (spawn_func) {
+                int dret = DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
+                LOGE("Fix8-fallback: posix_spawn: sym=%p ret=%d orig=%p", spawn_func, dret, orig_posix_spawn);
+            }
+
+            void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
+            if (!spawnp_func) spawnp_func = dlsym(RTLD_DEFAULT, "posix_spawnp");
+            if (spawnp_func) {
+                int dret = DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
+                LOGE("Fix8-fallback: posix_spawnp: sym=%p ret=%d orig=%p", spawnp_func, dret, orig_posix_spawnp);
+            }
         }
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
@@ -3297,41 +3415,6 @@ public:
         void* dl_iter_func = DobbySymbolResolver("libc.so", "dl_iterate_phdr");
         if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
-
-        // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
-        // PR73b-Fix2: Added diagnostic logging to verify Dobby hooks install correctly.
-        // PR73b-Fix5: DobbySymbolResolver fails for execve/posix_spawn on some Bionic builds
-        // (symbol not in .dynsym or linker namespace restriction). Fallback to dlsym(RTLD_DEFAULT).
-        void* execve_func = DobbySymbolResolver("libc.so", "execve");
-        if (!execve_func) execve_func = dlsym(RTLD_DEFAULT, "execve");
-        if (execve_func) {
-            int dret = DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
-            LOGE("PR73b: execve hook: sym=%p ret=%d orig=%p%s", execve_func, dret, orig_execve,
-                 orig_execve ? "" : " [WARN: using syscall(__NR_execve) fallback]");
-        } else {
-            LOGE("PR73b: execve symbol NOT FOUND (DobbySymbolResolver + dlsym)");
-        }
-
-        // PR71c: posix_spawn/posix_spawnp hooks — Android 10+ uses these instead of execve
-        // for Runtime.exec() and ProcessBuilder, completely bypassing our execve hook.
-        void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
-        if (!spawn_func) spawn_func = dlsym(RTLD_DEFAULT, "posix_spawn");
-        if (spawn_func) {
-            int dret = DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
-            LOGE("PR73b: posix_spawn hook: sym=%p ret=%d orig=%p%s", spawn_func, dret, orig_posix_spawn,
-                 orig_posix_spawn ? "" : " [WARN: using fork+execve fallback]");
-        } else {
-            LOGE("PR73b: posix_spawn symbol NOT FOUND (DobbySymbolResolver + dlsym)");
-        }
-        void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
-        if (!spawnp_func) spawnp_func = dlsym(RTLD_DEFAULT, "posix_spawnp");
-        if (spawnp_func) {
-            int dret = DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
-            LOGE("PR73b: posix_spawnp hook: sym=%p ret=%d orig=%p%s", spawnp_func, dret, orig_posix_spawnp,
-                 orig_posix_spawnp ? "" : " [WARN: using fork+execve fallback]");
-        } else {
-            LOGE("PR73b: posix_spawnp symbol NOT FOUND (DobbySymbolResolver + dlsym)");
-        }
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");

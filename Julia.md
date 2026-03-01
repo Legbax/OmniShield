@@ -119,6 +119,12 @@ These rules are derived from past crashes and regressions. Violating any will ca
 
 7. **Never hook both `open` and `openat`**. Bionic's `open()` calls `openat()` internally → infinite recursion. Only hook `openat`. Use `orig_openat(AT_FDCWD, ...)` as terminal in `my_open`.
 
+### PLT Hooks (Fix8)
+
+7b. **`execve`, `posix_spawn`, `posix_spawnp`, `__system_property_read` use Zygisk PLT hooks**, not Dobby. On aarch64 Bionic these are thin syscall wrappers (~4-8 instructions) — too small for Dobby's 12-byte trampoline. DobbyHook returns `ret=0` but `orig=0x0` and handlers never trigger. PLT hooks modify GOT pointers (always 8 bytes) in calling libraries via `pltHookRegister`/`pltHookCommit`. Dobby is only used as fallback if PLT hooks are unavailable.
+
+7c. **`my_system_property_read` has callback fallback**: when `orig_system_property_read` is NULL (Dobby trampoline failed), uses `orig_system_property_read_callback` to extract property name/value from `prop_info` pointer.
+
 ### Property Spoofing
 
 8. **`my_system_property_get` must NEVER early-return** before the spoofing logic. It's the central hub — `my_system_property_read_callback` and `my_SystemProperties_native_get` both depend on it. If `orig_system_property_get` is null, initialize `value[0] = '\0'` and continue to profile logic.
@@ -205,12 +211,18 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 
 ## 7. Hooked Functions Catalog
 
-### Dobby Native Hooks (~37)
+### Zygisk PLT Hooks (Fix8, primary for thin syscall wrappers)
+
+**libc (Process):** execve, posix_spawn, posix_spawnp
+**libc (Properties):** __system_property_read
+
+> These 4 functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Dobby fallback is retained if `pltHookCommit()` fails.
+
+### Dobby Native Hooks (~33, remaining)
 
 **libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
-**libc (Process):** execve, posix_spawn, posix_spawnp
 **libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
-**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_read
+**libc (Properties):** __system_property_get, __system_property_read_callback
 **Stealth:** dl_iterate_phdr
 **Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
 **Crypto:** SSL_CTX_set_ciphersuites, SSL_set1_tls13_ciphersuites, SSL_set_ciphersuites, SSL_set_cipher_list (libssl)
@@ -293,7 +305,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
-| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4), `dlsym(RTLD_DEFAULT)` fallback for execve/posix_spawn/posix_spawnp — DobbySymbolResolver fails on some Bionic builds (Fix5), `syscall(__NR_execve)` + `fork+execve` fallback when DobbyHook returns `orig=0x0` from PLT stubs (Fix6), `__system_property_read` dlsym fallback + diagnostic (Fix7a), posix_spawn fallback now calls hooked `execve()` instead of `syscall(__NR_execve)` which bypassed interception (Fix7b), LOGD→LOGE for hook entry diagnostics (Fix7c) |
+| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4), `dlsym(RTLD_DEFAULT)` fallback for execve/posix_spawn/posix_spawnp — DobbySymbolResolver fails on some Bionic builds (Fix5), `syscall(__NR_execve)` + `fork+execve` fallback when DobbyHook returns `orig=0x0` from PLT stubs (Fix6), `__system_property_read` dlsym fallback + diagnostic (Fix7a), posix_spawn fallback now calls hooked `execve()` instead of `syscall(__NR_execve)` which bypassed interception (Fix7b), LOGD→LOGE for hook entry diagnostics (Fix7c), **Zygisk PLT hooks replace Dobby for execve/posix_spawn/posix_spawnp/__system_property_read** — Dobby ret=0 + orig=0x0 + handlers never invoked confirms wrong-address hooking on aarch64 thin syscall wrappers; PLT hooks modify GOT pointers (8 bytes, always patchable) via `pltHookRegister`/`pltHookCommit`; `my_system_property_read` callback-based fallback when orig is NULL (Fix8) |
 | 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
 | 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |
