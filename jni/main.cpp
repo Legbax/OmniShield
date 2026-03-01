@@ -2705,11 +2705,10 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
         }
     }
 
-    if (!orig_execve) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return orig_execve(pathname, argv, envp);
+    // PR73b-Fix6: When orig_execve is NULL (PLT stub — Dobby can't build trampoline),
+    // fall back to raw syscall. This is the standard pattern for Bionic on aarch64.
+    if (orig_execve) return orig_execve(pathname, argv, envp);
+    return syscall(__NR_execve, pathname, argv, envp);
 }
 
 // -----------------------------------------------------------------------------
@@ -2853,7 +2852,19 @@ static int my_posix_spawn(pid_t *pid, const char *path,
     LOGD("PR73b: my_posix_spawn called: %s", path ? path : "null");
     if (handleGetpropSpawn(path, argv, pid)) return 0;
 
-    if (!orig_posix_spawn) { errno = ENOSYS; return ENOSYS; }
+    // PR73b-Fix6: When orig is NULL (PLT stub), posix_spawn can't be called directly
+    // (no syscall equivalent). Fall back to fork+execve via syscall. The child's
+    // execve call will be intercepted by our hook if it matches getprop/uname/cat.
+    if (!orig_posix_spawn) {
+        pid_t child = fork();
+        if (child == -1) return errno;
+        if (child == 0) {
+            syscall(__NR_execve, path, argv, envp);
+            _exit(127);
+        }
+        if (pid) *pid = child;
+        return 0;
+    }
     return orig_posix_spawn(pid, path, file_actions, attrp, argv, envp);
 }
 
@@ -2865,7 +2876,17 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
     // For getprop, the basename check in handleGetpropSpawn covers this
     if (file && handleGetpropSpawn(file, argv, pid)) return 0;
 
-    if (!orig_posix_spawnp) { errno = ENOSYS; return ENOSYS; }
+    // PR73b-Fix6: Same fork+execve fallback as posix_spawn.
+    if (!orig_posix_spawnp) {
+        pid_t child = fork();
+        if (child == -1) return errno;
+        if (child == 0) {
+            syscall(__NR_execve, file, argv, envp);
+            _exit(127);
+        }
+        if (pid) *pid = child;
+        return 0;
+    }
     return orig_posix_spawnp(pid, file, file_actions, attrp, argv, envp);
 }
 
@@ -3277,7 +3298,8 @@ public:
         if (!execve_func) execve_func = dlsym(RTLD_DEFAULT, "execve");
         if (execve_func) {
             int dret = DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
-            LOGE("PR73b: execve hook: sym=%p ret=%d orig=%p", execve_func, dret, orig_execve);
+            LOGE("PR73b: execve hook: sym=%p ret=%d orig=%p%s", execve_func, dret, orig_execve,
+                 orig_execve ? "" : " [WARN: using syscall(__NR_execve) fallback]");
         } else {
             LOGE("PR73b: execve symbol NOT FOUND (DobbySymbolResolver + dlsym)");
         }
@@ -3288,7 +3310,8 @@ public:
         if (!spawn_func) spawn_func = dlsym(RTLD_DEFAULT, "posix_spawn");
         if (spawn_func) {
             int dret = DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
-            LOGE("PR73b: posix_spawn hook: sym=%p ret=%d orig=%p", spawn_func, dret, orig_posix_spawn);
+            LOGE("PR73b: posix_spawn hook: sym=%p ret=%d orig=%p%s", spawn_func, dret, orig_posix_spawn,
+                 orig_posix_spawn ? "" : " [WARN: using fork+execve fallback]");
         } else {
             LOGE("PR73b: posix_spawn symbol NOT FOUND (DobbySymbolResolver + dlsym)");
         }
@@ -3296,7 +3319,8 @@ public:
         if (!spawnp_func) spawnp_func = dlsym(RTLD_DEFAULT, "posix_spawnp");
         if (spawnp_func) {
             int dret = DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
-            LOGE("PR73b: posix_spawnp hook: sym=%p ret=%d orig=%p", spawnp_func, dret, orig_posix_spawnp);
+            LOGE("PR73b: posix_spawnp hook: sym=%p ret=%d orig=%p%s", spawnp_func, dret, orig_posix_spawnp,
+                 orig_posix_spawnp ? "" : " [WARN: using fork+execve fallback]");
         } else {
             LOGE("PR73b: posix_spawnp symbol NOT FOUND (DobbySymbolResolver + dlsym)");
         }

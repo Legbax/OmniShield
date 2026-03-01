@@ -293,7 +293,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
-| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4), `dlsym(RTLD_DEFAULT)` fallback for execve/posix_spawn/posix_spawnp — DobbySymbolResolver fails on some Bionic builds (Fix5) |
+| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4), `dlsym(RTLD_DEFAULT)` fallback for execve/posix_spawn/posix_spawnp — DobbySymbolResolver fails on some Bionic builds (Fix5), `syscall(__NR_execve)` + `fork+execve` fallback when DobbyHook returns `orig=0x0` from PLT stubs (Fix6) |
 | 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
 | 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |
