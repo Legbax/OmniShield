@@ -309,15 +309,25 @@ do_start() {
     resolve_uids
     if [ -z "$UIDS" ]; then
         log "ERROR: No valid UIDs resolved — add apps to scope first"
-        return 1
+        release_lock; return 1
     fi
 
     # Generate tun2socks config
     generate_config
 
+    # Ensure /dev/net/tun exists (required by hev-socks5-tunnel)
+    if [ ! -e /dev/net/tun ]; then
+        mkdir -p /dev/net 2>/dev/null
+        mknod /dev/net/tun c 10 200 2>/dev/null
+        chmod 666 /dev/net/tun 2>/dev/null
+    fi
+
+    # Fix SELinux context for tun2socks binary
+    chcon u:object_r:system_file:s0 "$TUN2SOCKS" 2>/dev/null
+
     # Launch hev-socks5-tunnel daemon (it creates the TUN interface internally)
     log "Launching hev-socks5-tunnel → $PROXY_HOST:$PROXY_PORT"
-    nohup "$TUN2SOCKS" "$TUN2SOCKS_CFG" > /dev/null 2>&1 &
+    nohup "$TUN2SOCKS" "$TUN2SOCKS_CFG" >> "$LOG_FILE" 2>&1 &
 
     # Wait for daemon to start and create PID file (retry up to 5s)
     local daemon_ok=0
@@ -334,12 +344,16 @@ do_start() {
         if kill -0 "$DAEMON_PID" 2>/dev/null; then
             log "Daemon running (PID $DAEMON_PID)"
         else
-            log "ERROR: Daemon started but died immediately — check $LOG_FILE"
+            log "ERROR: Daemon started but died immediately"
+            log "--- daemon output ---"
+            tail -5 "$LOG_FILE" 2>/dev/null
             cleanup_tun
             release_lock; return 1
         fi
     else
-        log "ERROR: Daemon failed to create PID file after 5s — check $LOG_FILE"
+        log "ERROR: Daemon failed to start (no PID file after 5s)"
+        log "--- daemon output ---"
+        tail -5 "$LOG_FILE" 2>/dev/null
         cleanup_tun
         release_lock; return 1
     fi
