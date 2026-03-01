@@ -782,9 +782,29 @@ window.applyProxy = async function() {
     try {
       const r = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh start 2>&1');
       if (r.errno !== 0) {
-        toast('Proxy failed: ' + (r.stderr || r.stdout || 'unknown error'), 'err');
+        // PR73: Parse output for specific failure reason
+        const out = (r.stdout || '') + (r.stderr || '');
+        let msg = 'Proxy failed';
+        if (out.includes('unreachable'))       msg = 'Proxy server unreachable — check host and port';
+        else if (out.includes('not found'))    msg = 'tun2socks binary not found';
+        else if (out.includes('No valid UIDs'))msg = 'No apps in scope — add apps first';
+        else if (out.includes('died immediately')) msg = 'Proxy daemon crashed — check config';
+        else if (out.includes('not executable'))   msg = 'tun2socks binary not executable';
+        else { const lines = out.trim().split('\n'); msg = lines[lines.length - 1] || 'Unknown error'; }
+        toast(msg, 'err');
         if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }
         // Revert config so toggle reflects reality on next load
+        state.proxyEnabled = false;
+        const toggle = document.getElementById('proxy-enabled');
+        if (toggle) toggle.checked = false;
+        await saveConfig();
+        return;
+      }
+      // PR73: Verify daemon is actually running after successful start
+      const st = await ksu_exec('sh /data/adb/modules/omnishield/proxy_manager.sh status 2>&1');
+      if ((st.stdout || '').trim() !== 'running') {
+        toast('Proxy started but is not running — check proxy.log', 'err');
+        if (badge) { badge.textContent = 'ERROR'; badge.className = 'proxy-badge proxy-badge-err'; }
         state.proxyEnabled = false;
         const toggle = document.getElementById('proxy-enabled');
         if (toggle) toggle.checked = false;
@@ -794,7 +814,7 @@ window.applyProxy = async function() {
       // Force-stop scoped apps so they restart inside the tunnel
       const apps = state.scopedApps || [];
       for (const pkg of apps) {
-        await ksu_exec(`am force-stop ${pkg}`);
+        await ksu_exec(`am force-stop '${pkg}'`);
       }
       if (badge) { badge.textContent = 'ACTIVE'; badge.className = 'proxy-badge proxy-badge-on'; }
       toast(`Proxy active — ${apps.length} app(s) will reload through tunnel`);

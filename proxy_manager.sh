@@ -104,6 +104,39 @@ resolve_host() {
     echo "$1"
 }
 
+# ─── Check proxy reachability (TCP port check) ────────────────────────
+# PR73: Validates the proxy server is reachable BEFORE applying iptables
+# rules, preventing traffic from being trapped in a dead tunnel → TIMEOUT.
+check_proxy_reachable() {
+    local host_ip
+    host_ip=$(resolve_host "$PROXY_HOST")
+    if [ -z "$host_ip" ]; then
+        log "ERROR: Cannot resolve proxy host: $PROXY_HOST"
+        return 1
+    fi
+    # Method 1: busybox nc (most Magisk/KSU setups have busybox)
+    if command -v busybox >/dev/null 2>&1; then
+        if busybox nc -z -w 5 "$host_ip" "$PROXY_PORT" 2>/dev/null; then
+            log "Proxy reachable (busybox nc): $host_ip:$PROXY_PORT"
+            return 0
+        fi
+    fi
+    # Method 2: toybox/system nc (Android 10+)
+    if command -v nc >/dev/null 2>&1; then
+        if nc -z -w 5 "$host_ip" "$PROXY_PORT" 2>/dev/null; then
+            log "Proxy reachable (nc): $host_ip:$PROXY_PORT"
+            return 0
+        fi
+    fi
+    # Method 3: ICMP ping fallback (verifies host, not port)
+    if ping -c1 -W3 "$host_ip" >/dev/null 2>&1; then
+        log "WARNING: Host $host_ip reachable (ICMP) but port $PROXY_PORT not verified (no nc available)"
+        return 0
+    fi
+    log "ERROR: Proxy $host_ip:$PROXY_PORT is unreachable"
+    return 1
+}
+
 # ─── Resolve all scoped apps to UIDs ──────────────────────────────────
 resolve_uids() {
     UIDS=""
@@ -360,6 +393,18 @@ do_start() {
 
     # Setup routing (TUN was created by hev-socks5-tunnel)
     setup_routing
+
+    # PR73: Verify proxy is reachable BEFORE applying iptables rules.
+    # Without this check, iptables routes scoped-app traffic to the TUN
+    # but tun2socks can't forward it → all connections TIMEOUT.
+    log "Checking proxy reachability..."
+    if ! check_proxy_reachable; then
+        log "ERROR: Proxy server unreachable — aborting (no iptables rules applied)"
+        log "Check proxy host/port configuration and network connectivity"
+        kill_daemon
+        cleanup_tun
+        release_lock; return 1
+    fi
 
     # Setup iptables rules
     setup_iptables
