@@ -1,7 +1,7 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.59 (The Void)
-**Last updated:** 2026-03-01 (PR73: toybox bypass, uname interception, Os.uname() JNI hook, MIUI filter)
+**Version:** v12.9.60 (The Void)
+**Last updated:** 2026-03-01 (PR73b: `__system_property_read` hook, os.version MIUI fix, uname shell wrapper, Dobby diagnostics)
 
 ---
 
@@ -13,7 +13,7 @@ OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the 
 
 | Layer | What | How |
 |-------|------|-----|
-| 1. Properties | `__system_property_get`, `__system_property_read_callback`, `SystemProperties.native_get` JNI | 168+ keys mapped to profile fields |
+| 1. Properties | `__system_property_get`, `__system_property_read_callback`, `__system_property_read`, `SystemProperties.native_get` JNI | 168+ keys mapped to profile fields |
 | 2. VFS | `openat`, `read`, `fopen` (memfd for `/proc/cpuinfo`) | Fake `/proc/{cpuinfo,version,cmdline,status}`, `/sys/{cpu,battery,thermal,net}` |
 | 3. Subprocess | `execve`, `posix_spawn`, `posix_spawnp` | Emulate `getprop` and `cat /proc/cpuinfo` output in forked child |
 | 4. JNI Fields | `Build.*`, `Build.VERSION.*` static fields via `SetStaticObjectField` | 25+ fields overwritten in `postAppSpecialize` |
@@ -210,7 +210,7 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 **libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
 **libc (Process):** execve, posix_spawn, posix_spawnp
 **libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
-**libc (Properties):** __system_property_get, __system_property_read_callback
+**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_read
 **Stealth:** dl_iterate_phdr
 **Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
 **Crypto:** SSL_CTX_set_ciphersuites, SSL_set1_tls13_ciphersuites, SSL_set_ciphersuites, SSL_set_cipher_list (libssl)
@@ -293,6 +293,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
+| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4) |
 | 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
 | 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |

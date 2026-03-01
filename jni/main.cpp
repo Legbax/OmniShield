@@ -139,6 +139,7 @@ static std::mutex g_fdMutex;
 // Original Pointers
 static int (*orig_system_property_get)(const char *key, char *value);
 static void (*orig_system_property_read_callback)(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie);
+static int (*orig_system_property_read)(const prop_info *pi, char *name, char *value);  // PR73b-Fix1
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
@@ -2516,6 +2517,47 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
     }
 }
 
+// PR73b-Fix1: Hook __system_property_read() — API legacy (deprecated API 26).
+// VD Info and detection apps use __system_property_find() + __system_property_read()
+// to read properties directly from shared memory, completely bypassing our hooks on
+// __system_property_get and __system_property_read_callback. This closes that vector.
+int my_system_property_read(const prop_info *pi, char *name, char *value) {
+    if (!pi) return 0;
+
+    // Read real data first to obtain the property name
+    int ret = 0;
+    char real_name[PROP_NAME_MAX + 1] = {0};
+    char real_value[PROP_VALUE_MAX] = {0};
+    if (orig_system_property_read) {
+        ret = orig_system_property_read(pi, real_name, real_value);
+    }
+
+    // Copy name to caller's buffer
+    if (name && real_name[0]) {
+        strcpy(name, real_name);
+    }
+
+    // If shouldHide filters this property (key or value), return empty
+    if (shouldHide(real_name) || shouldHide(real_value)) {
+        if (value) value[0] = '\0';
+        if (name) name[0] = '\0';
+        return 0;
+    }
+
+    // Attempt to spoof via my_system_property_get (central hub)
+    if (value && real_name[0]) {
+        char spoofed[PROP_VALUE_MAX] = {0};
+        int slen = my_system_property_get(real_name, spoofed);
+        if (slen > 0 && strcmp(spoofed, real_value) != 0) {
+            strcpy(value, spoofed);
+            return slen;
+        }
+        // No spoof available, pass through real value
+        strcpy(value, real_value);
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------------------
 // PR71: Hook execve — intercept getprop commands in child processes
 // -----------------------------------------------------------------------------
@@ -2539,14 +2581,28 @@ static void emulate_uname_output(char *const argv[]) {
 
     bool flag_r=false, flag_a=false, flag_m=false,
          flag_s=false, flag_n=false, flag_v=false, any=false;
-    for (int i = 1; argv[i]; i++) {
-        const char* f = argv[i];
-        if      (strcmp(f, "-r") == 0) { flag_r = true; any = true; }
-        else if (strcmp(f, "-a") == 0) { flag_a = true; any = true; }
-        else if (strcmp(f, "-m") == 0) { flag_m = true; any = true; }
-        else if (strcmp(f, "-s") == 0) { flag_s = true; any = true; }
-        else if (strcmp(f, "-n") == 0) { flag_n = true; any = true; }
-        else if (strcmp(f, "-v") == 0) { flag_v = true; any = true; }
+
+    // PR73b-Fix4: Detect shell wrapper case: argv = ["sh", "-c", "uname -r"]
+    // In this case argv[1]="-c" and argv[2] contains the flags as a string.
+    // strcmp won't match "-r" inside "uname -r", so we use strstr instead.
+    if (argv[1] && strcmp(argv[1], "-c") == 0 && argv[2]) {
+        if (strstr(argv[2], "-r")) { flag_r = true; any = true; }
+        if (strstr(argv[2], "-a")) { flag_a = true; any = true; }
+        if (strstr(argv[2], "-m")) { flag_m = true; any = true; }
+        if (strstr(argv[2], "-s")) { flag_s = true; any = true; }
+        if (strstr(argv[2], "-n")) { flag_n = true; any = true; }
+        if (strstr(argv[2], "-v")) { flag_v = true; any = true; }
+    } else {
+        // Normal case: argv = ["uname", "-r"]
+        for (int i = 1; argv[i]; i++) {
+            const char* f = argv[i];
+            if      (strcmp(f, "-r") == 0) { flag_r = true; any = true; }
+            else if (strcmp(f, "-a") == 0) { flag_a = true; any = true; }
+            else if (strcmp(f, "-m") == 0) { flag_m = true; any = true; }
+            else if (strcmp(f, "-s") == 0) { flag_s = true; any = true; }
+            else if (strcmp(f, "-n") == 0) { flag_n = true; any = true; }
+            else if (strcmp(f, "-v") == 0) { flag_v = true; any = true; }
+        }
     }
     if (!any || flag_a) {
         char buf[512];
@@ -2570,6 +2626,7 @@ static void emulate_uname_output(char *const argv[]) {
 }
 
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    LOGD("PR73b: my_execve called: %s", pathname ? pathname : "null");
     if (pathname && argv) {
         // Extract basename from path
         const char* base = strrchr(pathname, '/');
@@ -2793,6 +2850,7 @@ static int my_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions,
                           const void *attrp,
                           char *const argv[], char *const envp[]) {
+    LOGD("PR73b: my_posix_spawn called: %s", path ? path : "null");
     if (handleGetpropSpawn(path, argv, pid)) return 0;
 
     if (!orig_posix_spawn) { errno = ENOSYS; return ENOSYS; }
@@ -3160,6 +3218,13 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
+        // PR73b-Fix1: Hook __system_property_read() — API legacy (deprecated API 26).
+        // VD Info uses __system_property_find() + __system_property_read() to read
+        // properties directly from shared memory, completely bypassing our hooks on
+        // __system_property_get and __system_property_read_callback.
+        void* sysprop_read_func = DobbySymbolResolver("libc.so", "__system_property_read");
+        if (sysprop_read_func) DobbyHook(sysprop_read_func, (void*)my_system_property_read, (void**)&orig_system_property_read);
+
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
         // y de funciones VDSO (clock_gettime en arm64 es VDSO read-only → SIGSEGV).
@@ -3205,15 +3270,31 @@ public:
         if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
 
         // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
+        // PR73b-Fix2: Added diagnostic logging to verify Dobby hooks install correctly.
         void* execve_func = DobbySymbolResolver("libc.so", "execve");
-        if (execve_func) DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
+        if (execve_func) {
+            int dret = DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
+            LOGE("PR73b: execve hook: sym=%p ret=%d orig=%p", execve_func, dret, orig_execve);
+        } else {
+            LOGE("PR73b: execve symbol NOT FOUND in libc.so");
+        }
 
         // PR71c: posix_spawn/posix_spawnp hooks — Android 10+ uses these instead of execve
         // for Runtime.exec() and ProcessBuilder, completely bypassing our execve hook.
         void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
-        if (spawn_func) DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
+        if (spawn_func) {
+            int dret = DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
+            LOGE("PR73b: posix_spawn hook: sym=%p ret=%d orig=%p", spawn_func, dret, orig_posix_spawn);
+        } else {
+            LOGE("PR73b: posix_spawn symbol NOT FOUND in libc.so");
+        }
         void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
-        if (spawnp_func) DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
+        if (spawnp_func) {
+            int dret = DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
+            LOGE("PR73b: posix_spawnp hook: sym=%p ret=%d orig=%p", spawnp_func, dret, orig_posix_spawnp);
+        } else {
+            LOGE("PR73b: posix_spawnp symbol NOT FOUND in libc.so");
+        }
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");
@@ -3367,13 +3448,39 @@ public:
                                 env->NewStringUTF("http.agent"),
                                 env->NewStringUTF(dalvik_ua));
 
-                            // PR72-QA Fix2: Override os.version cached by ART VM.
+                            // PR73b-Fix3: Override os.version cached by ART VM.
                             // ART caches System.getProperty("os.version") at Zygote boot
                             // with the real kernel string before Zygisk hooks apply.
+                            // Attempt 1: System.setProperty (works on AOSP vanilla)
                             std::string kv = getSpoofedKernelVersion();
                             env->CallStaticObjectMethod(sys_class, setProp,
                                 env->NewStringUTF("os.version"),
                                 env->NewStringUTF(kv.c_str()));
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+
+                            // PR73b-Fix3: Attempt 2 — direct System.props field access.
+                            // System.setProperty("os.version",...) fails on MIUI — the VM
+                            // protects this property. Access the internal Properties object.
+                            jfieldID propsField = env->GetStaticFieldID(sys_class, "props",
+                                "Ljava/util/Properties;");
+                            if (propsField) {
+                                jobject propsObj = env->GetStaticObjectField(sys_class, propsField);
+                                if (propsObj) {
+                                    jclass propsClass = env->FindClass("java/util/Properties");
+                                    if (propsClass) {
+                                        jmethodID setMethod = env->GetMethodID(propsClass,
+                                            "setProperty",
+                                            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;");
+                                        if (setMethod) {
+                                            env->CallObjectMethod(propsObj, setMethod,
+                                                env->NewStringUTF("os.version"),
+                                                env->NewStringUTF(kv.c_str()));
+                                        }
+                                        env->DeleteLocalRef(propsClass);
+                                    }
+                                    env->DeleteLocalRef(propsObj);
+                                }
+                            }
                             if (env->ExceptionCheck()) env->ExceptionClear();
                         }
                     }
