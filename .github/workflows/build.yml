@@ -36,8 +36,8 @@ jobs:
 
     - name: Download hev-socks5-tunnel (tun2socks)
       run: |
-        curl -sL -o tun2socks "https://github.com/heiher/hev-socks5-tunnel/releases/latest/download/hev-socks5-tunnel-linux-aarch64"
-        file tun2socks
+        curl -sfL -o tun2socks "https://github.com/heiher/hev-socks5-tunnel/releases/latest/download/hev-socks5-tunnel-linux-arm64"
+        file tun2socks | grep -q "ELF.*ARM aarch64" || { echo "ERROR: Not a valid ARM64 ELF binary"; exit 1; }
         chmod 755 tun2socks
 
     - name: Package Module
