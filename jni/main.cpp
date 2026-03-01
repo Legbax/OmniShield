@@ -484,14 +484,15 @@ static std::vector<ElfEntry> enumerateLoadedElfs() {
         if (n >= 8 && strstr(path, ".so")) {
             // Fix9: Skip our own module to prevent self-referential PLT hooks.
             if (isHiddenPath(path)) continue;
-            // Fix11: /apex/ filter REMOVED. Fix10 added this filter to prevent
-            // pltHookCommit()=false from triggering the Dobby fallback (which caused
-            // double-hook infinite recursion → SIGSEGV). But Fix10 also removed the
-            // Dobby fallback itself, making this filter unnecessary and harmful:
-            // it excluded libjavacore.so (/apex/com.android.art/lib64/) which is where
-            // ProcessBuilder.start() calls posix_spawnp() — breaking ALL subprocess
-            // interception. pltHookCommit() returning false (partial success) is now
-            // harmless since the return value is ignored.
+            // Fix11b: Selective /apex/ filter — include ONLY libjavacore.so.
+            // libjavacore.so (/apex/com.android.art/lib64/) is where
+            // ProcessBuilder.start() calls posix_spawnp() → must be PLT-hooked
+            // to intercept subprocess commands (getprop, uname, cat /proc/...).
+            // All other /apex/ ELFs are excluded: they don't call the functions
+            // we hook (posix_spawn, execve, __system_property_read), and
+            // including them causes crashes on MIUI/MTK ROMs where pltHookCommit
+            // fails on those ELFs (SIGBUS or xhook internal error).
+            if (strstr(path, "/apex/") && !strstr(path, "libjavacore.so")) continue;
             dev_t dev = makedev(dev_maj, dev_min);
             auto key = std::make_pair((unsigned int)dev, ino);
             if (seen.insert(key).second)
@@ -3279,14 +3280,15 @@ static bool installPltHooks() {
     // The real originals were already set above via dlsym.
     void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr;
 
-    // Fix11: Pre-resolve glGetString for PLT hook fallback (GPU spoofing).
-    // Dobby hook on glGetString may fail if libGLESv2.so wasn't loaded at
-    // hook time. PLT hooks provide a second layer of coverage.
-    void *d5 = nullptr;
-    if (!orig_glGetString)
-        orig_glGetString = reinterpret_cast<decltype(orig_glGetString)>(dlsym(RTLD_DEFAULT, "glGetString"));
+    // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
+    // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
+    // for glGetString would cause my_glGetString to run with orig_glGetString=NULL
+    // → returns nullptr → crash in any app that calls glGetString during startup
+    // (e.g. VdInfo during GL detection, WebView during WebGL init).
+    // The Dobby hook (installed later after dlopen ensures the lib is loaded)
+    // is the correct approach for glGetString.
 
-    LOGE("Fix11: Registering PLT hooks across %zu ELFs (incl. /apex/)", elfs.size());
+    LOGE("Fix11: Registering PLT hooks across %zu ELFs", elfs.size());
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "execve",
                                (void*)my_execve, &d1);
@@ -3296,8 +3298,6 @@ static bool installPltHooks() {
                                (void*)my_posix_spawnp, &d3);
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
                                (void*)my_system_property_read, &d4);
-        g_api->pltHookRegister(elf.dev, elf.inode, "glGetString",
-                               (void*)my_glGetString, &d5);
     }
 
     bool ok = g_api->pltHookCommit();
