@@ -34,13 +34,22 @@ jobs:
       id: version
       run: echo "VERSION=$(grep '^version=' module.prop | cut -d'=' -f2)" >> $GITHUB_OUTPUT
 
+    - name: Download hev-socks5-tunnel (tun2socks)
+      run: |
+        curl -sfL -o tun2socks "https://github.com/heiher/hev-socks5-tunnel/releases/latest/download/hev-socks5-tunnel-linux-arm64"
+        file tun2socks | grep -q "ELF.*ARM aarch64" || { echo "ERROR: Not a valid ARM64 ELF binary"; exit 1; }
+        chmod 755 tun2socks
+
     - name: Package Module
       run: |
-        mkdir -p dist/zygisk
+        mkdir -p dist/zygisk dist/bin
         cp build/libomnishield.so dist/zygisk/arm64-v8a.so
         cp module.prop dist/
+        cp customize.sh dist/
         cp post-fs-data.sh dist/
         cp service.sh dist/
+        cp proxy_manager.sh dist/
+        cp tun2socks dist/bin/tun2socks
         cp -r webroot dist/
         cd dist
         zip -r omnishield-${{ steps.version.outputs.VERSION }}-release.zip .

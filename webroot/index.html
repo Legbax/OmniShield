@@ -626,11 +626,15 @@
             <div class="card-title">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
               Transparent Proxy
+              <span id="proxy-status-badge" class="proxy-badge proxy-badge-off">OFF</span>
+            </div>
+            <div class="text-sm" style="margin-bottom:10px;opacity:.7">
+              Routes scoped app traffic through a SOCKS5 tunnel with DNS hijacking and IPv6 leak protection.
             </div>
             <div class="toggle-row">
               <div>
                 <div class="toggle-label">Enable Proxy</div>
-                <div class="toggle-desc">Route traffic through configured proxy</div>
+                <div class="toggle-desc">Route scoped apps through SOCKS5 tunnel</div>
               </div>
               <label class="toggle">
                 <input type="checkbox" id="proxy-enabled">
@@ -641,18 +645,17 @@
             <div class="input-group">
               <div class="input-label">Proxy Type</div>
               <select id="proxy-type" class="select">
-                <option value="http">HTTP</option>
-                <option value="socks5">SOCKS5</option>
+                <option value="socks5" selected>SOCKS5</option>
               </select>
             </div>
             <div class="input-row">
               <div style="flex:3">
                 <div class="input-label">Host / IP</div>
-                <input id="proxy-host" class="input" type="text" placeholder="192.168.1.1 or hostname">
+                <input id="proxy-host" class="input" type="text" placeholder="proxy.example.com">
               </div>
               <div style="flex:1">
                 <div class="input-label">Port</div>
-                <input id="proxy-port" class="input" type="number" placeholder="8080">
+                <input id="proxy-port" class="input" type="number" placeholder="1080">
               </div>
             </div>
             <div class="input-row">
@@ -664,6 +667,11 @@
                 <div class="input-label">Password (optional)</div>
                 <input id="proxy-pass" class="input" type="password" placeholder="pass">
               </div>
+            </div>
+            <div class="input-group">
+              <div class="input-label">DNS Server (optional)</div>
+              <input id="proxy-dns" class="input" type="text" placeholder="8.8.8.8 (default)">
+              <div class="text-sm" style="margin-top:4px;opacity:.6">Overrides ISP DNS to prevent location leaks</div>
             </div>
             <div class="btn-row">
               <button class="btn btn-primary btn-full" onclick="applyProxy()">

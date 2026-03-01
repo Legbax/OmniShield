@@ -341,10 +341,21 @@ bool shouldHide(const char* key) {
         const auto& fp = *fp_ptr;
         if (toLowerStr(fp.brand).find("xiaomi") != std::string::npos ||
             toLowerStr(fp.hardware).find("mt") != std::string::npos) {
-            if (s.find("mediatek") != std::string::npos) return false;
+            // PR72-QA Fix3: When target profile is Xiaomi/MediaTek, allow
+            // MediaTek ecosystem strings through (they're expected for this target)
+            if (s.find("mediatek") != std::string::npos ||
+                s.find("huaqin") != std::string::npos ||
+                s.find("mt6769") != std::string::npos ||
+                s.find("moly.") != std::string::npos) return false;
         }
     }
-    return s.find("mediatek") != std::string::npos || s.find("lancelot") != std::string::npos;
+    // PR72-QA Fix3: Expanded filters — hide ODM manufacturer (huaqin),
+    // SoC identifier (mt6769), and modem prefix (moly.) from property values
+    return s.find("mediatek") != std::string::npos ||
+           s.find("lancelot") != std::string::npos ||
+           s.find("huaqin") != std::string::npos ||
+           s.find("mt6769") != std::string::npos ||
+           s.find("moly.") != std::string::npos;
 }
 
 // -----------------------------------------------------------------------------
@@ -576,54 +587,60 @@ int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
 }
 
 // 3. Kernel Identity
+
+// PR72-QA Fix2: Helper to compute spoofed kernel version string.
+// Extracted from my_uname() so it can also be used in postAppSpecialize
+// to override the ART VM cached System.getProperty("os.version").
+std::string getSpoofedKernelVersion() {
+    std::string kv = "4.14.186-perf+";
+    if (g_currentProfileName == "Redmi 9") {
+        kv = "4.14.186-perf+";
+    } else if (const DeviceFingerprint* kfp_ptr = findProfile(g_currentProfileName)) {
+        const auto& kfp = *kfp_ptr;
+        std::string plat = toLowerStr(kfp.boardPlatform);
+        std::string brd  = toLowerStr(kfp.brand);
+
+        if (brd == "google") {
+            if (plat.find("lito") != std::string::npos)
+                kv = "4.19.113-g820a424c538c-ab7336171";
+            else if (plat.find("atoll") != std::string::npos)
+                kv = "4.14.150-g62a62a5a93f7-ab7336171";
+            else if (plat.find("sdm670") != std::string::npos)
+                kv = "4.9.189-g5d098cef6d96-ab6174032";
+            else
+                kv = "4.19.113-g820a424c538c-ab7336171";
+        } else if (plat.find("mt6") != std::string::npos) {
+            kv = "4.14.141-perf+";
+        } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
+            kv = "4.19.157-perf+";
+        } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
+            kv = "4.19.113-perf+";
+        } else if (plat.find("sdm670") != std::string::npos) {
+            kv = "4.9.189-perf+";
+        } else if (plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos ||
+                   plat.find("sm6350") != std::string::npos) {
+            kv = "4.19.157-perf+";
+        } else if (plat.find("sm7325") != std::string::npos) {
+            kv = "5.4.61-perf+";
+        }
+        // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
+        else if (plat.find("exynos9611") != std::string::npos) {
+            kv = "4.14.113-25145160";
+        } else if (plat.find("exynos9825") != std::string::npos) {
+            kv = "4.14.113-22911262";
+        } else if (plat.find("exynos850") != std::string::npos) {
+            kv = "4.19.113-25351273";
+        }
+    }
+    return kv;
+}
+
 int my_uname(struct utsname *buf) {
     if (!orig_uname) return -1;
     int ret = orig_uname(buf);
     if (ret == 0 && buf != nullptr) {
         strcpy(buf->machine, "aarch64"); strcpy(buf->nodename, "localhost");
-
-        std::string kv = "4.14.186-perf+";
-        if (g_currentProfileName == "Redmi 9") {
-             kv = "4.14.186-perf+";
-        } else if (const DeviceFingerprint* kfp_ptr = findProfile(g_currentProfileName)) {
-            const auto& kfp = *kfp_ptr;
-            std::string plat = toLowerStr(kfp.boardPlatform);
-            std::string brd  = toLowerStr(kfp.brand);
-
-            if (brd == "google") {
-                // Google compila sus propios kernels con hashes de commit específicos
-                if (plat.find("lito") != std::string::npos)
-                    kv = "4.19.113-g820a424c538c-ab7336171";        // Pixel 5, 4a 5G
-                else if (plat.find("atoll") != std::string::npos)
-                    kv = "4.14.150-g62a62a5a93f7-ab7336171";         // Pixel 4a (sunfish/SM7150)
-                else if (plat.find("sdm670") != std::string::npos)
-                    kv = "4.9.189-g5d098cef6d96-ab6174032";         // Pixel 3a XL
-                else
-                    kv = "4.19.113-g820a424c538c-ab7336171";        // fallback Google
-            } else if (plat.find("mt6") != std::string::npos) {
-                kv = "4.14.141-perf+";
-            } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
-                kv = "4.19.157-perf+";
-            } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
-                kv = "4.19.113-perf+";
-            } else if (plat.find("sdm670") != std::string::npos) {
-                kv = "4.9.189-perf+";
-            } else if (plat.find("bengal") != std::string::npos || plat.find("holi") != std::string::npos ||
-                       plat.find("sm6350") != std::string::npos) {
-                kv = "4.19.157-perf+";
-            } else if (plat.find("sm7325") != std::string::npos) {
-                kv = "5.4.61-perf+";
-            }
-            // PR41: Kernels Samsung Exynos — sufijo numérico (NO -perf+ que es Qualcomm)
-            else if (plat.find("exynos9611") != std::string::npos) {
-                kv = "4.14.113-25145160";
-            } else if (plat.find("exynos9825") != std::string::npos) {
-                kv = "4.14.113-22911262";
-            } else if (plat.find("exynos850") != std::string::npos) {
-                kv = "4.19.113-25351273";
-            }
-        }
-
+        std::string kv = getSpoofedKernelVersion();
         strcpy(buf->release, kv.c_str());
         strcpy(buf->version, "#1 SMP PREEMPT");
     }
@@ -2415,6 +2432,11 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
         result = env->NewStringUTF(
             omni::engine::generateRandomId(16, g_masterSeed + 1).c_str()
         );
+    } else if (strcmp(key, "bluetooth_name") == 0) {
+        // PR72-QA Fix6: Override bluetooth_name to match spoofed profile.
+        // Default "Android Bluedroid" leaks that device isn't using OEM BT stack.
+        const DeviceFingerprint* fp = findProfile(g_currentProfileName);
+        if (fp) result = env->NewStringUTF(fp->model);
     }
     env->ReleaseStringUTFChars(name, key);
 
@@ -2476,7 +2498,17 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
         const char* base = strrchr(pathname, '/');
         base = base ? base + 1 : pathname;
 
-        if (strcmp(base, "getprop") == 0) {
+        bool is_getprop = (strcmp(base, "getprop") == 0);
+
+        // PR72-QA: Detect "sh -c getprop ..." / "su -c getprop ..." bypass
+        // Detection apps run shell wrappers to avoid direct getprop hooks
+        if (!is_getprop &&
+            (strcmp(base, "sh") == 0 || strcmp(base, "bash") == 0 || strcmp(base, "su") == 0) &&
+            argv[1] && strcmp(argv[1], "-c") == 0 && argv[2]) {
+            if (strstr(argv[2], "getprop")) is_getprop = true;
+        }
+
+        if (is_getprop) {
             if (argv[1] && argv[1][0] != '\0') {
                 // Single property read: getprop <name> [default]
                 char value[92] = {0};
@@ -2550,10 +2582,21 @@ static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
     const char* base = strrchr(resolved_path, '/');
     base = base ? base + 1 : resolved_path;
 
+    bool is_cat = (strcmp(base, "cat") == 0);
+    bool is_getprop = (strcmp(base, "getprop") == 0);
+
+    // PR72-QA: Detect "sh -c getprop" / "sh -c cat" / "su -c ..." bypass
+    if (!is_getprop && !is_cat &&
+        (strcmp(base, "sh") == 0 || strcmp(base, "bash") == 0 || strcmp(base, "su") == 0) &&
+        argv[1] && strcmp(argv[1], "-c") == 0 && argv[2]) {
+        if (strstr(argv[2], "getprop")) is_getprop = true;
+        if (strstr(argv[2], "cat")) is_cat = true;
+    }
+
     // PR71f: Intercept "cat <path>" for files we fake (cpuinfo, version, etc.)
     // Without this, `Runtime.exec("cat /proc/cpuinfo")` spawns a child that reads
     // the real kernel file — our Dobby hooks are destroyed by the execve image replace.
-    if (strcmp(base, "cat") == 0 && argv[1] && argv[1][0] != '\0') {
+    if (is_cat && argv[1] && argv[1][0] != '\0') {
         const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
         if (fp_ptr) {
             const char* target = argv[1];
@@ -2576,7 +2619,7 @@ static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
         }
     }
 
-    if (strcmp(base, "getprop") != 0) return false;
+    if (!is_getprop) return false;
 
     // Fork a child to emulate getprop with spoofed values
     pid_t child = fork();
@@ -3202,6 +3245,15 @@ public:
                             env->CallStaticObjectMethod(sys_class, setProp,
                                 env->NewStringUTF("http.agent"),
                                 env->NewStringUTF(dalvik_ua));
+
+                            // PR72-QA Fix2: Override os.version cached by ART VM.
+                            // ART caches System.getProperty("os.version") at Zygote boot
+                            // with the real kernel string before Zygisk hooks apply.
+                            std::string kv = getSpoofedKernelVersion();
+                            env->CallStaticObjectMethod(sys_class, setProp,
+                                env->NewStringUTF("os.version"),
+                                env->NewStringUTF(kv.c_str()));
+                            if (env->ExceptionCheck()) env->ExceptionClear();
                         }
                     }
                 }

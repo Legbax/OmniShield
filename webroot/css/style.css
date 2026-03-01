@@ -783,3 +783,20 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; 
   outline: none; width: 100%; font-size: 12px;
 }
 .field-value.editable:focus { border-color: rgba(0,229,255,.4); }
+
+/* PR72: Inline code styling */
+code {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  background: var(--surface2); padding: 1px 5px; border-radius: 4px;
+  font-size: .92em; border: 1px solid var(--border);
+}
+
+/* PR72: Proxy status badge */
+.proxy-badge {
+  display: inline-block; font-size: 10px; font-weight: 700;
+  padding: 2px 8px; border-radius: 10px; margin-left: 8px;
+  letter-spacing: .5px;
+}
+.proxy-badge-off { background: rgba(255,255,255,.08); color: rgba(255,255,255,.5); }
+.proxy-badge-on  { background: rgba(0,200,83,.2); color: #00c853; }
+.proxy-badge-err { background: rgba(255,82,82,.2); color: #ff5252; }

@@ -1,6 +1,6 @@
 id=omnishield
 name=Omni-Shield Native
-version=v12.9.57
-versionCode=12957
+version=v12.9.58
+versionCode=12958
 author=Jules & legbax
-description=Total Invisibility (The Void). Zygisk module. PR71g — Dedicated WebView spoof toggle to prevent Destroy Identity crash
+description=Total Invisibility (The Void). Zygisk module. PR71h — Smart Apply: force-stop scoped apps on config save for instant identity reload
