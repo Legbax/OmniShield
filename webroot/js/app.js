@@ -30,6 +30,11 @@ const JA3_PRESETS = [
 // "Save failed" errors on certain ROMs and KernelSU Next builds.
 // Falls back to `import('kernelsu')` if the global is missing.
 let _ksuExecFn = null;
+// PR-UIFreeze: Reduced from 30 s → 8 s.  The old 30 s timeout per call meant
+// 4 sequential calls could lock the binder/JS thread for up to 2 minutes,
+// starving the system UI and freezing the entire phone.
+const KSU_EXEC_TIMEOUT = 8000;
+
 async function ksu_exec(cmd) {
   try {
     if (!_ksuExecFn) {
@@ -39,7 +44,7 @@ async function ksu_exec(cmd) {
           const cb = '_omni_' + Date.now() + '_' + Math.random().toString(36).slice(2);
           const timer = setTimeout(() => {
             delete window[cb]; resolve({ errno: 1, stdout: '', stderr: 'timeout' });
-          }, 30000);
+          }, KSU_EXEC_TIMEOUT);
           window[cb] = (errno, stdout, stderr) => {
             clearTimeout(timer); delete window[cb];
             resolve({ errno, stdout, stderr: stderr || '' });
@@ -62,6 +67,12 @@ async function ksu_exec(cmd) {
   } catch(e) {
     return { errno: 1, stdout: '', stderr: '' };
   }
+}
+
+// PR-UIFreeze: Yield to the browser event loop so the OS can service touch
+// events, render frames, and process binder calls between heavy operations.
+function yieldToUI() {
+  return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
 }
 
 // ─── Config management ──────────────────────────────────────────────
@@ -177,7 +188,9 @@ async function loadState() {
   if (ov.ja3_idx != null)         overrides.ja3Idx        = parseInt(ov.ja3_idx) || 0;
 
   computeAll();
-  await loadSystemInfo();
+  // PR-UIFreeze: loadSystemInfo() is now called AFTER the loading screen is
+  // removed (see DOMContentLoaded handler) so the UI paints immediately and
+  // doesn't block the system while waiting for the ksu bridge.
 }
 
 function computeAll() {
@@ -234,12 +247,19 @@ function computeAll() {
   state.corrChecks  = corr.checks;
 }
 
+// PR-UIFreeze: Combined 3 sequential ksu_exec calls into a single shell
+// command.  This reduces binder round-trips from 3 → 1 and eliminates the
+// scenario where each 8 s timeout compounds into a 24 s system-wide freeze.
 async function loadSystemInfo() {
-  const ipRes = await ksu_exec("ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1");
-  const ipRes2 = ipRes.stdout || (await ksu_exec("ip -4 addr show rmnet0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1")).stdout || '';
-  state.deviceIp = ipRes2 || '–';
-  const modelRes = await ksu_exec('getprop ro.product.model');
-  state.deviceModel = modelRes.stdout || state.profile;
+  const { stdout } = await ksu_exec(
+    "IP=$(ip -4 addr show wlan0 2>/dev/null|grep 'inet '|awk '{print $2}'|cut -d/ -f1|head -1);" +
+    "[ -z \"$IP\" ]&&IP=$(ip -4 addr show rmnet0 2>/dev/null|grep 'inet '|awk '{print $2}'|cut -d/ -f1|head -1);" +
+    "MODEL=$(getprop ro.product.model 2>/dev/null);" +
+    "echo \"${IP}||${MODEL}\""
+  );
+  const parts = (stdout || '').split('||');
+  state.deviceIp    = parts[0] || '–';
+  state.deviceModel = (parts[1] || '').trim() || state.profile;
 }
 
 // ─── Persist helpers ────────────────────────────────────────────────
@@ -1149,10 +1169,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   detectStatusBarInset();
   detectNavInset();
 
-  // loadState() is wrapped in try/finally so the loading screen is ALWAYS
-  // removed even if ksu_exec times out, throws, or the config is missing.
-  // Without this guarantee the #loading-screen stays on top and blocks every
-  // click / touch event on the underlying UI.
+  // PR-UIFreeze: loadState() is wrapped in try/finally so the loading screen
+  // is ALWAYS removed even if ksu_exec times out, throws, or the config is
+  // missing.  yieldToUI() calls give the OS event loop a chance to breathe
+  // between heavy operations, preventing the system-wide freeze.
   try {
     await loadState();
   } catch(e) {
@@ -1166,6 +1186,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       setTimeout(() => loader.remove(), 600);
     }
   }
+
+  // PR-UIFreeze: Yield to let the browser paint the first frame with the
+  // loading screen removed before doing more work.
+  await yieldToUI();
 
   // ── Event listeners are registered AFTER the finally block so they are
   //    always attached regardless of whether loadState() succeeded. ──────
@@ -1206,8 +1230,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Profile search
-  document.getElementById('profile-search')?.addEventListener('input', () => renderDeviceTab());
+  // Profile search — PR-UIFreeze: debounced to avoid re-rendering 40+ DOM
+  // elements on every keystroke, which caused layout thrashing on slow devices.
+  let _profileSearchTimer = 0;
+  document.getElementById('profile-search')?.addEventListener('input', () => {
+    clearTimeout(_profileSearchTimer);
+    _profileSearchTimer = setTimeout(renderDeviceTab, 180);
+  });
 
   // Profile list click (delegated)
   document.getElementById('profile-list')?.addEventListener('click', e => {
@@ -1239,4 +1268,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   navigate('status');
+
+  // PR-UIFreeze: Load system info (IP, model) in the background AFTER the
+  // UI is already visible and interactive.  When it resolves, refresh the
+  // status page so the real values replace the defaults.
+  loadSystemInfo().then(() => {
+    if (currentPage === 'status') renderStatus();
+  }).catch(() => {});
 });
