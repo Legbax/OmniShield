@@ -36,12 +36,7 @@ jobs:
 
     - name: Download hev-socks5-tunnel (tun2socks)
       run: |
-        REPO="heiher/hev-socks5-tunnel"
-        ARCH="linux-aarch64"
-        DL_URL=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | \
-          grep "browser_download_url.*$ARCH" | head -1 | sed 's/.*"\(http[^"]*\)".*/\1/')
-        echo "Downloading: $DL_URL"
-        curl -sL -o tun2socks "$DL_URL"
+        curl -sL -o tun2socks "https://github.com/heiher/hev-socks5-tunnel/releases/latest/download/hev-socks5-tunnel-linux-aarch64"
         file tun2socks
         chmod 755 tun2socks
 
