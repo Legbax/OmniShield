@@ -16,6 +16,7 @@ fi
 chmod 755 "$MODPATH/service.sh" 2>/dev/null
 chmod 755 "$MODPATH/post-fs-data.sh" 2>/dev/null
 chmod 755 "$MODPATH/proxy_manager.sh" 2>/dev/null
+chmod 755 "$MODPATH/boot-completed.sh" 2>/dev/null
 
 # Create data directory
 mkdir -p /data/adb/.omni_data
