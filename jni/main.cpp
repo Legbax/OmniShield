@@ -3271,29 +3271,34 @@ public:
 
         // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
         // PR73b-Fix2: Added diagnostic logging to verify Dobby hooks install correctly.
+        // PR73b-Fix5: DobbySymbolResolver fails for execve/posix_spawn on some Bionic builds
+        // (symbol not in .dynsym or linker namespace restriction). Fallback to dlsym(RTLD_DEFAULT).
         void* execve_func = DobbySymbolResolver("libc.so", "execve");
+        if (!execve_func) execve_func = dlsym(RTLD_DEFAULT, "execve");
         if (execve_func) {
             int dret = DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
             LOGE("PR73b: execve hook: sym=%p ret=%d orig=%p", execve_func, dret, orig_execve);
         } else {
-            LOGE("PR73b: execve symbol NOT FOUND in libc.so");
+            LOGE("PR73b: execve symbol NOT FOUND (DobbySymbolResolver + dlsym)");
         }
 
         // PR71c: posix_spawn/posix_spawnp hooks — Android 10+ uses these instead of execve
         // for Runtime.exec() and ProcessBuilder, completely bypassing our execve hook.
         void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
+        if (!spawn_func) spawn_func = dlsym(RTLD_DEFAULT, "posix_spawn");
         if (spawn_func) {
             int dret = DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
             LOGE("PR73b: posix_spawn hook: sym=%p ret=%d orig=%p", spawn_func, dret, orig_posix_spawn);
         } else {
-            LOGE("PR73b: posix_spawn symbol NOT FOUND in libc.so");
+            LOGE("PR73b: posix_spawn symbol NOT FOUND (DobbySymbolResolver + dlsym)");
         }
         void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
+        if (!spawnp_func) spawnp_func = dlsym(RTLD_DEFAULT, "posix_spawnp");
         if (spawnp_func) {
             int dret = DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
             LOGE("PR73b: posix_spawnp hook: sym=%p ret=%d orig=%p", spawnp_func, dret, orig_posix_spawnp);
         } else {
-            LOGE("PR73b: posix_spawnp symbol NOT FOUND in libc.so");
+            LOGE("PR73b: posix_spawnp symbol NOT FOUND (DobbySymbolResolver + dlsym)");
         }
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
