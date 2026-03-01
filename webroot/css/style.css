@@ -471,6 +471,22 @@ body {
   text-transform: uppercase; margin-top: 3px;
 }
 
+/* ─── Correlation breakdown ───────────────────────────────────── */
+.corr-breakdown {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 2px 12px; margin-top: 6px; width: 100%;
+}
+.corr-row {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; padding: 3px 0; color: var(--text2);
+}
+.corr-icon { font-size: 12px; font-weight: 700; width: 14px; text-align: center; }
+.corr-row:has(.corr-wt:not(.fail)) .corr-icon { color: var(--success); }
+.corr-row:has(.corr-wt.fail)        .corr-icon { color: var(--error); }
+.corr-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.corr-wt { font-family: 'SF Mono','Fira Code',monospace; font-size: 10px; font-weight: 600; color: var(--success); }
+.corr-wt.fail { color: var(--error); }
+
 /* ─── Info Grid ───────────────────────────────────────────────── */
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .info-cell {

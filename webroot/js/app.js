@@ -224,10 +224,14 @@ function computeAll() {
     state.alt = generateAltitude(profile, seed);
   }
 
-  state.correlation = computeCorrelation(profile, seed, {
+  const corr = computeCorrelation(profile, seed, {
     imei: state.imei, imsi: state.imsi, iccid: state.iccid,
-    phone: state.phone, wifiMac: state.wifiMac
+    phone: state.phone, wifiMac: state.wifiMac, serial: state.serial,
+    androidId: state.androidId, gsfId: state.gsfId, bootId: state.bootId,
+    widevineId: state.widevineId
   });
+  state.correlation = corr.score;
+  state.corrChecks  = corr.checks;
 }
 
 async function loadSystemInfo() {
@@ -375,6 +379,15 @@ function renderStatus() {
   setCell('status-network', state.networkType.toUpperCase());
   setCell('status-seed', state.seed.toString());
   setCell('status-corr-label', `${state.correlation}% coherence`);
+  renderCorrBreakdown();
+}
+
+function renderCorrBreakdown() {
+  const el = document.getElementById('corr-breakdown');
+  if (!el || !state.corrChecks) return;
+  el.innerHTML = state.corrChecks.map(c =>
+    `<div class="corr-row"><span class="corr-icon">${c.passed ? '\u2713' : '\u2717'}</span><span class="corr-name">${escHtml(c.name)}</span><span class="corr-wt${c.passed ? '' : ' fail'}">${c.passed ? '+' : '\u2212'}${c.weight}</span></div>`
+  ).join('');
 }
 
 function updateGauge(score) {
@@ -695,7 +708,13 @@ window.randomizeField = function(field) {
   };
   if (actions[field]) {
     actions[field]();
-    state.correlation = computeCorrelation(state.profile, state.seed, { imei: state.imei, imsi: state.imsi, iccid: state.iccid, phone: state.phone, wifiMac: state.wifiMac });
+    const corr = computeCorrelation(state.profile, state.seed, {
+      imei: state.imei, imsi: state.imsi, iccid: state.iccid, phone: state.phone,
+      wifiMac: state.wifiMac, serial: state.serial, androidId: state.androidId,
+      gsfId: state.gsfId, bootId: state.bootId, widevineId: state.widevineId
+    });
+    state.correlation = corr.score;
+    state.corrChecks  = corr.checks;
     renderPage(currentPage);
   }
 };
