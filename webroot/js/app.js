@@ -1030,6 +1030,27 @@ window.refreshStatus = async function() {
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 
+// ─── Status bar (top) inset detection ─────────────────────────────────
+// Same problem as the bottom nav: env(safe-area-inset-top) returns 0 on
+// MIUI / Android 11 WebViews. Measure the actual status bar height and set
+// --inset-top so the header doesn't overlap with system UI.
+function detectStatusBarInset() {
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:fixed;top:0;left:0;width:0;' +
+    'height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none';
+  document.documentElement.appendChild(probe);
+  const envH = probe.offsetHeight;
+  probe.remove();
+  if (envH > 5) return; // env() is working — CSS already handles it
+
+  // Android status bar is typically 24dp. On most densities this is ~24-28 CSS px.
+  // Use a safe 28px fallback for Android WebViews where env() returns 0.
+  if (/Android/i.test(navigator.userAgent)) {
+    document.documentElement.style.setProperty('--inset-top', '28px');
+  }
+}
+
 // ─── System nav bar inset detection ───────────────────────────────────
 // env(safe-area-inset-bottom) returns 0 on MIUI / Android 11 WebViews even
 // when viewport-fit=cover is set, because KernelSU's activity doesn't forward
@@ -1104,8 +1125,9 @@ function detectNavInset() {
 
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Detect system nav bar height immediately — before any async work so the
-  // bottom nav is already correctly positioned during the loading screen.
+  // Detect system bar heights immediately — before any async work so the
+  // header and bottom nav are already correctly positioned during loading.
+  detectStatusBarInset();
   detectNavInset();
 
   // loadState() is wrapped in try/finally so the loading screen is ALWAYS

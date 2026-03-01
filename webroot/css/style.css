@@ -53,8 +53,9 @@
   --r-xs:      6px;
   --transition:.18s ease;
 
-  /* ── System nav bar inset (JS-measured fallback for WebViews where
-        env(safe-area-inset-bottom) returns 0 despite viewport-fit=cover) ── */
+  /* ── System insets (JS-measured fallback for WebViews where
+        env(safe-area-inset-*) returns 0 despite viewport-fit=cover) ── */
+  --inset-top: 0px;
   --inset-bottom: 0px;
 }
 
@@ -141,9 +142,10 @@ body {
 
 /* ─── Header ──────────────────────────────────────────────────── */
 #header {
-  height: 58px; min-height: 58px;
+  height: calc(58px + max(env(safe-area-inset-top, 0px), var(--inset-top, 0px)));
+  min-height: calc(58px + max(env(safe-area-inset-top, 0px), var(--inset-top, 0px)));
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0 16px;
+  padding: max(env(safe-area-inset-top, 0px), var(--inset-top, 0px)) 16px 0;
   background: linear-gradient(135deg,
     rgba(204,0,255,.06) 0%,
     rgba(13,10,26,.98) 50%,
