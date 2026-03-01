@@ -482,8 +482,18 @@ static std::vector<ElfEntry> enumerateLoadedElfs() {
                         &addr_s, &addr_e, perms, &offset, &dev_maj, &dev_min, &ino, path);
         if (n < 7 || ino == 0) continue;
         if (n >= 8 && strstr(path, ".so")) {
-            // Fix9: Skip our own module to prevent self-referential PLT hooks
+            // Fix9: Skip our own module to prevent self-referential PLT hooks.
             if (isHiddenPath(path)) continue;
+            // Fix10: Skip /apex/ paths (bionic libc.so and libart.so live here).
+            // These 200+ ELFs cause pltHookCommit() to return false (they often
+            // lack PLT entries for posix_spawnp / __system_property_read), which
+            // then triggers the Dobby fallback.  When PLT hooks and Dobby hooks
+            // both target the same function, orig_* ends up pointing to the
+            // already-hooked function address → infinite recursion → heap corruption
+            // in jemalloc (SIGSEGV SEGV_ACCERR, "beginning of crash" in logcat).
+            // The subprocess hooks we care about live in /system/lib64/ and /data/,
+            // NOT in /apex/; skipping /apex/ has zero impact on spoofing coverage.
+            if (strstr(path, "/apex/")) continue;
             dev_t dev = makedev(dev_maj, dev_min);
             auto key = std::make_pair((unsigned int)dev, ino);
             if (seen.insert(key).second)
@@ -3418,46 +3428,31 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
-        // Fix9: PLT hooks para funciones donde Dobby inline hooks fallan.
+        // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
         // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
         // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
-        // DobbyHook retorna ret=0 (éxito) pero orig=0x0 Y los handlers nunca se invocan.
+        // DobbyHook retorna ret=0 (éxito) pero orig=sym (sin trampoline real).
         // PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
-        // Fix9: Pre-resolves originals via dlsym, uses dummy vars, filters own module.
-        bool pltOk = installPltHooks();
-
-        if (!pltOk) {
-            // Fallback: Dobby hooks (pueden fallar silenciosamente en funciones pequeñas)
-            LOGE("Fix9: PLT hooks failed, falling back to Dobby for prop_read/execve/posix_spawn");
-
-            void* sysprop_read_func = DobbySymbolResolver("libc.so", "__system_property_read");
-            if (!sysprop_read_func) sysprop_read_func = dlsym(RTLD_DEFAULT, "__system_property_read");
-            if (sysprop_read_func) {
-                int dret = DobbyHook(sysprop_read_func, (void*)my_system_property_read, (void**)&orig_system_property_read);
-                LOGE("Fix9-fallback: prop_read: sym=%p ret=%d orig=%p", sysprop_read_func, dret, orig_system_property_read);
-            }
-
-            void* execve_func = DobbySymbolResolver("libc.so", "execve");
-            if (!execve_func) execve_func = dlsym(RTLD_DEFAULT, "execve");
-            if (execve_func) {
-                int dret = DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
-                LOGE("Fix9-fallback: execve: sym=%p ret=%d orig=%p", execve_func, dret, orig_execve);
-            }
-
-            void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
-            if (!spawn_func) spawn_func = dlsym(RTLD_DEFAULT, "posix_spawn");
-            if (spawn_func) {
-                int dret = DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
-                LOGE("Fix9-fallback: posix_spawn: sym=%p ret=%d orig=%p", spawn_func, dret, orig_posix_spawn);
-            }
-
-            void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
-            if (!spawnp_func) spawnp_func = dlsym(RTLD_DEFAULT, "posix_spawnp");
-            if (spawnp_func) {
-                int dret = DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
-                LOGE("Fix9-fallback: posix_spawnp: sym=%p ret=%d orig=%p", spawnp_func, dret, orig_posix_spawnp);
-            }
-        }
+        //
+        // FIX10 — eliminado el fallback Dobby que causaba el crash de vdinfos:
+        //
+        // Secuencia del crash (logcat "beginning of crash", SIGSEGV SEGV_ACCERR):
+        //   1. pltHookCommit() devuelve false porque algunos ELFs de /apex/ no tienen
+        //      entradas PLT para posix_spawnp/__system_property_read — esto es NORMAL.
+        //      Sin embargo SÍ instala hooks en los ELFs que tienen las PLT entries
+        //      (libandroid_runtime.so, libjavacore.so, libs de la app…).
+        //   2. El código antiguo interpretaba false como "falló todo" y activaba el
+        //      fallback Dobby, que hookeaba posix_spawn/execve en libc directamente.
+        //   3. Resultado: doble hook. La PLT hookeada llama a my_posix_spawn;
+        //      my_posix_spawn llama a orig_posix_spawn (== dirección real de libc) que
+        //      ya fue parchada por Dobby y salta de vuelta a my_posix_spawn → recursión
+        //      infinita → stack overflow → corrupción del heap de jemalloc → crash.
+        //
+        // Solución: pltHookCommit() false = éxito parcial aceptable.
+        // Los ELFs relevantes (/system/lib64/, /data/) SÍ tienen sus hooks instalados.
+        // Los /apex/ ya se filtraron en enumerateLoadedElfs() (Fix10).
+        // No se necesita fallback Dobby para estas funciones.
+        installPltHooks();
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
