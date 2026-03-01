@@ -1,7 +1,7 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.58 (The Void)
-**Last updated:** 2026-03-01 (PR72-QA: VD Info leak fixes)
+**Version:** v12.9.59 (The Void)
+**Last updated:** 2026-03-01 (PR73: toybox bypass, uname interception, Os.uname() JNI hook, MIUI filter)
 
 ---
 
@@ -226,6 +226,7 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 **Sensor (16):** getMaximumRange, getResolution, getPower, getMinDelay, getMaxDelay, getVersion, getFifoMaxEventCount, getFifoReservedEventCount, getName, getVendor, getStringType (×8 + custom sensor filter via getSensorList)
 **Network (8):** getType, getSubtype, getExtraInfo, isConnected, isAvailable, isRoaming, isWifiEnabled, startScan
 **SystemProperties (1):** native_get
+**Kernel (1):** uname (libcore/io/Linux — intercepts android.system.Os.uname())
 
 ---
 
@@ -292,6 +293,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
+| 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
 | 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |
 | 71g | v12.9.57 | WebView spoof toggle (separate from scope to avoid Destroy Identity crash) |
