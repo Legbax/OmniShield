@@ -1,7 +1,7 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.60 (The Void)
-**Last updated:** 2026-03-01 (PR73b: `__system_property_read` hook, os.version MIUI fix, uname shell wrapper, Dobby diagnostics)
+**Version:** v12.9.61 (The Void)
+**Last updated:** 2026-03-01 (Fix9: memfd+orig_posix_spawn subprocess fix, dlsym orig pre-resolution, self-hook filter, os.version multi-field)
 
 ---
 
@@ -15,7 +15,7 @@ OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the 
 |-------|------|-----|
 | 1. Properties | `__system_property_get`, `__system_property_read_callback`, `__system_property_read`, `SystemProperties.native_get` JNI | 168+ keys mapped to profile fields |
 | 2. VFS | `openat`, `read`, `fopen` (memfd for `/proc/cpuinfo`) | Fake `/proc/{cpuinfo,version,cmdline,status}`, `/sys/{cpu,battery,thermal,net}` |
-| 3. Subprocess | `execve`, `posix_spawn`, `posix_spawnp` | Emulate `getprop` and `cat /proc/cpuinfo` output in forked child |
+| 3. Subprocess | `execve`, `posix_spawn`, `posix_spawnp` | memfd + orig_posix_spawn for intercepted commands; direct write+_exit for execve |
 | 4. JNI Fields | `Build.*`, `Build.VERSION.*` static fields via `SetStaticObjectField` | 25+ fields overwritten in `postAppSpecialize` |
 | 5. JNI Methods | `hookJniNativeMethods` on Telephony, Location, Sensor, Network, Camera, MediaCodec | ~40 Java methods hooked |
 | 6. HAL/Driver | `eglQueryString`, `glGetString`, `vkGetPhysicalDeviceProperties`, `clGetDeviceInfo` | GPU identity, OpenGL ES version |
@@ -119,11 +119,17 @@ These rules are derived from past crashes and regressions. Violating any will ca
 
 7. **Never hook both `open` and `openat`**. Bionic's `open()` calls `openat()` internally → infinite recursion. Only hook `openat`. Use `orig_openat(AT_FDCWD, ...)` as terminal in `my_open`.
 
-### PLT Hooks (Fix8)
+### PLT Hooks (Fix8+Fix9)
 
 7b. **`execve`, `posix_spawn`, `posix_spawnp`, `__system_property_read` use Zygisk PLT hooks**, not Dobby. On aarch64 Bionic these are thin syscall wrappers (~4-8 instructions) — too small for Dobby's 12-byte trampoline. DobbyHook returns `ret=0` but `orig=0x0` and handlers never trigger. PLT hooks modify GOT pointers (always 8 bytes) in calling libraries via `pltHookRegister`/`pltHookCommit`. Dobby is only used as fallback if PLT hooks are unavailable.
 
 7c. **`my_system_property_read` has callback fallback**: when `orig_system_property_read` is NULL (Dobby trampoline failed), uses `orig_system_property_read_callback` to extract property name/value from `prop_info` pointer.
+
+7d. **Fix9: `orig_*` pointers MUST be pre-resolved via `dlsym(RTLD_DEFAULT)`** before PLT hooks. `pltHookRegister` across ~100 ELFs overwrites `oldFunc` for each match — the last write may contain a lazy-binding stub (garbage). Use dummy variables for PLT hook `oldFunc` parameter.
+
+7e. **Fix9: `enumerateLoadedElfs` MUST filter own module** (`isHiddenPath`). Self-hooking causes GOT entries in our own .so to point back to our hook functions → potential infinite recursion.
+
+7f. **Fix9: Intercepted subprocess commands use memfd + `orig_posix_spawn`** with the ORIGINAL `file_actions` and `attrp`. Direct `fork()` + `write(STDOUT_FILENO)` bypasses Java's pipe infrastructure (`posix_spawn_file_actions_t` with `dup2` for stdin/stdout/stderr). The memfd approach: generate spoofed content → write to `memfd_create("s", 0)` → call `orig_posix_spawn(pid, "/system/bin/cat", file_actions, attrp, ["cat", "/proc/self/fd/<N>"])` → Java's pipes work correctly.
 
 ### Property Spoofing
 
@@ -211,12 +217,12 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 
 ## 7. Hooked Functions Catalog
 
-### Zygisk PLT Hooks (Fix8, primary for thin syscall wrappers)
+### Zygisk PLT Hooks (Fix8+Fix9, primary for thin syscall wrappers)
 
 **libc (Process):** execve, posix_spawn, posix_spawnp
 **libc (Properties):** __system_property_read
 
-> These 4 functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Dobby fallback is retained if `pltHookCommit()` fails.
+> These 4 functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. Dobby fallback retained if `pltHookCommit()` fails.
 
 ### Dobby Native Hooks (~33, remaining)
 
@@ -305,7 +311,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
-| 73b | v12.9.60 | `__system_property_read` hook closes legacy API bypass (Fix1), Dobby diagnostic logging for execve/posix_spawn (Fix2), `os.version` direct `System.props` field access for MIUI (Fix3), `emulate_uname_output` shell wrapper argv parsing (Fix4), `dlsym(RTLD_DEFAULT)` fallback for execve/posix_spawn/posix_spawnp — DobbySymbolResolver fails on some Bionic builds (Fix5), `syscall(__NR_execve)` + `fork+execve` fallback when DobbyHook returns `orig=0x0` from PLT stubs (Fix6), `__system_property_read` dlsym fallback + diagnostic (Fix7a), posix_spawn fallback now calls hooked `execve()` instead of `syscall(__NR_execve)` which bypassed interception (Fix7b), LOGD→LOGE for hook entry diagnostics (Fix7c), **Zygisk PLT hooks replace Dobby for execve/posix_spawn/posix_spawnp/__system_property_read** — Dobby ret=0 + orig=0x0 + handlers never invoked confirms wrong-address hooking on aarch64 thin syscall wrappers; PLT hooks modify GOT pointers (8 bytes, always patchable) via `pltHookRegister`/`pltHookCommit`; `my_system_property_read` callback-based fallback when orig is NULL (Fix8) |
+| 73b | v12.9.61 | Fix1–Fix8: see previous, **Fix9: subprocess regression fix** — Fix8 PLT hooks broke ALL subprocesses (`error=-634729984, Exec failed`). Root causes: (A) `orig_posix_spawn` corrupted by multi-ELF overwrite (PLT hooks across ~100 ELFs, last write could be lazy-binding stub), (B) `handleGetpropSpawn` fork() bypassed Java's `posix_spawn_file_actions_t` pipe infrastructure, (C) self-hooking (own module included in ELF scan). **Fixes**: `dlsym(RTLD_DEFAULT)` pre-resolves orig_* before PLT hooks (guaranteed correct), dummy vars for `pltHookRegister` oldFunc, `isHiddenPath()` filter in `enumerateLoadedElfs`, **memfd + orig_posix_spawn approach** replaces fork+write — generates spoofed content to memfd, calls real posix_spawn with `["cat", "/proc/self/fd/<N>"]` + ORIGINAL file_actions preserving Java pipes, `os.version` override tries multiple System field names (`props`/`systemProperties`/`theProperties`) + `Hashtable.put()` fallback |
 | 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
 | 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |
