@@ -2626,7 +2626,7 @@ static void emulate_uname_output(char *const argv[]) {
 }
 
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]) {
-    LOGD("PR73b: my_execve called: %s", pathname ? pathname : "null");
+    LOGE("PR73b: my_execve called: %s", pathname ? pathname : "null");
     if (pathname && argv) {
         // Extract basename from path
         const char* base = strrchr(pathname, '/');
@@ -2849,17 +2849,18 @@ static int my_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions,
                           const void *attrp,
                           char *const argv[], char *const envp[]) {
-    LOGD("PR73b: my_posix_spawn called: %s", path ? path : "null");
+    LOGE("PR73b: my_posix_spawn called: %s", path ? path : "null");
     if (handleGetpropSpawn(path, argv, pid)) return 0;
 
-    // PR73b-Fix6: When orig is NULL (PLT stub), posix_spawn can't be called directly
-    // (no syscall equivalent). Fall back to fork+execve via syscall. The child's
-    // execve call will be intercepted by our hook if it matches getprop/uname/cat.
+    // PR73b-Fix6+Fix7b: When orig is NULL (PLT stub), fall back to fork+execve.
+    // Fix7b: MUST call execve() (hooked) not syscall(__NR_execve) (bypasses hook).
+    // After fork(), the child inherits the Dobby-patched address space, so calling
+    // execve() goes through my_execve which intercepts getprop/uname/cat.
     if (!orig_posix_spawn) {
         pid_t child = fork();
         if (child == -1) return errno;
         if (child == 0) {
-            syscall(__NR_execve, path, argv, envp);
+            execve(path, argv, envp);
             _exit(127);
         }
         if (pid) *pid = child;
@@ -2876,12 +2877,12 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
     // For getprop, the basename check in handleGetpropSpawn covers this
     if (file && handleGetpropSpawn(file, argv, pid)) return 0;
 
-    // PR73b-Fix6: Same fork+execve fallback as posix_spawn.
+    // PR73b-Fix6+Fix7b: Same fork+execve fallback — must use hooked execve().
     if (!orig_posix_spawnp) {
         pid_t child = fork();
         if (child == -1) return errno;
         if (child == 0) {
-            syscall(__NR_execve, file, argv, envp);
+            execve(file, argv, envp);
             _exit(127);
         }
         if (pid) *pid = child;
@@ -3239,12 +3240,19 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
-        // PR73b-Fix1: Hook __system_property_read() — API legacy (deprecated API 26).
+        // PR73b-Fix1 + Fix7a: Hook __system_property_read() — API legacy (deprecated API 26).
         // VD Info uses __system_property_find() + __system_property_read() to read
         // properties directly from shared memory, completely bypassing our hooks on
         // __system_property_get and __system_property_read_callback.
+        // Fix7a: Added dlsym fallback (same issue as execve) + diagnostic logging.
         void* sysprop_read_func = DobbySymbolResolver("libc.so", "__system_property_read");
-        if (sysprop_read_func) DobbyHook(sysprop_read_func, (void*)my_system_property_read, (void**)&orig_system_property_read);
+        if (!sysprop_read_func) sysprop_read_func = dlsym(RTLD_DEFAULT, "__system_property_read");
+        if (sysprop_read_func) {
+            int dret = DobbyHook(sysprop_read_func, (void*)my_system_property_read, (void**)&orig_system_property_read);
+            LOGE("PR73b: __system_property_read hook: sym=%p ret=%d orig=%p", sysprop_read_func, dret, orig_system_property_read);
+        } else {
+            LOGE("PR73b: __system_property_read symbol NOT FOUND (DobbySymbolResolver + dlsym)");
+        }
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
