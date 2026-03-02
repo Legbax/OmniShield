@@ -4085,6 +4085,12 @@ public:
         // RegisterNatives rejects the entire batch when any one signature is absent in
         // the target ROM (e.g. getTypeAllocationCode may not exist on all MIUI builds).
         // Injecting method-by-method ensures every individually-present hook fires.
+        // PR81-NOTE: hookJniNativeMethods only intercepts methods registered via
+        // RegisterNatives(). On TelephonyManager, most methods are pure Java wrappers
+        // around Binder calls. Hooks like getNetworkCountryIso likely fail silently.
+        // The hooks that DO work are those targeting ITelephony (internal class that
+        // registers native methods on some ROMs). One-by-one injection handles this
+        // gracefully — failed hooks are simply skipped.
         JNINativeMethod telephonyMethods[] = {
             {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
@@ -4174,6 +4180,14 @@ public:
         // PR38+39: ConnectivityManager — NetworkInfo getters
         // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
         // Solo activo cuando network_type=lte (g_spoofMobileNetwork=true).
+        // PR81-NOTE: The hooks below (getType, isConnected, etc.) are DEAD CODE on AOSP.
+        // NetworkInfo methods are pure Java — not registered via RegisterNatives().
+        // hookJniNativeMethods silently fails for these. The WiFi detection bypass
+        // relies on: (1) property hooks (wifi.interface, dhcp.wlan0.*),
+        //            (2) VFS hooks (/proc/net/dev, /proc/net/arp),
+        //            (3) getifaddrs() filtering,
+        //            (4) NetworkInterface hooks (PR81).
+        // Kept as-is: some OEM ROMs may register these as native.
         if (g_spoofMobileNetwork) {
             struct NetworkInfoHook {
                 static jint     getType(JNIEnv*, jobject)        { return 0; }   // TYPE_MOBILE
@@ -4211,6 +4225,80 @@ public:
             };
             g_api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
             if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+
+        // PR81: NetworkInterface — hide wlan0/tun0 in LTE mode.
+        // getAll() and getByName0() are REAL native methods (RegisterNatives in libcore),
+        // unlike NetworkInfo methods which are pure Java (see comment below).
+        if (g_spoofMobileNetwork) {
+            static jobjectArray (*orig_NI_getAll)(JNIEnv*, jclass) = nullptr;
+            static jobject (*orig_NI_getByName0)(JNIEnv*, jclass, jstring) = nullptr;
+
+            struct NIHook {
+                static jobjectArray getAll(JNIEnv* e, jclass cls) {
+                    if (!orig_NI_getAll) return nullptr;
+                    jobjectArray arr = orig_NI_getAll(e, cls);
+                    if (!arr) return arr;
+
+                    jint len = e->GetArrayLength(arr);
+                    jclass niClass = e->FindClass("java/net/NetworkInterface");
+                    jmethodID getName = niClass ? e->GetMethodID(niClass, "getName",
+                        "()Ljava/lang/String;") : nullptr;
+                    if (!getName) return arr;
+
+                    std::vector<jobject> kept;
+                    for (jint i = 0; i < len; i++) {
+                        jobject ni = e->GetObjectArrayElement(arr, i);
+                        if (!ni) continue;
+                        jstring nameJ = (jstring)e->CallObjectMethod(ni, getName);
+                        if (!nameJ) { kept.push_back(ni); continue; }
+                        const char* name = e->GetStringUTFChars(nameJ, nullptr);
+                        bool hide = (strcmp(name, "wlan0") == 0 ||
+                                     strncmp(name, "tun", 3) == 0 ||
+                                     strncmp(name, "dummy", 5) == 0 ||
+                                     strcmp(name, "p2p0") == 0);
+                        e->ReleaseStringUTFChars(nameJ, name);
+                        if (!hide) kept.push_back(ni);
+                    }
+
+                    jobjectArray out = e->NewObjectArray((jint)kept.size(), niClass, nullptr);
+                    for (jint i = 0; i < (jint)kept.size(); i++)
+                        e->SetObjectArrayElement(out, i, kept[i]);
+                    return out;
+                }
+
+                static jobject getByName0(JNIEnv* e, jclass cls, jstring nameJ) {
+                    if (!orig_NI_getByName0) return nullptr;
+                    if (nameJ) {
+                        const char* name = e->GetStringUTFChars(nameJ, nullptr);
+                        bool hide = (strcmp(name, "wlan0") == 0 ||
+                                     strncmp(name, "tun", 3) == 0 ||
+                                     strncmp(name, "dummy", 5) == 0 ||
+                                     strcmp(name, "p2p0") == 0);
+                        e->ReleaseStringUTFChars(nameJ, name);
+                        if (hide) return nullptr;
+                    }
+                    return orig_NI_getByName0(e, cls, nameJ);
+                }
+            };
+
+            JNINativeMethod niMethods[] = {
+                {"getAll",     "()[Ljava/net/NetworkInterface;",
+                 (void*)NIHook::getAll},
+                {"getByName0", "(Ljava/lang/String;)Ljava/net/NetworkInterface;",
+                 (void*)NIHook::getByName0},
+            };
+
+            for (int i = 0; i < 2; i++) {
+                g_api->hookJniNativeMethods(env, "java/net/NetworkInterface",
+                                            &niMethods[i], 1);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+
+            if (niMethods[0].fnPtr && niMethods[0].fnPtr != (void*)NIHook::getAll)
+                orig_NI_getAll = reinterpret_cast<decltype(orig_NI_getAll)>(niMethods[0].fnPtr);
+            if (niMethods[1].fnPtr && niMethods[1].fnPtr != (void*)NIHook::getByName0)
+                orig_NI_getByName0 = reinterpret_cast<decltype(orig_NI_getByName0)>(niMethods[1].fnPtr);
         }
 
         // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
@@ -4527,6 +4615,12 @@ static void writeProfileProps(const DeviceFingerprint& fp,
 
     // PR75b: Market name — leaks real "Redmi 9" in property trie
     fprintf(f, "ro.product.marketname=%s\n", fp.model);
+
+    // PR81: ODM fingerprint — leaks real device via direct prop_info shared memory
+    // access that bypasses all libc hooks. Safe for resetprop because MIUI system UI
+    // uses ro.build.fingerprint (not the ODM variant) for UI decisions.
+    fprintf(f, "ro.odm.build.fingerprint=%s\n", fp.fingerprint);
+    fprintf(f, "ro.build.description=%s\n", fp.buildDescription);
 
     fclose(f);
     chmod("/data/adb/.omni_data/.profile_props", 0644);
