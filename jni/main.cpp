@@ -213,10 +213,7 @@ static int (*orig_fcntl)(int fd, int cmd, ...);
 // PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
 static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 
-// PR81: NetworkInterface hooks — file-scope originals (accessed by JNI hook callbacks
-// that may run on any thread; must be set BEFORE the hook is callable).
-static jobjectArray (*orig_NI_getAll)(JNIEnv*, jclass) = nullptr;
-static jobject (*orig_NI_getByName0)(JNIEnv*, jclass, jstring) = nullptr;
+// PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
 
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
@@ -4235,89 +4232,19 @@ public:
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
-        // PR81: NetworkInterface — hide wlan0/tun0 in LTE mode.
-        // getAll() and getByName0() are REAL native methods (RegisterNatives in libcore),
-        // unlike NetworkInfo methods which are pure Java (see comment below).
-        // PR83-FIX: orig_NI_* moved to file scope; originals saved IMMEDIATELY after
-        // each individual hook to close the race window where a framework thread could
-        // call getAll() before the original pointer was saved → nullptr → NPE → blackscreen.
-        if (g_spoofMobileNetwork) {
-            struct NIHook {
-                static jobjectArray getAll(JNIEnv* e, jclass cls) {
-                    if (!orig_NI_getAll) {
-                        // Safety net: if original wasn't captured, return empty array
-                        // instead of nullptr (which would cause NPE in Java callers).
-                        jclass niClass = e->FindClass("java/net/NetworkInterface");
-                        if (e->ExceptionCheck()) e->ExceptionClear();
-                        if (niClass) return e->NewObjectArray(0, niClass, nullptr);
-                        return nullptr;
-                    }
-                    jobjectArray arr = orig_NI_getAll(e, cls);
-                    if (!arr) return arr;
-
-                    jint len = e->GetArrayLength(arr);
-                    jclass niClass = e->FindClass("java/net/NetworkInterface");
-                    jmethodID getName = niClass ? e->GetMethodID(niClass, "getName",
-                        "()Ljava/lang/String;") : nullptr;
-                    if (e->ExceptionCheck()) e->ExceptionClear();
-                    if (!getName) return arr;
-
-                    std::vector<jobject> kept;
-                    for (jint i = 0; i < len; i++) {
-                        jobject ni = e->GetObjectArrayElement(arr, i);
-                        if (!ni) continue;
-                        jstring nameJ = (jstring)e->CallObjectMethod(ni, getName);
-                        if (!nameJ) { kept.push_back(ni); continue; }
-                        const char* name = e->GetStringUTFChars(nameJ, nullptr);
-                        bool hide = (strcmp(name, "wlan0") == 0 ||
-                                     strncmp(name, "tun", 3) == 0 ||
-                                     strncmp(name, "dummy", 5) == 0 ||
-                                     strcmp(name, "p2p0") == 0);
-                        e->ReleaseStringUTFChars(nameJ, name);
-                        if (!hide) kept.push_back(ni);
-                    }
-
-                    jobjectArray out = e->NewObjectArray((jint)kept.size(), niClass, nullptr);
-                    for (jint i = 0; i < (jint)kept.size(); i++)
-                        e->SetObjectArrayElement(out, i, kept[i]);
-                    return out;
-                }
-
-                static jobject getByName0(JNIEnv* e, jclass cls, jstring nameJ) {
-                    if (!orig_NI_getByName0) return nullptr;
-                    if (nameJ) {
-                        const char* name = e->GetStringUTFChars(nameJ, nullptr);
-                        bool hide = (strcmp(name, "wlan0") == 0 ||
-                                     strncmp(name, "tun", 3) == 0 ||
-                                     strncmp(name, "dummy", 5) == 0 ||
-                                     strcmp(name, "p2p0") == 0);
-                        e->ReleaseStringUTFChars(nameJ, name);
-                        if (hide) return nullptr;
-                    }
-                    return orig_NI_getByName0(e, cls, nameJ);
-                }
-            };
-
-            // Hook getAll — save original IMMEDIATELY before hooking getByName0
-            {
-                JNINativeMethod m = {"getAll", "()[Ljava/net/NetworkInterface;",
-                                     (void*)NIHook::getAll};
-                g_api->hookJniNativeMethods(env, "java/net/NetworkInterface", &m, 1);
-                if (env->ExceptionCheck()) env->ExceptionClear();
-                if (m.fnPtr && m.fnPtr != (void*)NIHook::getAll)
-                    orig_NI_getAll = reinterpret_cast<decltype(orig_NI_getAll)>(m.fnPtr);
-            }
-            // Hook getByName0 — save original IMMEDIATELY
-            {
-                JNINativeMethod m = {"getByName0",
-                                     "(Ljava/lang/String;)Ljava/net/NetworkInterface;",
-                                     (void*)NIHook::getByName0};
-                g_api->hookJniNativeMethods(env, "java/net/NetworkInterface", &m, 1);
-                if (env->ExceptionCheck()) env->ExceptionClear();
-                if (m.fnPtr && m.fnPtr != (void*)NIHook::getByName0)
-                    orig_NI_getByName0 = reinterpret_cast<decltype(orig_NI_getByName0)>(m.fnPtr);
-            }
-        }
+        // PR81: NetworkInterface hooks — DISABLED (PR83).
+        // hookJniNativeMethods on NetworkInterface.getAll()/getByName0() caused:
+        //   1. Blackscreen on target app (orig_NI_getAll never captured → empty array
+        //      or nullptr → app stuck loading with no visible interfaces)
+        //   2. Cascading crash of ALL apps on the device (RegisterNatives side-effect
+        //      corrupts the native method table for NetworkInterface, which is shared
+        //      across Zygote-forked processes via COW pages that some Zygisk impls
+        //      don't properly isolate)
+        // The LTE spoof already works via: property hooks (wifi.interface, dhcp.wlan0.*),
+        // VFS hooks (/proc/net/dev, /proc/net/arp), and getifaddrs() filtering.
+        // NetworkInterface coverage is a nice-to-have, not a requirement.
+        // TODO: revisit with Dobby-based approach on the native C implementation
+        // (libcore/ojluni/src/main/native/NetworkInterface.c) instead of JNI hooking.
 
         // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
         // getSSID/getBSSID/getRssi/getNetworkId son métodos Java puros (no RegisterNatives).
