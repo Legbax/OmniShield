@@ -105,7 +105,7 @@ echo ""
 # ─── Test 2: YAML Generation ─────────────────────────────────────────
 echo "--- Test 2: YAML Generation ---"
 
-TUN_NAME="tun_omni"
+TUN_NAME="tun0"
 TUN_MTU="8500"
 TUN_ADDR="172.19.0.1"
 
@@ -141,7 +141,7 @@ YAMLEOF
 # Validate YAML structure
 [ -f "$TUN2SOCKS_CFG" ] && pass "YAML file created" || fail "YAML file missing"
 
-grep -q "name: tun_omni" "$TUN2SOCKS_CFG" && pass "tunnel.name correct" || fail "tunnel.name wrong"
+grep -q "name: tun0" "$TUN2SOCKS_CFG" && pass "tunnel.name correct" || fail "tunnel.name wrong"
 grep -q "mtu: 8500" "$TUN2SOCKS_CFG" && pass "tunnel.mtu correct" || fail "tunnel.mtu wrong"
 grep -q "ipv4: 172.19.0.1" "$TUN2SOCKS_CFG" && pass "tunnel.ipv4 correct" || fail "tunnel.ipv4 wrong"
 grep -q "port: 44445" "$TUN2SOCKS_CFG" && pass "socks5.port correct" || fail "socks5.port wrong"

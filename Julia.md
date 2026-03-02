@@ -179,7 +179,7 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
                                     │
                               ┌─────▼──────┐
                               │ tun2socks   │ (hev-socks5-tunnel, ARM64 static binary)
-                              │ TUN: tun_omni│ (172.19.0.1/30, MTU 8500)
+                              │ TUN: tun0│ (172.19.0.1/30, MTU 8500)
                               │ SOCKS5 proxy │
                               └─────┬──────┘
                                     │
