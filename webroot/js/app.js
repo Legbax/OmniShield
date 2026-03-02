@@ -137,7 +137,7 @@ const state = {
   wifiSsid: '', wifiBssid: '', mccmnc: '', simOperator: '',
   lat: 0, lon: 0, alt: 0, tz: '',
   carrier: '', simCountry: '', correlation: 0,
-  deviceIp: '', deviceModel: ''
+  deviceIp: '', deviceModel: '', proxyIp: ''
 };
 
 // overrides — per-field manual seeds (each "randomize" just picks a new random seed for that field)
@@ -254,15 +254,31 @@ function computeAll() {
 // command.  This reduces binder round-trips from 3 → 1 and eliminates the
 // scenario where each 8 s timeout compounds into a 24 s system-wide freeze.
 async function loadSystemInfo() {
-  const { stdout } = await ksu_exec(
+  // Build a single shell command that fetches local IP, model, and proxy exit IP
+  let cmd =
     "IP=$(ip -4 addr show wlan0 2>/dev/null|grep 'inet '|awk '{print $2}'|cut -d/ -f1|head -1);" +
     "[ -z \"$IP\" ]&&IP=$(ip -4 addr show rmnet0 2>/dev/null|grep 'inet '|awk '{print $2}'|cut -d/ -f1|head -1);" +
     "MODEL=$(getprop ro.product.model 2>/dev/null);" +
-    "echo \"${IP}||${MODEL}\""
-  );
+    "PROXYIP=;";
+
+  // If proxy is enabled, query public exit IP through the SOCKS5 tunnel
+  if (state.proxyEnabled && state.proxyHost && state.proxyPort) {
+    const auth = state.proxyUser
+      ? `${state.proxyUser}:${state.proxyPass || ''}@`
+      : '';
+    const proxyUrl = `socks5h://${auth}${state.proxyHost}:${state.proxyPort}`;
+    // curl through proxy with short timeout; try ifconfig.me then api.ipify.org
+    cmd += `PROXYIP=$(curl -s -m 5 -x '${proxyUrl}' https://api.ipify.org 2>/dev/null);` +
+           `[ -z "$PROXYIP" ]&&PROXYIP=$(curl -s -m 5 -x '${proxyUrl}' https://ifconfig.me 2>/dev/null);`;
+  }
+
+  cmd += "echo \"${IP}||${MODEL}||${PROXYIP}\"";
+
+  const { stdout } = await ksu_exec(cmd);
   const parts = (stdout || '').split('||');
   state.deviceIp    = parts[0] || '–';
   state.deviceModel = (parts[1] || '').trim() || state.profile;
+  state.proxyIp     = (parts[2] || '').trim() || '';
 }
 
 // ─── Persist helpers ────────────────────────────────────────────────
@@ -393,7 +409,14 @@ function renderStatus() {
   updateGauge(state.correlation);
   setCell('status-device', state.profile);
   setCell('status-model', state.deviceModel);
-  setCell('status-ip', state.deviceIp);
+  // Show proxy exit IP when proxy is active, otherwise local IP
+  if (state.proxyEnabled && state.proxyIp) {
+    setCell('status-ip', state.proxyIp);
+    setCell('status-ip-label', 'Proxy IP');
+  } else {
+    setCell('status-ip', state.deviceIp);
+    setCell('status-ip-label', 'IP Address');
+  }
   setCell('status-simcountry', state.simCountry);
   setCell('status-phone', state.phone);
   setCell('status-carrier', state.carrier);
