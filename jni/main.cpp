@@ -3791,16 +3791,17 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
 //   offset 4:  char value[92]          (PROP_VALUE_MAX)
 //   offset 96: char name[0]            (flexible array)
 static void patchPropertyPages() {
-    typedef int (*foreach_fn_t)(void (*)(const prop_info*, void*), void*);
-    auto foreach_fn = reinterpret_cast<foreach_fn_t>(
-        dlsym(RTLD_DEFAULT, "__system_property_foreach"));
-
-    if (!foreach_fn) {
-        LOGE("PR84b: __system_property_foreach not found");
+    // PR91: Use orig_system_property_foreach (Dobby trampoline) instead of dlsym.
+    // Our my_dlsym hook (PR86) intercepts dlsym("__system_property_foreach") and
+    // returns my_system_property_foreach, which wraps the callback with FakePropInfo
+    // substitution. Phase 2 needs REAL prop_info* pointers into shared memory
+    // (not FakePropInfo* on the heap), so we must use the original function.
+    if (!orig_system_property_foreach) {
+        LOGE("PR91: orig_system_property_foreach not set, skip patchPropertyPages");
         return;
     }
     if (!orig_system_property_read_callback && !orig_system_property_read) {
-        LOGE("PR84b: no orig read function, skip");
+        LOGE("PR91: no orig read function, skip");
         return;
     }
 
@@ -3811,7 +3812,7 @@ static void patchPropertyPages() {
     };
     std::vector<PatchEntry> patches;
 
-    foreach_fn([](const prop_info* pi, void* cookie) {
+    orig_system_property_foreach([](const prop_info* pi, void* cookie) {
         auto* out = static_cast<std::vector<PatchEntry>*>(cookie);
 
         // Read real name + value via original (unhooked) function.
@@ -3852,11 +3853,11 @@ static void patchPropertyPages() {
     }, &patches);
 
     if (patches.empty()) {
-        LOGD("PR84b: no properties need shadow patching");
+        LOGD("PR91: no properties need shadow patching");
         return;
     }
 
-    LOGE("PR84b: %zu properties to shadow-patch", patches.size());
+    LOGE("PR91: %zu properties to shadow-patch", patches.size());
 
     // Phase 2: Remap affected pages as private anonymous and write spoofed values.
     // mmap(MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS) replaces the shared mapping with
@@ -3886,7 +3887,7 @@ static void patchPropertyPages() {
                           PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
             if (r == MAP_FAILED) {
-                LOGE("PR84b: mmap FAIL page=%p: %s", (void*)pg, strerror(errno));
+                LOGE("PR91: mmap FAIL page=%p: %s", (void*)pg, strerror(errno));
                 continue;
             }
 
@@ -3910,7 +3911,7 @@ static void patchPropertyPages() {
         mprotect(reinterpret_cast<void*>(pg), ps, PROT_READ);
     }
 
-    LOGE("PR84b: shadow-patched %d/%zu props across %zu pages",
+    LOGE("PR91: shadow-patched %d/%zu props across %zu pages",
          patched, patches.size(), remapped.size());
 }
 
@@ -4375,11 +4376,16 @@ public:
             }
         }
 
-        // PR85: patchPropertyPages() DISABLED — redundant now that the PLT hook for
-        // __system_property_find returns FakePropInfo structs with spoofed values.
-        // Direct memory reads are covered by the fake prop_info, so MAP_FIXED patching
-        // of shared property pages is no longer needed.
-        // patchPropertyPages();
+        // PR91: Re-enable patchPropertyPages() — shadow-patch property memory.
+        // PR85 disabled this assuming FakePropInfo (from __system_property_find hook)
+        // covered all direct memory reads. But VDInfo parses the property trie
+        // directly from shared memory (/dev/__properties__/) WITHOUT calling any
+        // bionic API — no __system_property_find, no __system_property_get, no
+        // __system_property_foreach. It walks the trie data structure manually,
+        // reading prop_info->value bytes directly. No function hook can intercept this.
+        // The ONLY defense: replace the shared property memory pages with private
+        // copies containing spoofed values. This is what patchPropertyPages() does.
+        patchPropertyPages();
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
