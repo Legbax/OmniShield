@@ -1282,6 +1282,22 @@ int my_system_property_get(const char *key, char *value) {
             // Suppress MTK version — ODM-specific string leaks manufacturer identity
             value[0] = '\0'; return 0;
         }
+        // PR74: ro.vendor.mediatek.* — VDInfo reads these directly from property area
+        else if (k == "ro.vendor.mediatek.platform") {
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                value[0] = '\0'; return 0;  // Non-MTK profile: suppress
+            }
+            dynamic_buffer = fp.hardwareChipname;
+        }
+        else if (k == "ro.vendor.mediatek.version.branch" ||
+                 k == "ro.vendor.mediatek.version.release" ||
+                 k == "ro.mediatek.version.branch") {
+            value[0] = '\0'; return 0;  // Suppress ODM-specific MediaTek strings
+        }
+        else if (k == "ro.vendor.md_apps.load_verno") {
+            value[0] = '\0'; return 0;  // Suppress MediaTek modem version
+        }
 
         // ── PR70c: Leaked props detected by VD-Infos ─────────────────────
 
@@ -3684,6 +3700,34 @@ public:
                             env->CallStaticObjectMethod(sys_class, setProp, josv, jkv);
                             if (env->ExceptionCheck()) env->ExceptionClear();
 
+                            // PR74-Fix9b: Attempt 1b — System.getProperties().put()
+                            // Bypasses field name dependency — MIUI may use a different
+                            // internal field name for the Properties object.
+                            {
+                                jmethodID getPropsMethod = env->GetStaticMethodID(sys_class,
+                                    "getProperties", "()Ljava/util/Properties;");
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                                if (getPropsMethod) {
+                                    jobject gpObj = env->CallStaticObjectMethod(sys_class, getPropsMethod);
+                                    if (!env->ExceptionCheck() && gpObj) {
+                                        jclass htClass2 = env->FindClass("java/util/Hashtable");
+                                        if (htClass2) {
+                                            jmethodID putM = env->GetMethodID(htClass2, "put",
+                                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+                                            if (putM) {
+                                                env->CallObjectMethod(gpObj, putM, josv, jkv);
+                                                if (!env->ExceptionCheck()) {
+                                                    LOGE("Fix9b: os.version set via System.getProperties().put()");
+                                                }
+                                            }
+                                            env->DeleteLocalRef(htClass2);
+                                        }
+                                        env->DeleteLocalRef(gpObj);
+                                    }
+                                    if (env->ExceptionCheck()) env->ExceptionClear();
+                                }
+                            }
+
                             // Fix9: Attempt 2 — direct field access with multiple field names.
                             // The field name varies across Android versions and OEMs:
                             //   "props" (AOSP 8-10), "systemProperties" (AOSP 11+),
@@ -4096,148 +4140,39 @@ REGISTER_ZYGISK_MODULE(OmniModule)
 // Also performs two one-time operations on profile change:
 // 1. Calls ksu_susfs set_uname (backup for post-fs-data.sh, handles profile
 //    changes without reboot).
-// 2. Writes .profile_props file with all profile properties for resetprop
-//    (boot-completed.sh reads this to sync the property area memory).
-static void writeProfileProps(const DeviceFingerprint& fp) {
+// 2. Writes .profile_props file with SAFE runtime properties for resetprop
+//    (boot-completed.sh reads this to fix system_server Binder responses).
+//    NOTE: Identity props (ro.product.*, fingerprints, build info) are NOT
+//    included — resetprop is global and would break MIUI/system UI.
+//    Identity spoofing is handled by Zygisk JNI hooks in scoped apps.
+static void writeProfileProps(const DeviceFingerprint& fp,
+                              const std::string& profileName, long masterSeed) {
+    // PR74: ONLY write runtime properties safe for global resetprop.
+    // Identity properties (ro.product.*, ro.build.*, ro.hardware.*, fingerprints)
+    // are NOT included — resetprop on those breaks MIUI/system UI because it's global.
+    // Identity spoofing is already handled by Zygisk JNI hooks in scoped apps.
+    // This file covers properties that system_server reads via Binder (gsm.*, vendor.*),
+    // plus serial/IMEI suppression and MediaTek vendor property suppression.
     FILE* f = fopen("/data/adb/.omni_data/.profile_props", "w");
     if (!f) return;
 
-    // Device identity — all partition namespaces
-    const char* ns_model[] = {
-        "ro.product.model", "ro.product.system.model", "ro.product.vendor.model",
-        "ro.product.odm.model", "ro.product.product.model", "ro.product.system_ext.model", nullptr
-    };
-    const char* ns_brand[] = {
-        "ro.product.brand", "ro.product.system.brand", "ro.product.vendor.brand",
-        "ro.product.odm.brand", "ro.product.product.brand", "ro.product.system_ext.brand", nullptr
-    };
-    const char* ns_manufacturer[] = {
-        "ro.product.manufacturer", "ro.product.system.manufacturer", "ro.product.vendor.manufacturer",
-        "ro.product.odm.manufacturer", "ro.product.product.manufacturer", "ro.product.system_ext.manufacturer", nullptr
-    };
-    const char* ns_device[] = {
-        "ro.product.device", "ro.product.system.device", "ro.product.vendor.device",
-        "ro.product.odm.device", "ro.product.product.device", "ro.product.system_ext.device", nullptr
-    };
-    const char* ns_name[] = {
-        "ro.product.name", "ro.product.system.name", "ro.product.vendor.name",
-        "ro.product.odm.name", "ro.product.product.name", "ro.product.system_ext.name", nullptr
-    };
-
-    for (int i = 0; ns_model[i]; i++)        fprintf(f, "%s=%s\n", ns_model[i], fp.model);
-    for (int i = 0; ns_brand[i]; i++)        fprintf(f, "%s=%s\n", ns_brand[i], fp.brand);
-    for (int i = 0; ns_manufacturer[i]; i++) fprintf(f, "%s=%s\n", ns_manufacturer[i], fp.manufacturer);
-    for (int i = 0; ns_device[i]; i++)       fprintf(f, "%s=%s\n", ns_device[i], fp.device);
-    for (int i = 0; ns_name[i]; i++)         fprintf(f, "%s=%s\n", ns_name[i], fp.product);
-
-    // Fingerprints
-    fprintf(f, "ro.build.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.vendor.build.fingerprint=%s\n", fp.vendorFingerprint);
-    fprintf(f, "ro.odm.build.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.system.build.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.system_ext.build.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.product.system.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.product.vendor.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.product.odm.fingerprint=%s\n", fp.fingerprint);
-
-    // Build info — all partition namespaces
-    const char* ns_inc[] = {
-        "ro.build.version.incremental", "ro.vendor.build.version.incremental",
-        "ro.odm.build.version.incremental", "ro.product.build.version.incremental",
-        "ro.system.build.version.incremental", "ro.system_ext.build.version.incremental",
-        "ro.bootimage.build.version.incremental", nullptr
-    };
-    const char* ns_sp[] = {
-        "ro.build.version.security_patch", "ro.vendor.build.security_patch",
-        "ro.odm.build.version.security_patch", nullptr
-    };
-    const char* ns_rel[] = {
-        "ro.build.version.release", "ro.vendor.build.version.release",
-        "ro.odm.build.version.release", "ro.product.build.version.release",
-        "ro.system.build.version.release", "ro.system_ext.build.version.release",
-        "ro.build.version.release_or_codename", "ro.vendor.build.version.release_or_codename",
-        "ro.odm.build.version.release_or_codename", nullptr
-    };
-    const char* ns_utc[] = {
-        "ro.build.date.utc", "ro.vendor.build.date.utc", "ro.odm.build.date.utc",
-        "ro.product.build.date.utc", "ro.system.build.date.utc",
-        "ro.system_ext.build.date.utc", "ro.bootimage.build.date.utc", nullptr
-    };
-    const char* ns_id[] = {
-        "ro.build.id", "ro.vendor.build.id", "ro.odm.build.id",
-        "ro.product.build.id", "ro.system.build.id", "ro.system_ext.build.id", nullptr
-    };
-    const char* ns_type[] = {
-        "ro.build.type", "ro.vendor.build.type", "ro.odm.build.type",
-        "ro.product.build.type", "ro.system.build.type", "ro.system_ext.build.type", nullptr
-    };
-    const char* ns_tags[] = {
-        "ro.build.tags", "ro.vendor.build.tags", "ro.odm.build.tags",
-        "ro.product.build.tags", "ro.system.build.tags", "ro.system_ext.build.tags", nullptr
-    };
-
-    for (int i = 0; ns_inc[i]; i++)  fprintf(f, "%s=%s\n", ns_inc[i], fp.incremental);
-    for (int i = 0; ns_sp[i]; i++)   fprintf(f, "%s=%s\n", ns_sp[i], fp.securityPatch);
-    for (int i = 0; ns_rel[i]; i++)  fprintf(f, "%s=%s\n", ns_rel[i], fp.release);
-    for (int i = 0; ns_utc[i]; i++)  fprintf(f, "%s=%s\n", ns_utc[i], fp.buildDateUtc);
-    for (int i = 0; ns_id[i]; i++)   fprintf(f, "%s=%s\n", ns_id[i], fp.buildId);
-    for (int i = 0; ns_type[i]; i++) fprintf(f, "%s=%s\n", ns_type[i], fp.type);
-    for (int i = 0; ns_tags[i]; i++) fprintf(f, "%s=%s\n", ns_tags[i], fp.tags);
-
-    // Standalone build props
-    fprintf(f, "ro.build.display.id=%s\n", fp.display);
-    fprintf(f, "ro.build.description=%s\n", fp.buildDescription);
-    fprintf(f, "ro.vendor.build.description=%s\n", fp.buildDescription);
-    fprintf(f, "ro.odm.build.description=%s\n", fp.buildDescription);
-    fprintf(f, "ro.build.flavor=%s\n", fp.buildFlavor);
-    fprintf(f, "ro.build.host=%s\n", fp.buildHost);
-    fprintf(f, "ro.build.user=%s\n", fp.buildUser);
-    fprintf(f, "ro.build.product=%s\n", fp.product);
-
-    // Hardware / platform
-    fprintf(f, "ro.hardware=%s\n", fp.hardware);
-    fprintf(f, "ro.board.platform=%s\n", fp.boardPlatform);
-    fprintf(f, "ro.boot.hardware=%s\n", fp.hardware);
-    fprintf(f, "ro.boot.hardware.platform=%s\n", fp.boardPlatform);
-    fprintf(f, "ro.product.board=%s\n", fp.board);
-    fprintf(f, "ro.boot.product.hardware.sku=%s\n", fp.device);
-    fprintf(f, "ro.hardware.chipname=%s\n", fp.hardwareChipname);
-
-    // Boot / security
-    fprintf(f, "ro.bootloader=%s\n", fp.bootloader);
-    fprintf(f, "ro.boot.bootloader=%s\n", fp.bootloader);
-    fprintf(f, "ro.boot.verifiedbootstate=green\n");
-    fprintf(f, "ro.boot.flash.locked=1\n");
-    fprintf(f, "ro.boot.vbmeta.device_state=locked\n");
-    fprintf(f, "ro.boot.veritymode=enforcing\n");
-    fprintf(f, "ro.debuggable=0\n");
-    fprintf(f, "ro.secure=1\n");
-
-    // Market/cert names
-    fprintf(f, "ro.product.cert=%s\n", fp.model);
-    fprintf(f, "ro.product.mod_device=%s\n", fp.product);
-    fprintf(f, "ro.boot.rsc=%s\n", fp.device);
-    fprintf(f, "ro.fota.oem=%s\n", fp.manufacturer);
-
-    // Radio
+    // Radio / baseband — system_server reads these via Binder for getRadio()
     fprintf(f, "gsm.version.baseband=%s\n", fp.radioVersion);
-    fprintf(f, "ro.build.expect.baseband=%s\n", fp.radioVersion);
-    fprintf(f, "ro.baseband=%s\n", fp.radioVersion);
 
-    // Hostname
+    // Hostname — leaks real model+brand
     fprintf(f, "net.hostname=%s-%s\n", fp.model, fp.brand);
 
-    // GSM operator / telephony — ensures system_server returns spoofed values via binder
-    // (system_server is NOT in OmniShield scope, so JNI hooks don't cover it)
+    // GSM operator / telephony — system_server returns these via Binder
+    // Fixes getNetworkCountryIso(), getSimCountryIso() returning real country
     fprintf(f, "gsm.operator.iso-country=us\n");
     fprintf(f, "gsm.sim.operator.iso-country=us\n");
     {
-        std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+        std::string imsi = omni::engine::generateValidImsi(profileName, masterSeed);
         std::string mcc = imsi.substr(0, 3);
         std::string plmn = (mcc == "310" || mcc == "311") ? imsi.substr(0, 6) : imsi.substr(0, 5);
         fprintf(f, "gsm.operator.numeric=%s\n", plmn.c_str());
         fprintf(f, "gsm.sim.operator.numeric=%s\n", plmn.c_str());
-        std::string carrier = omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed);
+        std::string carrier = omni::engine::getCarrierNameForImsi(profileName, masterSeed);
         fprintf(f, "gsm.operator.alpha=%s\n", carrier.c_str());
         fprintf(f, "gsm.sim.operator.alpha=%s\n", carrier.c_str());
     }
@@ -4245,6 +4180,17 @@ static void writeProfileProps(const DeviceFingerprint& fp) {
     // Suppress leaky vendor props
     fprintf(f, "vendor.gsm.serial=\n");
     fprintf(f, "vendor.gsm.project.baseband=\n");
+
+    // Suppress MediaTek vendor props (leak real SoC identity on non-MTK profiles)
+    fprintf(f, "ro.vendor.mediatek.platform=\n");
+    fprintf(f, "ro.vendor.mediatek.version.branch=\n");
+    fprintf(f, "ro.vendor.mediatek.version.release=\n");
+    fprintf(f, "ro.mediatek.version.branch=\n");
+    fprintf(f, "ro.vendor.md_apps.load_verno=\n");
+
+    // RIL version
+    std::string rilVer = omni::engine::getRilVersionForProfile(profileName);
+    fprintf(f, "gsm.version.ril-impl=%s\n", rilVer.c_str());
 
     fclose(f);
     chmod("/data/adb/.omni_data/.profile_props", 0644);
@@ -4263,24 +4209,62 @@ static void companion_handler(int client) {
         write(client, content.c_str(), len);
     }
 
-    // One-time per profile: set_uname backup + generate .profile_props
+    // One-time per profile: set_uname backup + generate .profile_props + apply resetprop
+    // PR74: Local config parse — avoids mutating globals used by hook threads
     if (!content.empty()) {
-        // Save/restore globals (companion shares address space across calls)
-        std::string prevProfile = g_currentProfileName;
-        parseConfigString(content);
-        if (g_currentProfileName != prevProfile && !g_currentProfileName.empty()) {
-            // 1. Call ksu_susfs set_uname as backup (handles profile changes without reboot)
-            if (access("/data/adb/ksu/bin/ksu_susfs", X_OK) == 0) {
-                std::string kv = getSpoofedKernelVersion();
-                std::string cmd = "/data/adb/ksu/bin/ksu_susfs set_uname '"
-                                + kv + "' '#1 SMP PREEMPT' 2>/dev/null";
-                system(cmd.c_str());
+        std::map<std::string, std::string> localConfig;
+        std::istringstream cfgStream(content);
+        std::string cfgLine;
+        while (std::getline(cfgStream, cfgLine)) {
+            auto pos = cfgLine.find('=');
+            if (pos != std::string::npos) {
+                std::string ck = cfgLine.substr(0, pos);
+                std::string cv = cfgLine.substr(pos + 1);
+                ck.erase(0, ck.find_first_not_of(" \t\r"));
+                ck.erase(ck.find_last_not_of(" \t\r") + 1);
+                cv.erase(0, cv.find_first_not_of(" \t\r"));
+                cv.erase(cv.find_last_not_of(" \t\r") + 1);
+                localConfig[ck] = cv;
             }
+        }
+        std::string profileName = localConfig.count("profile") ? localConfig["profile"] : "";
+        long masterSeed = 0;
+        if (localConfig.count("master_seed")) {
+            try { masterSeed = std::stol(localConfig["master_seed"]); } catch(...) {}
+        }
 
-            // 2. Write .profile_props for resetprop (boot-completed.sh reads this)
-            const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
-            if (fp_ptr) {
-                writeProfileProps(*fp_ptr);
+        if (!profileName.empty()) {
+            static std::string s_lastWrittenProfile;
+            if (profileName != s_lastWrittenProfile) {
+                s_lastWrittenProfile = profileName;
+
+                // 1. ksu_susfs set_uname backup (handles profile changes without reboot)
+                if (access("/data/adb/ksu/bin/ksu_susfs", X_OK) == 0) {
+                    // Temporarily set global for getSpoofedKernelVersion()
+                    std::string savedProfile = g_currentProfileName;
+                    g_currentProfileName = profileName;
+                    std::string kv = getSpoofedKernelVersion();
+                    g_currentProfileName = savedProfile;
+                    std::string cmd = "/data/adb/ksu/bin/ksu_susfs set_uname '"
+                                    + kv + "' '#1 SMP PREEMPT' 2>/dev/null";
+                    system(cmd.c_str());
+                }
+
+                // 2. Generate .profile_props
+                const DeviceFingerprint* fp_ptr = findProfile(profileName);
+                if (fp_ptr) {
+                    writeProfileProps(*fp_ptr, profileName, masterSeed);
+
+                    // 3. Apply resetprop immediately (background) — fixes first-boot
+                    // race condition where boot-completed.sh runs before .profile_props exists
+                    system("sh -c '"
+                        "while IFS=\"=\" read -r key value; do "
+                        "  [ -z \"$key\" ] && continue; "
+                        "  case \"$key\" in \\#*) continue;; esac; "
+                        "  resetprop -n \"$key\" \"$value\" 2>/dev/null; "
+                        "done < /data/adb/.omni_data/.profile_props"
+                        "' &");
+                }
             }
         }
     }
