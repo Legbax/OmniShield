@@ -3796,6 +3796,7 @@ static void patchPropertyPages() {
     // returns my_system_property_foreach, which wraps the callback with FakePropInfo
     // substitution. Phase 2 needs REAL prop_info* pointers into shared memory
     // (not FakePropInfo* on the heap), so we must use the original function.
+    LOGE("PR91: patchPropertyPages() starting");
     if (!orig_system_property_foreach) {
         LOGE("PR91: orig_system_property_foreach not set, skip patchPropertyPages");
         return;
@@ -3810,26 +3811,30 @@ static void patchPropertyPages() {
         const prop_info* pi;
         char spoofed[PROP_VALUE_MAX];
     };
+    struct IterCtx {
+        std::vector<PatchEntry>* patches;
+        int total;
+    };
     std::vector<PatchEntry> patches;
+    IterCtx ctx = { &patches, 0 };
 
+    LOGE("PR91: Phase 1 — iterating all properties...");
     orig_system_property_foreach([](const prop_info* pi, void* cookie) {
-        auto* out = static_cast<std::vector<PatchEntry>*>(cookie);
+        auto* c = static_cast<IterCtx*>(cookie);
+        c->total++;
 
         // Read real name + value via original (unhooked) function.
-        // Pack into a single buffer: [name \0 padding | value \0 padding]
         char buf[PROP_NAME_MAX + 1 + PROP_VALUE_MAX];
         memset(buf, 0, sizeof(buf));
 
         if (orig_system_property_read_callback) {
-            // Preferred: handles long properties correctly via trampoline
             orig_system_property_read_callback(pi,
-                [](void* c, const char* n, const char* v, uint32_t) {
-                    char* b = static_cast<char*>(c);
+                [](void* cb, const char* n, const char* v, uint32_t) {
+                    char* b = static_cast<char*>(cb);
                     if (n) strncpy(b, n, PROP_NAME_MAX);
                     if (v) strncpy(b + PROP_NAME_MAX + 1, v, PROP_VALUE_MAX - 1);
                 }, buf);
         } else if (orig_system_property_read) {
-            // Fallback: reads pi->value directly (only short properties)
             orig_system_property_read(pi, buf, buf + PROP_NAME_MAX + 1);
         } else {
             return;
@@ -3848,63 +3853,78 @@ static void patchPropertyPages() {
             e.pi = pi;
             memset(e.spoofed, 0, sizeof(e.spoofed));
             strncpy(e.spoofed, spoofed, PROP_VALUE_MAX - 1);
-            out->push_back(e);
+            c->patches->push_back(e);
         }
-    }, &patches);
+    }, &ctx);
+
+    LOGE("PR91: Phase 1 done — iterated %d properties, %zu need patching",
+         ctx.total, patches.size());
 
     if (patches.empty()) {
-        LOGD("PR91: no properties need shadow patching");
+        LOGE("PR91: no properties need shadow patching, done");
         return;
     }
 
-    LOGE("PR91: %zu properties to shadow-patch", patches.size());
-
-    // Phase 2: Remap affected pages as private anonymous and write spoofed values.
-    // mmap(MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS) replaces the shared mapping with
-    // a per-process private copy. Other processes still see the original shared data.
+    // Phase 2: Remap affected pages using mremap for ATOMIC replacement.
+    // The old approach (mmap MAP_FIXED then memcpy) has a brief window where the
+    // page is zero-filled. If ANY concurrent thread (GC, JIT, Binder) reads a
+    // property from that page during the window → SIGSEGV.
+    // mremap(MREMAP_FIXED) atomically replaces the old mapping: readers see either
+    // the old data or the new data, never zeros.  Same pattern used in hideLibraryMaps().
     const long ps = sysconf(_SC_PAGESIZE) > 0 ? sysconf(_SC_PAGESIZE) : 4096;
     std::set<uintptr_t> remapped;
     int patched = 0;
+    int remap_ok = 0, remap_fail = 0;
+
+    LOGE("PR91: Phase 2 — remapping property pages (pagesize=%ld)", ps);
 
     for (const auto& e : patches) {
         uintptr_t pi_addr = reinterpret_cast<uintptr_t>(e.pi);
-        // Value field spans [pi+4, pi+4+PROP_VALUE_MAX). Check if it crosses page boundary.
         uintptr_t val_start = pi_addr + sizeof(uint32_t);
         uintptr_t val_end = val_start + PROP_VALUE_MAX - 1;
         uintptr_t page_lo = val_start & ~((uintptr_t)ps - 1);
         uintptr_t page_hi = val_end & ~((uintptr_t)ps - 1);
 
-        // Remap all pages covering the value field
         for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
             if (remapped.count(pg)) continue;
 
-            // Save original page data before remapping
-            std::vector<char> saved(ps);
-            memcpy(saved.data(), reinterpret_cast<void*>(pg), ps);
-
-            // Replace shared mapping with private anonymous mapping
-            void* r = mmap(reinterpret_cast<void*>(pg), ps,
-                          PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-            if (r == MAP_FAILED) {
-                LOGE("PR91: mmap FAIL page=%p: %s", (void*)pg, strerror(errno));
+            // Step 1: Allocate a temporary private page at any address
+            void* tmp = mmap(nullptr, ps, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (tmp == MAP_FAILED) {
+                LOGE("PR91: temp mmap FAIL: %s", strerror(errno));
+                remap_fail++;
                 continue;
             }
 
-            // Restore original data into the private page
-            memcpy(reinterpret_cast<void*>(pg), saved.data(), ps);
-            remapped.insert(pg);
+            // Step 2: Copy current property page data into the temp page
+            memcpy(tmp, reinterpret_cast<void*>(pg), ps);
+
+            // Step 3: Atomically replace the shared property page with our copy
+            void* result = mremap(tmp, ps, ps,
+                                  MREMAP_MAYMOVE | MREMAP_FIXED,
+                                  reinterpret_cast<void*>(pg));
+            if (result != MAP_FAILED) {
+                remapped.insert(pg);
+                remap_ok++;
+            } else {
+                LOGE("PR91: mremap FAIL page=%p: %s", (void*)pg, strerror(errno));
+                munmap(tmp, ps);
+                remap_fail++;
+            }
         }
 
         // Write spoofed value at offset 4 (after atomic serial field)
-        if (remapped.count(pi_addr & ~((uintptr_t)ps - 1))) {
-            char* val_ptr = reinterpret_cast<char*>(
-                const_cast<prop_info*>(e.pi)) + sizeof(uint32_t);
+        uintptr_t val_page = val_start & ~((uintptr_t)ps - 1);
+        if (remapped.count(val_page)) {
+            char* val_ptr = reinterpret_cast<char*>(val_start);
             memset(val_ptr, 0, PROP_VALUE_MAX);
             memcpy(val_ptr, e.spoofed, strlen(e.spoofed));
             patched++;
         }
     }
+
+    LOGE("PR91: Phase 2 done — remapped %d pages ok, %d failed", remap_ok, remap_fail);
 
     // Phase 3: Restore read-only permissions (matches original mapping)
     for (uintptr_t pg : remapped) {
