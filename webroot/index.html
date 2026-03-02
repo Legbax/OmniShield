@@ -351,12 +351,15 @@
             </div>
 
             <!-- Gmail Account -->
-            <div class="field-row">
+            <div class="field-row field-row-editable">
               <div>
                 <div class="field-label">Gmail Account</div>
                 <div class="field-value" id="f-gmail">–</div>
               </div>
               <span class="valid-badge" id="f-gmail-badge">–</span>
+              <button class="btn-icon" onclick="editField('f-gmail')" title="Edit Gmail">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+              </button>
               <button class="btn-icon" onclick="randomizeField('f-gmail')" title="Randomize Gmail">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
@@ -523,9 +526,12 @@
               </button>
             </div>
 
-            <div class="field-row">
+            <div class="field-row field-row-editable">
               <div><div class="field-label">Wi-Fi SSID</div><div class="field-value mono" id="f-wifi-ssid">–</div></div>
               <span class="valid-badge" id="f-wifi-ssid-badge">–</span>
+              <button class="btn-icon" onclick="editField('f-wifi-ssid')" title="Edit Wi-Fi SSID">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+              </button>
               <button class="btn-icon" onclick="randomizeField('f-wifi-ssid')" title="Randomize Wi-Fi SSID">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>

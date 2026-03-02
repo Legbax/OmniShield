@@ -786,10 +786,14 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; 
 }
 
 /* ─── Profile card editable field ────────────────────────────── */
+.field-row-editable {
+  grid-template-columns: 1fr auto auto auto;
+}
 .field-value.editable {
   background: var(--surface2); border: 1px solid var(--border);
   border-radius: var(--r-sm); padding: 6px 10px;
   outline: none; width: 100%; font-size: 12px;
+  color: var(--text); font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
 }
 .field-value.editable:focus { border-color: rgba(0,229,255,.4); }
 

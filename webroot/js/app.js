@@ -742,6 +742,51 @@ window.randomizeField = function(field) {
   }
 };
 
+// ─── Inline field editing (WiFi SSID, Gmail) ─────────────────────────
+// Converts the field-value div into an input for manual text entry.
+// On Enter or blur, saves the value as an override and re-renders.
+window.editField = function(fieldId) {
+  const el = document.getElementById(fieldId);
+  if (!el || el.tagName === 'INPUT') return;
+
+  const currentValue = el.textContent === '–' ? '' : el.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentValue;
+  input.className = 'field-value editable';
+  input.id = fieldId;
+
+  const commitEdit = () => {
+    const val = input.value.trim();
+    if (!val) return;  // don't accept empty
+
+    const setters = {
+      'f-gmail':     v => { overrides.gmailAccount = v; state.gmailAccount = v; },
+      'f-wifi-ssid': v => { overrides.wifiSsid = v; state.wifiSsid = v; },
+    };
+    if (setters[fieldId]) setters[fieldId](val);
+
+    const corr = computeCorrelation(state.profile, state.seed, {
+      imei: state.imei, imsi: state.imsi, iccid: state.iccid, phone: state.phone,
+      wifiMac: state.wifiMac, serial: state.serial, androidId: state.androidId,
+      gsfId: state.gsfId, bootId: state.bootId, widevineId: state.widevineId
+    });
+    state.correlation = corr.score;
+    state.corrChecks  = corr.checks;
+    renderPage(currentPage);
+  };
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); commitEdit(); }
+    if (e.key === 'Escape') { renderPage(currentPage); }
+  });
+  input.addEventListener('blur', commitEdit);
+
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+};
+
 // ─── Event handlers: Network/Telephony ───────────────────────────────
 window.randomizeAllTelephony = function() {
   rotateSeed();
