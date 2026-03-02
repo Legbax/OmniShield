@@ -3075,7 +3075,13 @@ jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
 jstring JNICALL my_getNetworkCountryIso(JNIEnv* env, jobject thiz) {
     return env->NewStringUTF("us");
 }
+jstring JNICALL my_getNetworkCountryIsoSlot(JNIEnv* env, jobject thiz, jint slotIndex) {
+    return env->NewStringUTF("us");
+}
 jstring JNICALL my_getSimCountryIso(JNIEnv* env, jobject thiz) {
+    return env->NewStringUTF("us");
+}
+jstring JNICALL my_getSimCountryIsoSlot(JNIEnv* env, jobject thiz, jint slotIndex) {
     return env->NewStringUTF("us");
 }
 jstring JNICALL my_getTypeAllocationCode(JNIEnv* env, jobject thiz) {
@@ -3865,12 +3871,14 @@ public:
             {"getImei", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getNetworkCountryIso", "()Ljava/lang/String;", (void*)my_getNetworkCountryIso},
+            {"getNetworkCountryIso", "(I)Ljava/lang/String;", (void*)my_getNetworkCountryIsoSlot},
             {"getSimCountryIso", "()Ljava/lang/String;", (void*)my_getSimCountryIso},
+            {"getSimCountryIso", "(I)Ljava/lang/String;", (void*)my_getSimCountryIsoSlot},
             {"getTypeAllocationCode", "()Ljava/lang/String;", (void*)my_getTypeAllocationCode},
         };
-        g_api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 9);
+        g_api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 11);
         if (env->ExceptionCheck()) env->ExceptionClear();
-        g_api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 9);
+        g_api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 11);
         if (env->ExceptionCheck()) env->ExceptionClear();
 
         // PR38+39: Location spoofing hooks
