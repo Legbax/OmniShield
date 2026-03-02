@@ -469,47 +469,82 @@ export function validateBootId(v) {
 }
 export function validateSerial(v) { return v && v.length >= 8 && /^[A-Z0-9]+$/i.test(v); }
 
+// ─── OUI pools per brand (for MAC OUI brand matching) ─────────────────────────
+const BRAND_OUIS = {
+  samsung:  [[0x24,0x4B,0x03],[0x40,0x9B,0xCD],[0xD4,0xBE,0xD9]],
+  google:   [[0xF8,0x8F,0xCA],[0xA4,0xC3,0xF0]],
+  xiaomi:   [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]],
+  redmi:    [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]],
+  poco:     [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]],
+  oneplus:  [[0x40,0x4E,0x36]],
+  motorola: [[0x18,0xDB,0x7E]],
+};
+
 // ─── Correlation score ────────────────────────────────────────────────────────
-export function computeCorrelation(profileName, seed, overrides = {}) {
-  if (!profileName || !seed) return 0;
-  let score = 0, max = 0;
+// Returns { score: 0-100, checks: [{name, passed, weight}] }
+// Each check validates whether a generated value is coherent with the profile.
+export function computeCorrelation(profileName, seed, ids = {}) {
+  if (!profileName || !seed) return { score: 0, checks: [] };
 
-  const check = (weight, condition) => { max += weight; if (condition) score += weight; };
-
-  // Profile exists
-  max += 5; score += 5; // always if we got here
-
-  // IMEI TAC matches brand
-  const imei = overrides.imei || generateIMEI(profileName, seed);
   const brand = getEffectiveBrand(profileName).toLowerCase();
-  const allTacs = Object.values(TACS).flat();
+  const checks = [];
+  const add = (name, weight, passed) => checks.push({ name, weight, passed });
+
+  // ── 1. IMEI TAC matches profile brand (20)
+  const imei = ids.imei || generateIMEI(profileName, seed);
   const brandTacs = TACS[brand] || TACS.default;
-  check(20, brandTacs.some(t => imei.startsWith(t)));
+  add('IMEI TAC → ' + brand, 20, brandTacs.some(t => imei.startsWith(t)));
 
-  // IMSI is valid US carrier
-  const imsi = overrides.imsi || generateIMSI(profileName, seed);
-  check(20, validateIMSI(imsi));
+  // ── 2. IMEI Luhn checksum valid (5)
+  add('IMEI Luhn', 5, validateIMEI(imei));
 
-  // ICCID valid format
-  const iccid = overrides.iccid || generateICCID(profileName, seed);
-  check(15, validateICCID(iccid));
+  // ── 3. MAC OUI matches brand pool (15)
+  const mac = ids.wifiMac || generateMAC(brand, seed);
+  const macOui = mac.split(':').slice(0, 3).map(h => parseInt(h, 16));
+  const ouiPool = BRAND_OUIS[brand] || OUIS;
+  const macBrandMatch = ouiPool.some(o => o[0] === macOui[0] && o[1] === macOui[1] && o[2] === macOui[2]);
+  add('MAC OUI → ' + brand, 15, macBrandMatch);
 
-  // Phone number valid NANP
-  const phone = overrides.phone || generatePhoneNumber(profileName, seed);
-  check(15, validatePhone(phone));
+  // ── 4. Serial format matches brand convention (10)
+  const serial = ids.serial || generateSerial(brand, seed, '');
+  let serialOk = false;
+  if (brand === 'google')       serialOk = /^[A-HJ-NP-Z0-9]{7}$/i.test(serial);
+  else if (brand === 'samsung') serialOk = /^[RSXZ][A-Z0-9]{2}[A-Z][A-Z0-9]{7,}$/i.test(serial);
+  else                          serialOk = serial.length >= 8 && /^[A-Z0-9]+$/i.test(serial);
+  add('Serial → ' + brand, 10, serialOk);
 
-  // MAC address valid
-  const mac = overrides.wifiMac || generateMAC(brand, seed);
-  check(10, validateMAC(mac));
+  // ── 5. IMSI valid US carrier (10)
+  const imsi = ids.imsi || generateIMSI(profileName, seed);
+  const mccMnc = imsi.substr(0, 6);
+  add('IMSI carrier', 10, validateIMSI(imsi));
 
-  // IMEI Luhn valid
-  check(10, validateIMEI(imei));
+  // ── 6. ICCID format valid (10)
+  const iccid = ids.iccid || generateICCID(profileName, seed);
+  add('ICCID format', 10, validateICCID(iccid));
 
-  // Carrier coherence with IMSI
-  const mccMnc = imsi.substr(0,6);
-  check(5, IMSI_POOLS.includes(mccMnc));
+  // ── 7. Phone number valid NANP (10)
+  const phone = ids.phone || generatePhoneNumber(profileName, seed);
+  add('Phone NANP', 10, validatePhone(phone));
 
-  return Math.round((score / max) * 100);
+  // ── 8. Android ID (hex 16) (5)
+  const aid = ids.androidId || generateAndroidId(seed);
+  add('Android ID', 5, validateAndroidId(aid));
+
+  // ── 9. GSF ID (hex 16) (5)
+  const gsf = ids.gsfId || generateGsfId(seed);
+  add('GSF ID', 5, validateGsfId(gsf));
+
+  // ── 10. Boot ID UUID v4 (5)
+  const boot = ids.bootId || generateBootId(seed);
+  add('Boot ID (UUID)', 5, validateBootId(boot));
+
+  // ── 11. Widevine ID (hex 32) (5)
+  const wv = ids.widevineId || generateWidevineId(seed);
+  add('Widevine ID', 5, validateWidevineId(wv));
+
+  const max = checks.reduce((s, c) => s + c.weight, 0);
+  const got = checks.reduce((s, c) => s + (c.passed ? c.weight : 0), 0);
+  return { score: Math.round((got / max) * 100), checks };
 }
 
 // ─── UUID v4 generator (for Media DRM ID, Advertising ID) ────────────────────

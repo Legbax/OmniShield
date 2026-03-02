@@ -134,9 +134,7 @@
           </div>
           <div id="status-corr-label" class="text-sm" style="margin-top:8px">Computing…</div>
         </div>
-        <div style="font-size:11px;color:var(--text2);text-align:center;margin-top:-4px">
-          Checks IMEI TAC · IMSI carrier · ICCID format · NANP phone · MAC OUI coherence
-        </div>
+        <div id="corr-breakdown" class="corr-breakdown"></div>
       </div>
 
       <!-- Device info grid -->
@@ -148,7 +146,7 @@
         <div class="info-grid">
           <div class="info-cell"><div class="info-cell-label">Profile</div><div class="info-cell-value" id="status-device">–</div></div>
           <div class="info-cell"><div class="info-cell-label">Real Model</div><div class="info-cell-value" id="status-model">–</div></div>
-          <div class="info-cell"><div class="info-cell-label">IP Address</div><div class="info-cell-value" id="status-ip">–</div></div>
+          <div class="info-cell"><div class="info-cell-label" id="status-ip-label">IP Address</div><div class="info-cell-value" id="status-ip">–</div></div>
           <div class="info-cell"><div class="info-cell-label">SIM Country</div><div class="info-cell-value" id="status-simcountry">–</div></div>
           <div class="info-cell"><div class="info-cell-label">Mobile Number</div><div class="info-cell-value" id="status-phone">–</div></div>
           <div class="info-cell"><div class="info-cell-label">Carrier</div><div class="info-cell-value" id="status-carrier">–</div></div>
@@ -353,12 +351,15 @@
             </div>
 
             <!-- Gmail Account -->
-            <div class="field-row">
+            <div class="field-row field-row-editable">
               <div>
                 <div class="field-label">Gmail Account</div>
                 <div class="field-value" id="f-gmail">–</div>
               </div>
               <span class="valid-badge" id="f-gmail-badge">–</span>
+              <button class="btn-icon" onclick="editField('f-gmail')" title="Edit Gmail">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+              </button>
               <button class="btn-icon" onclick="randomizeField('f-gmail')" title="Randomize Gmail">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
@@ -525,9 +526,12 @@
               </button>
             </div>
 
-            <div class="field-row">
+            <div class="field-row field-row-editable">
               <div><div class="field-label">Wi-Fi SSID</div><div class="field-value mono" id="f-wifi-ssid">–</div></div>
               <span class="valid-badge" id="f-wifi-ssid-badge">–</span>
+              <button class="btn-icon" onclick="editField('f-wifi-ssid')" title="Edit Wi-Fi SSID">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+              </button>
               <button class="btn-icon" onclick="randomizeField('f-wifi-ssid')" title="Randomize Wi-Fi SSID">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
               </button>
@@ -665,7 +669,12 @@
               </div>
               <div style="flex:1">
                 <div class="input-label">Password (optional)</div>
-                <input id="proxy-pass" class="input" type="password" placeholder="pass">
+                <div style="position:relative">
+                  <input id="proxy-pass" class="input" type="password" placeholder="pass" style="padding-right:36px">
+                  <button type="button" class="btn-icon pass-toggle" onclick="togglePassVisibility()" title="Show/hide password" style="position:absolute;right:4px;top:50%;transform:translateY(-50%)">
+                    <svg id="pass-eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  </button>
+                </div>
               </div>
             </div>
             <div class="input-group">
@@ -741,6 +750,15 @@
               Reboot Device
             </button>
             <div class="text-sm" style="text-align:center;margin-bottom:14px">Reboot applies all saved changes definitively</div>
+
+            <button class="btn destroy-btn btn-full" onclick="wipeGoogleTraces()" style="margin-bottom:8px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
+                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+              </svg>
+              Wipe Google Traces
+            </button>
+            <div class="text-sm" style="text-align:center;margin-bottom:14px">Clear WebView, Play Store, GMS &amp; GSF data · UI will close</div>
 
             <button class="btn destroy-btn btn-full" onclick="destroyIdentity()">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>

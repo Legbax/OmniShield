@@ -28,8 +28,11 @@
 #include <net/if.h>
 #include <linux/if_arp.h>
 #include <errno.h>
+#include <cstdlib>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
+#include <sys/vfs.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
@@ -37,6 +40,9 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <set>              // Fix8: deduplicar ELFs en PLT hooks
+#include <unordered_map>   // PR84: fake prop_info map
+#include <sys/sysmacros.h>  // Fix8: makedev()
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -139,6 +145,8 @@ static std::mutex g_fdMutex;
 // Original Pointers
 static int (*orig_system_property_get)(const char *key, char *value);
 static void (*orig_system_property_read_callback)(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie);
+static int (*orig_system_property_read)(const prop_info *pi, char *name, char *value);  // PR73b-Fix1
+static const prop_info* (*orig_system_property_find)(const char *name);  // PR84: close direct shared-memory read vector
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
@@ -162,6 +170,9 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+static ssize_t (*orig_readlink)(const char *pathname, char *buf, size_t bufsiz);
+static int (*orig_statfs)(const char *path, struct statfs *buf);
+static int (*orig_statvfs)(const char *path, struct statvfs *buf);
 
 // PR71: execve hook — intercept getprop exec to prevent property leak via child process
 static int (*orig_execve)(const char *pathname, char *const argv[], char *const envp[]);
@@ -204,6 +215,24 @@ static int (*orig_fcntl)(int fd, int cmd, ...);
 // PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
 static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 
+// PR84: __system_property_find hook — fake prop_info for spoofed properties
+// When detection apps call __system_property_find() and read the returned prop_info
+// struct's value field directly (raw memory dereference, no API call), our hooks on
+// __system_property_get / __system_property_read / __system_property_read_callback
+// are completely bypassed. This fake prop_info approach returns a struct we control
+// so even direct memory reads see the spoofed value.
+struct FakePropInfo {
+    uint32_t serial;                    // offset 0: atomic serial (matches bionic layout)
+    char value[PROP_VALUE_MAX];         // offset 4: property value (92 bytes)
+    char name[PROP_NAME_MAX + 1];       // name storage (flexible array replacement)
+};
+static std::unordered_map<std::string, FakePropInfo*> g_fakePropMap;
+static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fake detection
+static std::mutex g_fakePropMutex;
+static thread_local bool g_inPropertyFind = false;      // recursion guard
+
+// PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
+
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
@@ -238,6 +267,10 @@ static const char* (*orig_Sensor_getVendor)(void* sensor);
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
 static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jstring, jint);
+
+// Settings.Global
+static jstring (*orig_SettingsGlobal_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsGlobal_getStringForUser)(JNIEnv*, jstring, jint);
 
 // Helper
 inline std::string toLowerStr(const char* s) {
@@ -343,19 +376,24 @@ bool shouldHide(const char* key) {
             toLowerStr(fp.hardware).find("mt") != std::string::npos) {
             // PR72-QA Fix3: When target profile is Xiaomi/MediaTek, allow
             // MediaTek ecosystem strings through (they're expected for this target)
+            // PR73-Fix4: also allow "miui" through for Xiaomi targets
             if (s.find("mediatek") != std::string::npos ||
-                s.find("huaqin") != std::string::npos ||
-                s.find("mt6769") != std::string::npos ||
-                s.find("moly.") != std::string::npos) return false;
+                s.find("huaqin")   != std::string::npos ||
+                s.find("mt6769")   != std::string::npos ||
+                s.find("moly.")    != std::string::npos ||
+                s.find("miui")     != std::string::npos) return false;
         }
     }
     // PR72-QA Fix3: Expanded filters — hide ODM manufacturer (huaqin),
-    // SoC identifier (mt6769), and modem prefix (moly.) from property values
+    // SoC identifier (mt6769), and modem prefix (moly.) from property values.
+    // PR73-Fix4: Added "miui" — hides ro.miui.*, ro.vendor.miui.* and any
+    // MIUI-specific value when the target profile is not Xiaomi/MIUI.
     return s.find("mediatek") != std::string::npos ||
            s.find("lancelot") != std::string::npos ||
-           s.find("huaqin") != std::string::npos ||
-           s.find("mt6769") != std::string::npos ||
-           s.find("moly.") != std::string::npos;
+           s.find("huaqin")   != std::string::npos ||
+           s.find("mt6769")   != std::string::npos ||
+           s.find("moly.")    != std::string::npos ||
+           s.find("miui")     != std::string::npos;
 }
 
 // -----------------------------------------------------------------------------
@@ -451,6 +489,48 @@ static void remapModuleMemory() {
         }
     }
     fclose(fp);
+}
+
+// Fix8: Parsear /proc/self/maps para obtener (dev, inode) de cada .so cargada.
+// Usado por installPltHooks() para registrar PLT hooks en todas las librerías.
+struct ElfEntry { dev_t dev; ino_t inode; };
+
+static std::vector<ElfEntry> enumerateLoadedElfs() {
+    std::vector<ElfEntry> result;
+    std::set<std::pair<unsigned int, unsigned long>> seen;
+
+    FILE *fp = fopen("/proc/self/maps", "re");
+    if (!fp) return result;
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long addr_s, addr_e, offset, ino;
+        unsigned int dev_maj, dev_min;
+        char perms[5] = {}, path[256] = {};
+
+        int n = sscanf(line, "%lx-%lx %4s %lx %x:%x %lu %255s",
+                        &addr_s, &addr_e, perms, &offset, &dev_maj, &dev_min, &ino, path);
+        if (n < 7 || ino == 0) continue;
+        if (n >= 8 && strstr(path, ".so")) {
+            // Fix9: Skip our own module to prevent self-referential PLT hooks.
+            if (isHiddenPath(path)) continue;
+            // Fix11b: Selective /apex/ filter — include ONLY libjavacore.so.
+            // libjavacore.so (/apex/com.android.art/lib64/) is where
+            // ProcessBuilder.start() calls posix_spawnp() → must be PLT-hooked
+            // to intercept subprocess commands (getprop, uname, cat /proc/...).
+            // All other /apex/ ELFs are excluded: they don't call the functions
+            // we hook (posix_spawn, execve, __system_property_read), and
+            // including them causes crashes on MIUI/MTK ROMs where pltHookCommit
+            // fails on those ELFs (SIGBUS or xhook internal error).
+            if (strstr(path, "/apex/") && !strstr(path, "libjavacore.so")) continue;
+            dev_t dev = makedev(dev_maj, dev_min);
+            auto key = std::make_pair((unsigned int)dev, ino);
+            if (seen.insert(key).second)
+                result.push_back({dev, (ino_t)ino});
+        }
+    }
+    fclose(fp);
+    return result;
 }
 
 int my_stat(const char* pathname, struct stat* statbuf) {
@@ -647,6 +727,34 @@ int my_uname(struct utsname *buf) {
     return ret;
 }
 
+// PR73-Fix3: Hook JNI android.system.Os.uname() via libcore.io.Linux.uname().
+// android.system.Os.uname() delegates through libcore to Linux.uname() which
+// invokes the uname(2) syscall DIRECTLY — bypassing the Dobby libc hook above.
+// This JNI hook is registered via hookJniNativeMethods("libcore/io/Linux").
+// StructUtsname constructor order: (sysname, nodename, release, version, machine)
+static jobject my_Linux_uname(JNIEnv* env, jobject /*thiz*/) {
+    std::string kv = getSpoofedKernelVersion();
+    jclass cls = env->FindClass("android/system/StructUtsname");
+    if (!cls) { if (env->ExceptionCheck()) env->ExceptionClear(); return nullptr; }
+    jmethodID ctor = env->GetMethodID(cls, "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+        "Ljava/lang/String;Ljava/lang/String;)V");
+    if (!ctor) {
+        env->DeleteLocalRef(cls);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+    jobject result = env->NewObject(cls, ctor,
+        env->NewStringUTF("Linux"),
+        env->NewStringUTF("localhost"),
+        env->NewStringUTF(kv.c_str()),
+        env->NewStringUTF("#1 SMP PREEMPT"),
+        env->NewStringUTF("aarch64"));
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return result;
+}
+
 // PR42: Intercepta ioctl SIOCGIFHWADDR para wlan0/eth0
 // Las apps nativas en C/C++ evitan getifaddrs y leen la MAC directamente del kernel.
 // Este hook retorna 02:00:00:00:00:00 (MAC de privacidad AOSP) en ambas interfaces.
@@ -658,12 +766,41 @@ int my_uname(struct utsname *buf) {
 int my_ioctl(int fd, unsigned long request, void* arg) {
     if (!orig_ioctl) return -1;
     int ret = orig_ioctl(fd, request, arg);
-    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
-        struct ifreq* ifr = static_cast<struct ifreq*>(arg);
-        if (strcmp(ifr->ifr_name, "wlan0") == 0 || strcmp(ifr->ifr_name, "eth0") == 0) {
-            unsigned char static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
-            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
-            ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+    if (ret == 0 && arg != nullptr) {
+        if (request == SIOCGIFHWADDR) {
+            struct ifreq* ifr = static_cast<struct ifreq*>(arg);
+            if (strcmp(ifr->ifr_name, "wlan0") == 0 || strcmp(ifr->ifr_name, "eth0") == 0) {
+                unsigned char static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+                memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
+                ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+            }
+        }
+        // PR84: Filter wlan0/dummy0 from SIOCGIFCONF response.
+        // NetworkInterface.getAll() → native enumIPv4Interfaces → ioctl(SIOCGIFCONF)
+        // returns the full interface list. Detection apps compare this against the
+        // claimed network type (LTE) to detect WiFi usage.
+        else if (request == SIOCGIFCONF) {
+            struct ifconf* ifc = static_cast<struct ifconf*>(arg);
+            if (ifc->ifc_req && ifc->ifc_len > 0) {
+                struct ifreq* ifr = ifc->ifc_req;
+                int num_ifaces = ifc->ifc_len / (int)sizeof(struct ifreq);
+                int valid = 0;
+                for (int i = 0; i < num_ifaces; i++) {
+                    const char* ifname = ifr[i].ifr_name;
+                    // Filter WiFi and virtual interfaces that reveal WiFi connectivity
+                    if (strcmp(ifname, "wlan0") == 0 || strcmp(ifname, "wlan1") == 0 ||
+                        strncmp(ifname, "dummy", 5) == 0 || strncmp(ifname, "p2p", 3) == 0 ||
+                        strcmp(ifname, "ap0") == 0) {
+                        continue;  // skip this interface
+                    }
+                    // Keep valid interface — compact the array in-place
+                    if (valid != i) {
+                        ifr[valid] = ifr[i];
+                    }
+                    valid++;
+                }
+                ifc->ifc_len = valid * (int)sizeof(struct ifreq);
+            }
         }
     }
     return ret;
@@ -879,6 +1016,77 @@ ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
+ssize_t my_readlink(const char *pathname, char *buf, size_t bufsiz) {
+    if (!orig_readlink) { errno = ENOSYS; return -1; }
+    if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
+    return orig_readlink(pathname, buf, bufsiz);
+}
+
+// -----------------------------------------------------------------------------
+// statfs/statvfs — Consistencia de tamaño de disco con perfil
+// android.os.StatFs usa la syscall statfs() internamente.
+// Sin este hook, StatFs reporta el tamaño real del disco aunque /sys/block/size
+// esté spoofed, creando una incoherencia detectable.
+// -----------------------------------------------------------------------------
+static long getProfileStorageSectors() {
+    const DeviceFingerprint* fp = findProfile(g_currentProfileName);
+    if (!fp) return 268435456L;  // 128GB default
+    if (fp->ram_gb <= 4)       return 134217728L;   // 64 GB
+    else if (fp->ram_gb <= 10) return 268435456L;   // 128 GB
+    else                       return 536870912L;    // 256 GB
+}
+
+int my_statfs(const char *path, struct statfs *buf) {
+    if (!orig_statfs) { errno = ENOSYS; return -1; }
+    if (isHiddenPath(path)) { errno = ENOENT; return -1; }
+    int ret = orig_statfs(path, buf);
+    if (ret != 0) return ret;
+
+    // Solo spoofear particiones de datos internos (/data, /storage, /sdcard)
+    if (path && (strstr(path, "/data") == path ||
+                 strstr(path, "/storage") == path ||
+                 strstr(path, "/sdcard") == path)) {
+        long targetSectors = getProfileStorageSectors();
+        // Convertir sectores de 512B a bloques del filesystem
+        unsigned long targetBytes = (unsigned long)targetSectors * 512UL;
+        if (buf->f_bsize > 0) {
+            unsigned long targetBlocks = targetBytes / buf->f_bsize;
+            // Mantener la proporción usado/libre del sistema real
+            if (buf->f_blocks > 0) {
+                double usedRatio = 1.0 - ((double)buf->f_bfree / (double)buf->f_blocks);
+                buf->f_blocks = targetBlocks;
+                buf->f_bfree  = (unsigned long)(targetBlocks * (1.0 - usedRatio));
+                buf->f_bavail = buf->f_bfree;
+            }
+        }
+    }
+    return ret;
+}
+
+int my_statvfs(const char *path, struct statvfs *buf) {
+    if (!orig_statvfs) { errno = ENOSYS; return -1; }
+    if (isHiddenPath(path)) { errno = ENOENT; return -1; }
+    int ret = orig_statvfs(path, buf);
+    if (ret != 0) return ret;
+
+    if (path && (strstr(path, "/data") == path ||
+                 strstr(path, "/storage") == path ||
+                 strstr(path, "/sdcard") == path)) {
+        long targetSectors = getProfileStorageSectors();
+        unsigned long targetBytes = (unsigned long)targetSectors * 512UL;
+        if (buf->f_frsize > 0) {
+            unsigned long targetBlocks = targetBytes / buf->f_frsize;
+            if (buf->f_blocks > 0) {
+                double usedRatio = 1.0 - ((double)buf->f_bfree / (double)buf->f_blocks);
+                buf->f_blocks = targetBlocks;
+                buf->f_bfree  = (unsigned long)(targetBlocks * (1.0 - usedRatio));
+                buf->f_bavail = buf->f_bfree;
+            }
+        }
+    }
+    return ret;
+}
+
 // PR37: UUID v4 determinístico desde seed para boot_id
 static std::string generateBootId(long seed) {
     long s = seed ^ 0xDEADBEEFL;
@@ -1077,8 +1285,11 @@ int my_system_property_get(const char *key, char *value) {
         // --- PR21: ODM + system_ext fingerprints (Widevine L1 cross-validation) ---
         // Widevine valida que estos fingerprints coincidan con ro.build.fingerprint.
         // Si devuelven el fingerprint real del Redmi 9, la discrepancia es detectable.
+        // PR82: ro.product.build.fingerprint añadido — no estaba en el hook chain y
+        // exponía el fingerprint real del dispositivo (Redmi/lancelot_global/lancelot:...).
         else if (k == "ro.odm.build.fingerprint"         ||
-                 k == "ro.system_ext.build.fingerprint")      dynamic_buffer = fp.fingerprint;
+                 k == "ro.system_ext.build.fingerprint"  ||
+                 k == "ro.product.build.fingerprint")         dynamic_buffer = fp.fingerprint;
         // --- PR21: ro.product.cpu.abi singular (Snapchat / Instagram / Firebase) ---
         // ro.product.cpu.abilist ya está hooked pero la forma singular no lo estaba.
         // Snapchat e Instagram leen la forma singular específicamente.
@@ -1108,13 +1319,22 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
+        else if (k == "gsm.sim.state")                dynamic_buffer = "READY";
+        else if (k == "gsm.sim.state2")               dynamic_buffer = "";
         // PR37: Network type spoofing — activo solo cuando network_type=lte en config
         // Oculta señales de conectividad WiFi ante apps que leen system properties
         else if (g_spoofMobileNetwork && (k == "wifi.interface" ||
                  k == "dhcp.wlan0.ipaddress" || k == "dhcp.wlan0.dns1" ||
                  k == "dhcp.wlan0.server"    || k == "net.wifi.ssid"   ||
-                 k == "wifi.on"              || k == "wlan.driver.status")) {
-            dynamic_buffer = "";  // Ocultar señales WiFi
+                 k == "dhcp.wlan0.gateway"   || k == "dhcp.wlan0.mask" ||
+                 k == "dhcp.wlan0.leasetime" || k == "dhcp.wlan0.domain")) {
+            dynamic_buffer = "";  // Ocultar señales WiFi — sin valor
+        }
+        else if (g_spoofMobileNetwork && k == "wifi.on") {
+            dynamic_buffer = "0";  // WiFi explícitamente apagado
+        }
+        else if (g_spoofMobileNetwork && k == "wlan.driver.status") {
+            dynamic_buffer = "unloaded";  // Driver WiFi no cargado
         }
         else if (g_spoofMobileNetwork && k == "gsm.network.state") {
             dynamic_buffer = "CONNECTED";  // Confirmar conexión celular activa
@@ -1203,6 +1423,22 @@ int my_system_property_get(const char *key, char *value) {
             // Suppress MTK version — ODM-specific string leaks manufacturer identity
             value[0] = '\0'; return 0;
         }
+        // PR74: ro.vendor.mediatek.* — VDInfo reads these directly from property area
+        else if (k == "ro.vendor.mediatek.platform") {
+            std::string plat = toLowerStr(fp.boardPlatform);
+            if (plat.find("mt") == std::string::npos) {
+                value[0] = '\0'; return 0;  // Non-MTK profile: suppress
+            }
+            dynamic_buffer = fp.hardwareChipname;
+        }
+        else if (k == "ro.vendor.mediatek.version.branch" ||
+                 k == "ro.vendor.mediatek.version.release" ||
+                 k == "ro.mediatek.version.branch") {
+            value[0] = '\0'; return 0;  // Suppress ODM-specific MediaTek strings
+        }
+        else if (k == "ro.vendor.md_apps.load_verno") {
+            value[0] = '\0'; return 0;  // Suppress MediaTek modem version
+        }
 
         // ── PR70c: Leaked props detected by VD-Infos ─────────────────────
 
@@ -1250,9 +1486,10 @@ int my_system_property_get(const char *key, char *value) {
                  k == "ro.product.build.version.release" ||
                  k == "ro.system.build.version.release" ||
                  k == "ro.system_ext.build.version.release" ||
-                 k == "ro.vendor.build.version.release_or_codename" ||
+                 k == "ro.vendor.build.version.release_or_codename"  ||
+                 k == "ro.odm.build.version.release_or_codename"     ||
                  k == "ro.product.build.version.release_or_codename" ||
-                 k == "ro.system.build.version.release_or_codename" ||
+                 k == "ro.system.build.version.release_or_codename"  ||
                  k == "ro.system_ext.build.version.release_or_codename") dynamic_buffer = fp.release;
         else if (k == "ro.vendor.build.version.sdk" ||
                  k == "ro.odm.build.version.sdk" ||
@@ -1265,7 +1502,9 @@ int my_system_property_get(const char *key, char *value) {
             else dynamic_buffer = "30";
         }
         else if (k == "ro.vendor.build.version.security_patch" ||
-                 k == "ro.vendor.build.security_patch")          dynamic_buffer = fp.securityPatch;
+                 k == "ro.vendor.build.security_patch"          ||
+                 k == "ro.odm.build.security_patch"             ||
+                 k == "ro.odm.build.version.security_patch")    dynamic_buffer = fp.securityPatch;
         // Build dates for all partitions
         else if (k == "ro.vendor.build.date.utc"    ||
                  k == "ro.odm.build.date.utc"       ||
@@ -1567,7 +1806,33 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = "02:00:00:00:00:00\n";
 
                 } else if (type == PROC_CMDLINE) {
-                    content = "console=tty0 root=/dev/ram0 rw init=/init loglevel=4 androidboot.hardware=" + std::string(fp.hardware) + " androidboot.verifiedbootstate=green androidboot.vbmeta.device_state=locked androidboot.flash.locked=1\n";
+                    // PR79: Hybrid cmdline — SoC-specific params for realistic fingerprint
+                    std::string serial = omni::engine::generateRandomSerial(
+                        fp.brand, g_masterSeed, fp.securityPatch);
+                    std::string platform = toLowerStr(fp.boardPlatform);
+                    const char* consoleP;
+                    const char* socE;
+                    if (platform.find("mt") == 0) {
+                        consoleP = "console=tty0";
+                        socE = " bootopt=64S3,32N2,64N2";
+                    } else if (platform.find("exynos") != std::string::npos) {
+                        consoleP = "console=ttySAC0,115200";
+                        socE = "";
+                    } else {
+                        consoleP = "console=ttyMSM0,115200n8";
+                        socE = " lpm_levels.sleep_disabled=1 swiotlb=2048";
+                    }
+                    content = std::string(consoleP)
+                        + " androidboot.hardware=" + fp.hardware
+                        + " androidboot.hardware.chipname=" + fp.hardwareChipname
+                        + " androidboot.hardware.platform=" + fp.boardPlatform
+                        + " androidboot.serialno=" + serial
+                        + " androidboot.verifiedbootstate=green"
+                        + " androidboot.vbmeta.device_state=locked"
+                        + " androidboot.flash.locked=1"
+                        + " androidboot.selinux=enforcing"
+                        + " loop.max_part=7"
+                        + socE + "\n";
 
                 } else if (type == PROC_OSRELEASE) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -1862,15 +2127,26 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     }
 
                 } else if (type == PROC_NET_IF_INET6) {
-                    // PR42: En modo LTE, ocultar wlan0 de IPv6.
-                    // En modo WiFi real, pasar el contenido original.
+                    // PR42+PR84: Filter network interfaces from /proc/net/if_inet6.
+                    // Always filter dummy0 (virtual, reveals non-standard config).
+                    // Filter wlan0 in LTE spoofing mode.
+                    // Format: hex_addr ifindex prefix_len scope flags ifname
                     if (g_spoofMobileNetwork) {
-                        // Solo mostrar la interfaz LTE (rmnet_data0) sin IPv6 real
-                        content = "";  // Interfaz LTE no tiene IPv6 en configuración estándar
+                        content = "";  // LTE mode: hide all IPv6 interfaces
                     } else {
-                        // Pasar contenido real del kernel
                         char tmpBuf[4096]; ssize_t r;
-                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                        std::string raw;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) raw.append(tmpBuf, r);
+                        // Filter lines containing dummy0, p2p, tun interfaces
+                        std::istringstream iss(raw);
+                        std::string line;
+                        while (std::getline(iss, line)) {
+                            if (line.find("dummy") != std::string::npos ||
+                                line.find("p2p") != std::string::npos) {
+                                continue;  // skip this interface
+                            }
+                            content += line + "\n";
+                        }
                     }
 
                 // PR37: boot_id — UUID determinístico desde seed (Firebase/AppsFlyer lo correlacionan)
@@ -2425,8 +2701,12 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
 
     jstring result = nullptr;
     if (strcmp(key, "android_id") == 0) {
+        // Android 8.0+: SSAID es per-app — cada UID obtiene un valor único.
+        // Incorporar getuid() al seed garantiza que cada app ve un android_id
+        // diferente, replicando el comportamiento real del SettingsProvider.
+        long perAppSeed = g_masterSeed ^ ((long)getuid() * 2654435761L);
         result = env->NewStringUTF(
-            omni::engine::generateRandomId(16, g_masterSeed).c_str()
+            omni::engine::generateRandomId(16, perAppSeed).c_str()
         );
     } else if (strcmp(key, "gsf_id") == 0) {
         result = env->NewStringUTF(
@@ -2449,8 +2729,49 @@ static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jin
     return my_SettingsSecure_getString(env, name);
 }
 
+// PR75b: Settings.Global hook — intercepts device_name which leaks "Redmi 9"
+static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
+    if (!name) return nullptr;
+    const char* key = env->GetStringUTFChars(name, nullptr);
+    if (!key) return nullptr;
+
+    jstring result = nullptr;
+    if (strcmp(key, "device_name") == 0) {
+        const DeviceFingerprint* fp = findProfile(g_currentProfileName);
+        if (fp) result = env->NewStringUTF(fp->model);
+    }
+    // Force LTE: ocultar WiFi en Settings.Global
+    else if (g_spoofMobileNetwork && strcmp(key, "wifi_on") == 0) {
+        result = env->NewStringUTF("0");
+    }
+    else if (g_spoofMobileNetwork && strcmp(key, "wifi_sleep_policy") == 0) {
+        result = env->NewStringUTF("2");  // WIFI_SLEEP_POLICY_NEVER (irrelevante si off)
+    }
+    env->ReleaseStringUTFChars(name, key);
+
+    if (result) return result;
+    if (!orig_SettingsGlobal_getString) return nullptr;
+    return orig_SettingsGlobal_getString(env, name);
+}
+
+static jstring my_SettingsGlobal_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
+    return my_SettingsGlobal_getString(env, name);
+}
+
 void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
     if (!pi || !callback) return;
+
+    // PR84: If pi is a fake prop_info (from my_system_property_find), return its
+    // stored values directly — do NOT pass it to the original (would SIGSEGV reading
+    // invalid shared memory addresses).
+    {
+        std::lock_guard<std::mutex> lock(g_fakePropMutex);
+        if (g_fakePropPtrs.count(reinterpret_cast<const void*>(pi))) {
+            const FakePropInfo* fake = reinterpret_cast<const FakePropInfo*>(pi);
+            callback(cookie, fake->name, fake->value, fake->serial);
+            return;
+        }
+    }
 
     struct NameCatcher {
         std::string name;
@@ -2483,6 +2804,152 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
     }
 }
 
+// PR73b-Fix1: Hook __system_property_read() — API legacy (deprecated API 26).
+// VD Info and detection apps use __system_property_find() + __system_property_read()
+// to read properties directly from shared memory, completely bypassing our hooks on
+// __system_property_get and __system_property_read_callback. This closes that vector.
+int my_system_property_read(const prop_info *pi, char *name, char *value) {
+    if (!pi) return 0;
+
+    // PR84: Handle fake prop_info from my_system_property_find
+    {
+        std::lock_guard<std::mutex> lock(g_fakePropMutex);
+        if (g_fakePropPtrs.count(reinterpret_cast<const void*>(pi))) {
+            const FakePropInfo* fake = reinterpret_cast<const FakePropInfo*>(pi);
+            if (name) strncpy(name, fake->name, PROP_NAME_MAX);
+            if (value) strncpy(value, fake->value, PROP_VALUE_MAX - 1);
+            return (int)strlen(fake->value);
+        }
+    }
+
+    // Read real data first to obtain the property name
+    int ret = 0;
+    char real_name[PROP_NAME_MAX + 1] = {0};
+    char real_value[PROP_VALUE_MAX] = {0};
+    if (orig_system_property_read) {
+        ret = orig_system_property_read(pi, real_name, real_value);
+    } else if (orig_system_property_read_callback) {
+        // Fix8: orig_system_property_read is NULL (Dobby trampoline failed on thin
+        // syscall wrapper). Use the working __system_property_read_callback as fallback
+        // to extract property name and value from the prop_info pointer.
+        struct ReadCtx { char n[PROP_NAME_MAX+1]; char v[PROP_VALUE_MAX]; uint32_t s; };
+        ReadCtx ctx = {};
+        orig_system_property_read_callback(pi,
+            [](void* cookie, const char* n, const char* v, uint32_t s) {
+                auto* c = static_cast<ReadCtx*>(cookie);
+                if (n) strncpy(c->n, n, PROP_NAME_MAX);
+                if (v) strncpy(c->v, v, PROP_VALUE_MAX - 1);
+                c->s = s;
+            }, &ctx);
+        strncpy(real_name, ctx.n, PROP_NAME_MAX);
+        strncpy(real_value, ctx.v, PROP_VALUE_MAX - 1);
+        ret = (int)ctx.s;
+    }
+
+    // Copy name to caller's buffer
+    if (name && real_name[0]) {
+        strcpy(name, real_name);
+    }
+
+    // If shouldHide filters this property (key or value), return empty
+    if (shouldHide(real_name) || shouldHide(real_value)) {
+        if (value) value[0] = '\0';
+        if (name) name[0] = '\0';
+        return 0;
+    }
+
+    // Attempt to spoof via my_system_property_get (central hub)
+    if (value && real_name[0]) {
+        char spoofed[PROP_VALUE_MAX] = {0};
+        int slen = my_system_property_get(real_name, spoofed);
+        if (slen > 0 && strcmp(spoofed, real_value) != 0) {
+            strcpy(value, spoofed);
+            return slen;
+        }
+        // No spoof available, pass through real value
+        strcpy(value, real_value);
+    }
+    return ret;
+}
+
+// -----------------------------------------------------------------------------
+// PR84: Hook __system_property_find — close direct shared-memory read vector
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: VD-Info calls __system_property_find("ro.product.device") which
+// returns a const prop_info* pointer to the shared property memory region. It then
+// reads the value field DIRECTLY from the struct (raw pointer dereference at offset 4)
+// instead of calling any API function. This bypasses ALL our hooks on
+// __system_property_get, __system_property_read, and __system_property_read_callback.
+//
+// FIX: Return a fake prop_info struct (allocated per-property, lifetime=process) with
+// the spoofed value. The struct layout matches bionic's prop_info on Android 11:
+//   offset 0: uint32_t serial
+//   offset 4: char value[PROP_VALUE_MAX]  (92 bytes)
+//   offset 96: char name[0]              (flexible array)
+// Even if detection apps read the value at offset 4 directly, they see the spoofed value.
+//
+// RECURSION GUARD: __system_property_get internally calls __system_property_find.
+// We use a thread_local flag (g_inPropertyFind) to prevent:
+//   my_system_property_find → my_system_property_get → orig_system_property_get
+//   → original code → __system_property_find (hooked) → my_system_property_find → ∞
+// When the flag is set, we pass through to orig_system_property_find directly.
+// -----------------------------------------------------------------------------
+const prop_info* my_system_property_find(const char* name) {
+    // Recursion guard: when called from within our own spoofing chain, pass through
+    if (g_inPropertyFind || !name || !name[0]) {
+        return orig_system_property_find ? orig_system_property_find(name) : nullptr;
+    }
+
+    g_inPropertyFind = true;
+
+    // Get real prop_info from shared memory
+    const prop_info* real_pi = orig_system_property_find ? orig_system_property_find(name) : nullptr;
+
+    // Get real value via original (bypasses our hooks thanks to recursion guard)
+    char real_val[PROP_VALUE_MAX] = {0};
+    if (orig_system_property_get) {
+        orig_system_property_get(name, real_val);
+    }
+
+    // Get spoofed value via our spoofing hub
+    char spoofed[PROP_VALUE_MAX] = {0};
+    my_system_property_get(name, spoofed);
+
+    g_inPropertyFind = false;
+
+    // If no spoofed value, or same as real → return real prop_info
+    if (spoofed[0] == '\0' || strcmp(spoofed, real_val) == 0) {
+        return real_pi;
+    }
+
+    // Property IS spoofed and differs from real → return fake prop_info
+    std::lock_guard<std::mutex> lock(g_fakePropMutex);
+    std::string key(name);
+    auto it = g_fakePropMap.find(key);
+    FakePropInfo* fake;
+    if (it == g_fakePropMap.end()) {
+        // Allocate new fake prop_info (lifetime = process)
+        fake = new FakePropInfo();
+        memset(fake, 0, sizeof(FakePropInfo));
+        strncpy(fake->name, name, PROP_NAME_MAX);
+        // Copy serial from real prop_info if available (consistency for atomic readers)
+        if (real_pi) {
+            fake->serial = reinterpret_cast<const uint32_t*>(real_pi)[0];
+        }
+        g_fakePropMap[key] = fake;
+        g_fakePropPtrs.insert(reinterpret_cast<const void*>(fake));
+        LOGD("[scope] PR84: created fake prop_info for '%s'", name);
+    } else {
+        fake = it->second;
+    }
+
+    // Update value (may change if profile switches, though unlikely at runtime)
+    memset(fake->value, 0, PROP_VALUE_MAX);
+    strncpy(fake->value, spoofed, PROP_VALUE_MAX - 1);
+
+    return reinterpret_cast<const prop_info*>(fake);
+}
+
 // -----------------------------------------------------------------------------
 // PR71: Hook execve — intercept getprop commands in child processes
 // -----------------------------------------------------------------------------
@@ -2492,20 +2959,90 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
 // execve itself, we intercept the call BEFORE the image is replaced, read the
 // property via our hooked my_system_property_get, write the spoofed value to
 // stdout, and _exit(0) — the real getprop binary never runs.
+
+// PR73-Fix2: Helper — emulates `uname` subprocess output with spoofed kernel version.
+// Called from my_execve (directly, before _exit) and handleGetpropSpawn (inside fork).
+// argv is the effective argv after any toybox-shift:
+//   argv[0] = binary name,  argv[1..] = flags (-r, -a, -m, -s, -n, -v)
+static void emulate_uname_output(char *const argv[]) {
+    std::string rel      = getSpoofedKernelVersion();
+    const char* sysname  = "Linux";
+    const char* nodename = "localhost";
+    const char* ver      = "#1 SMP PREEMPT";
+    const char* machine  = "aarch64";
+
+    bool flag_r=false, flag_a=false, flag_m=false,
+         flag_s=false, flag_n=false, flag_v=false, any=false;
+
+    // PR73b-Fix4: Detect shell wrapper case: argv = ["sh", "-c", "uname -r"]
+    // In this case argv[1]="-c" and argv[2] contains the flags as a string.
+    // strcmp won't match "-r" inside "uname -r", so we use strstr instead.
+    if (argv[1] && strcmp(argv[1], "-c") == 0 && argv[2]) {
+        if (strstr(argv[2], "-r")) { flag_r = true; any = true; }
+        if (strstr(argv[2], "-a")) { flag_a = true; any = true; }
+        if (strstr(argv[2], "-m")) { flag_m = true; any = true; }
+        if (strstr(argv[2], "-s")) { flag_s = true; any = true; }
+        if (strstr(argv[2], "-n")) { flag_n = true; any = true; }
+        if (strstr(argv[2], "-v")) { flag_v = true; any = true; }
+    } else {
+        // Normal case: argv = ["uname", "-r"]
+        for (int i = 1; argv[i]; i++) {
+            const char* f = argv[i];
+            if      (strcmp(f, "-r") == 0) { flag_r = true; any = true; }
+            else if (strcmp(f, "-a") == 0) { flag_a = true; any = true; }
+            else if (strcmp(f, "-m") == 0) { flag_m = true; any = true; }
+            else if (strcmp(f, "-s") == 0) { flag_s = true; any = true; }
+            else if (strcmp(f, "-n") == 0) { flag_n = true; any = true; }
+            else if (strcmp(f, "-v") == 0) { flag_v = true; any = true; }
+        }
+    }
+    if (!any || flag_a) {
+        char buf[512];
+        int len = snprintf(buf, sizeof(buf), "%s %s %s %s %s\n",
+                           sysname, nodename, rel.c_str(), ver, machine);
+        if (len > 0) write(STDOUT_FILENO, buf, (size_t)len);
+    } else {
+        bool first = true;
+        auto emit = [&](const char* s) {
+            if (!first) write(STDOUT_FILENO, " ", 1);
+            write(STDOUT_FILENO, s, strlen(s));
+            first = false;
+        };
+        if (flag_s) emit(sysname);
+        if (flag_n) emit(nodename);
+        if (flag_r) emit(rel.c_str());
+        if (flag_v) emit(ver);
+        if (flag_m) emit(machine);
+        write(STDOUT_FILENO, "\n", 1);
+    }
+}
+
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]) {
+    LOGE("PR73b: my_execve called: %s", pathname ? pathname : "null");
     if (pathname && argv) {
         // Extract basename from path
         const char* base = strrchr(pathname, '/');
         base = base ? base + 1 : pathname;
 
         bool is_getprop = (strcmp(base, "getprop") == 0);
+        bool is_uname   = (strcmp(base, "uname")   == 0);  // PR73-Fix2
+
+        // PR73-Fix1: toybox/toolbox direct invocation bypass.
+        // VD Info executes: /system/bin/toybox getprop <prop>  or  toybox uname -r
+        // basename="toybox" bypasses the existing getprop/uname checks above.
+        if (!is_getprop && !is_uname && argv[1] &&
+            (strcmp(base, "toybox") == 0 || strcmp(base, "toolbox") == 0)) {
+            if (strcmp(argv[1], "getprop") == 0) { argv = argv + 1; is_getprop = true; }
+            else if (strcmp(argv[1], "uname") == 0) { argv = argv + 1; is_uname = true; }
+        }
 
         // PR72-QA: Detect "sh -c getprop ..." / "su -c getprop ..." bypass
         // Detection apps run shell wrappers to avoid direct getprop hooks
-        if (!is_getprop &&
+        if (!is_getprop && !is_uname &&
             (strcmp(base, "sh") == 0 || strcmp(base, "bash") == 0 || strcmp(base, "su") == 0) &&
             argv[1] && strcmp(argv[1], "-c") == 0 && argv[2]) {
             if (strstr(argv[2], "getprop")) is_getprop = true;
+            if (strstr(argv[2], "uname"))   is_uname   = true;  // PR73-Fix2
         }
 
         if (is_getprop) {
@@ -2550,13 +3087,20 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
             }, nullptr);
             _exit(0);
         }
+
+        // PR73-Fix2: Intercept uname subprocess (uname -r, uname -a, etc.)
+        // When execve replaces the child image all Dobby hooks are destroyed.
+        // Emulate expected output directly before the exec happens.
+        if (is_uname) {
+            emulate_uname_output(argv);
+            _exit(0);
+        }
     }
 
-    if (!orig_execve) {
-        errno = ENOSYS;
-        return -1;
-    }
-    return orig_execve(pathname, argv, envp);
+    // PR73b-Fix6: When orig_execve is NULL (PLT stub — Dobby can't build trampoline),
+    // fall back to raw syscall. This is the standard pattern for Bionic on aarch64.
+    if (orig_execve) return orig_execve(pathname, argv, envp);
+    return syscall(__NR_execve, pathname, argv, envp);
 }
 
 // -----------------------------------------------------------------------------
@@ -2570,124 +3114,240 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
 // before the real binary ever runs.
 // -----------------------------------------------------------------------------
 
-// Helper: handles subprocess interception for posix_spawn/posix_spawnp/execve.
-// Intercepts: getprop (spoofed properties), cat (faked VFS files like /proc/cpuinfo).
-// Returns true if the command was intercepted (child forked with spoofed output).
-// Returns false if the caller should fall through to the original syscall.
-static bool handleGetpropSpawn(const char *resolved_path, char *const argv[],
-                               pid_t *pid) {
-    if (!resolved_path || !argv) return false;
+// Fix9: Generate spoofed content as a string for intercepted commands.
+// Returns empty string if the command is not intercepted.
+// This is a pure function — no fork, no write, no side effects.
+static std::string generateSpoofedContent(const char *resolved_path,
+                                          char *const argv[]) {
+    if (!resolved_path || !argv) return "";
 
-    // Extract basename
     const char* base = strrchr(resolved_path, '/');
     base = base ? base + 1 : resolved_path;
 
-    bool is_cat = (strcmp(base, "cat") == 0);
+    bool is_cat     = (strcmp(base, "cat")     == 0);
     bool is_getprop = (strcmp(base, "getprop") == 0);
+    bool is_uname   = (strcmp(base, "uname")   == 0);
+
+    // PR73-Fix1: toybox/toolbox direct invocation bypass.
+    char *const *effective_argv = argv;
+    if (!is_getprop && !is_cat && !is_uname && argv[1] &&
+        (strcmp(base, "toybox") == 0 || strcmp(base, "toolbox") == 0)) {
+        if (strcmp(argv[1], "getprop") == 0)    { effective_argv = argv + 1; is_getprop = true; }
+        else if (strcmp(argv[1], "uname") == 0) { effective_argv = argv + 1; is_uname   = true; }
+        else if (strcmp(argv[1], "cat") == 0)   { effective_argv = argv + 1; is_cat     = true; }
+    }
 
     // PR72-QA: Detect "sh -c getprop" / "sh -c cat" / "su -c ..." bypass
-    if (!is_getprop && !is_cat &&
+    if (!is_getprop && !is_cat && !is_uname &&
         (strcmp(base, "sh") == 0 || strcmp(base, "bash") == 0 || strcmp(base, "su") == 0) &&
         argv[1] && strcmp(argv[1], "-c") == 0 && argv[2]) {
-        if (strstr(argv[2], "getprop")) is_getprop = true;
-        if (strstr(argv[2], "cat")) is_cat = true;
+        if (strstr(argv[2], "getprop")) { is_getprop = true; effective_argv = argv; }
+        if (strstr(argv[2], "cat"))     { is_cat     = true; effective_argv = argv; }
+        if (strstr(argv[2], "uname"))   { is_uname   = true; effective_argv = argv; }
     }
 
-    // PR71f: Intercept "cat <path>" for files we fake (cpuinfo, version, etc.)
-    // Without this, `Runtime.exec("cat /proc/cpuinfo")` spawns a child that reads
-    // the real kernel file — our Dobby hooks are destroyed by the execve image replace.
-    if (is_cat && argv[1] && argv[1][0] != '\0') {
+    // cat /proc/cpuinfo interception
+    if (is_cat && effective_argv[1] && effective_argv[1][0] != '\0') {
         const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
         if (fp_ptr) {
-            const char* target = argv[1];
-            const std::string* content = nullptr;
-
+            const char* target = effective_argv[1];
             if (strstr(target, "/proc/cpuinfo")) {
-                content = &getCachedCpuInfo(*fp_ptr);
+                const std::string& cpuinfo = getCachedCpuInfo(*fp_ptr);
+                if (!cpuinfo.empty()) return cpuinfo;
             }
-
-            if (content && !content->empty()) {
-                pid_t child = fork();
-                if (child < 0) return false;
-                if (child == 0) {
-                    write(STDOUT_FILENO, content->c_str(), content->size());
-                    _exit(0);
-                }
-                if (pid) *pid = child;
-                return true;
+            // Fix11: Intercept cat /proc/version subprocess
+            if (strstr(target, "/proc/version")) {
+                std::string kv = getSpoofedKernelVersion();
+                return "Linux version " + kv + " (build@server) (gcc) #1 SMP PREEMPT\n";
             }
         }
+        return ""; // cat of non-intercepted file
     }
 
-    if (!is_getprop) return false;
+    // uname output generation (to string, not STDOUT)
+    if (is_uname) {
+        std::string rel      = getSpoofedKernelVersion();
+        const char* sysname  = "Linux";
+        const char* nodename = "localhost";
+        const char* ver      = "#1 SMP PREEMPT";
+        const char* machine  = "aarch64";
 
-    // Fork a child to emulate getprop with spoofed values
-    pid_t child = fork();
-    if (child < 0) return false;   // fork failed, fall through to original
+        bool flag_r=false, flag_a=false, flag_m=false,
+             flag_s=false, flag_n=false, flag_v=false, any=false;
 
-    if (child == 0) {
-        // === Child process ===
-        if (argv[1] && argv[1][0] != '\0') {
-            // Single property: getprop <name> [default]
-            char value[92] = {0};
-            int len = my_system_property_get(argv[1], value);
-            if (len > 0) {
-                write(STDOUT_FILENO, value, len);
-                write(STDOUT_FILENO, "\n", 1);
-            } else if (argv[2]) {
-                size_t dlen = strlen(argv[2]);
-                write(STDOUT_FILENO, argv[2], dlen);
-                write(STDOUT_FILENO, "\n", 1);
+        if (effective_argv[1] && strcmp(effective_argv[1], "-c") == 0 && effective_argv[2]) {
+            if (strstr(effective_argv[2], "-r")) { flag_r = true; any = true; }
+            if (strstr(effective_argv[2], "-a")) { flag_a = true; any = true; }
+            if (strstr(effective_argv[2], "-m")) { flag_m = true; any = true; }
+            if (strstr(effective_argv[2], "-s")) { flag_s = true; any = true; }
+            if (strstr(effective_argv[2], "-n")) { flag_n = true; any = true; }
+            if (strstr(effective_argv[2], "-v")) { flag_v = true; any = true; }
+        } else {
+            for (int i = 1; effective_argv[i]; i++) {
+                const char* f = effective_argv[i];
+                if      (strcmp(f, "-r") == 0) { flag_r = true; any = true; }
+                else if (strcmp(f, "-a") == 0) { flag_a = true; any = true; }
+                else if (strcmp(f, "-m") == 0) { flag_m = true; any = true; }
+                else if (strcmp(f, "-s") == 0) { flag_s = true; any = true; }
+                else if (strcmp(f, "-n") == 0) { flag_n = true; any = true; }
+                else if (strcmp(f, "-v") == 0) { flag_v = true; any = true; }
             }
+        }
+
+        std::string result;
+        if (!any || flag_a) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s %s %s %s %s\n",
+                     sysname, nodename, rel.c_str(), ver, machine);
+            result = buf;
+        } else {
+            bool first = true;
+            auto emit = [&](const char* s) {
+                if (!first) result += ' ';
+                result += s;
+                first = false;
+            };
+            if (flag_s) emit(sysname);
+            if (flag_n) emit(nodename);
+            if (flag_r) emit(rel.c_str());
+            if (flag_v) emit(ver);
+            if (flag_m) emit(machine);
+            result += '\n';
+        }
+        return result;
+    }
+
+    if (!is_getprop) return "";
+
+    // getprop interception
+    if (effective_argv[1] && effective_argv[1][0] != '\0') {
+        // Single property: getprop <name> [default]
+        char value[92] = {0};
+        int len = my_system_property_get(effective_argv[1], value);
+        if (len > 0) return std::string(value, len) + "\n";
+        if (effective_argv[2]) return std::string(effective_argv[2]) + "\n";
+        return "\n"; // empty property — matches real getprop behavior
+    }
+
+    // getprop with no args — full property dump
+    std::string dump;
+    __system_property_foreach([](const prop_info* pi, void* cookie) {
+        auto* out = static_cast<std::string*>(cookie);
+        char name[PROP_NAME_MAX + 1] = {};
+        __system_property_read_callback(pi,
+            [](void* c, const char* n, const char*, unsigned) {
+                if (n) strncpy(static_cast<char*>(c), n, PROP_NAME_MAX);
+            }, name);
+
+        if (name[0] == '\0') return;
+        if (shouldHide(name)) return;
+
+        char val[PROP_VALUE_MAX] = {0};
+        my_system_property_get(name, val);
+
+        char line[512];
+        int len = snprintf(line, sizeof(line), "[%s]: [%s]\n", name, val);
+        if (len > 0) out->append(line, (size_t)len);
+    }, &dump);
+    return dump;
+}
+
+// Fix9: Subprocess interception via memfd + real posix_spawn.
+// Creates memfd with spoofed content, calls orig_posix_spawn with ["cat", "/proc/self/fd/<N>"]
+// passing the ORIGINAL file_actions — this preserves Java's pipe infrastructure.
+static bool handleInterceptedSpawn(const char *resolved_path,
+                                   char *const argv[], pid_t *pid,
+                                   const void *file_actions,
+                                   const void *attrp,
+                                   char *const envp[],
+                                   decltype(orig_posix_spawn) orig_fn) {
+    std::string content = generateSpoofedContent(resolved_path, argv);
+    if (content.empty()) return false;
+
+    // Create memfd WITHOUT MFD_CLOEXEC — fd must survive exec into cat
+    int mfd = syscall(__NR_memfd_create, "s", 0);
+    if (mfd < 0) {
+        LOGE("Fix9: memfd_create failed errno=%d, fallback fork+write", errno);
+        pid_t child = fork();
+        if (child < 0) return false;
+        if (child == 0) {
+            write(STDOUT_FILENO, content.c_str(), content.size());
             _exit(0);
         }
-        // No args — full property dump with spoofed values
-        __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
-            struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
-            __system_property_read_callback(pi,
-                [](void* c, const char* n, const char*, unsigned) {
-                    auto* p = static_cast<decltype(&ctx)>(c);
-                    if (n) strncpy(p->name, n, PROP_NAME_MAX);
-                }, &ctx);
-
-            if (ctx.name[0] == '\0') return;
-            if (shouldHide(ctx.name)) return;
-
-            char val[PROP_VALUE_MAX] = {0};
-            my_system_property_get(ctx.name, val);
-
-            char line[512];
-            int len = snprintf(line, sizeof(line), "[%s]: [%s]\n", ctx.name, val);
-            if (len > 0) write(STDOUT_FILENO, line, len);
-        }, nullptr);
-        _exit(0);
+        if (pid) *pid = child;
+        return true;
     }
 
-    // === Parent process ===
-    if (pid) *pid = child;
-    return true;
+    write(mfd, content.c_str(), content.size());
+    lseek(mfd, 0, SEEK_SET);
+
+    char fd_path[64];
+    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", mfd);
+    char *new_argv[] = { (char*)"cat", fd_path, nullptr };
+
+    int ret;
+    if (orig_fn) {
+        ret = orig_fn(pid, "/system/bin/cat", file_actions, attrp, new_argv, envp);
+    } else {
+        // Last resort: fork+execve (no file_actions — lossy)
+        LOGE("Fix9: WARN orig_fn NULL, fork+execve for memfd cat");
+        pid_t child = fork();
+        if (child == -1) { close(mfd); return false; }
+        if (child == 0) {
+            execve("/system/bin/cat", new_argv, envp);
+            _exit(127);
+        }
+        if (pid) *pid = child;
+        ret = 0;
+    }
+
+    close(mfd);
+    LOGE("Fix9: intercepted '%s' via memfd cat ret=%d", resolved_path, ret);
+    return ret == 0;
 }
 
 static int my_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions,
                           const void *attrp,
                           char *const argv[], char *const envp[]) {
-    if (handleGetpropSpawn(path, argv, pid)) return 0;
+    LOGE("Fix9: my_posix_spawn: %s", path ? path : "null");
 
-    if (!orig_posix_spawn) { errno = ENOSYS; return ENOSYS; }
-    return orig_posix_spawn(pid, path, file_actions, attrp, argv, envp);
+    // Fix9: memfd approach preserves Java's pipe infrastructure
+    if (handleInterceptedSpawn(path, argv, pid, file_actions, attrp, envp, orig_posix_spawn))
+        return 0;
+
+    if (orig_posix_spawn)
+        return orig_posix_spawn(pid, path, file_actions, attrp, argv, envp);
+
+    // Last resort fallback (no file_actions — lossy)
+    LOGE("Fix9: WARN orig_posix_spawn NULL, fork+execve for '%s'", path ? path : "null");
+    pid_t child = fork();
+    if (child == -1) return errno;
+    if (child == 0) { execve(path, argv, envp); _exit(127); }
+    if (pid) *pid = child;
+    return 0;
 }
 
 static int my_posix_spawnp(pid_t *pid, const char *file,
                            const void *file_actions,
                            const void *attrp,
                            char *const argv[], char *const envp[]) {
-    // posix_spawnp receives a filename (may be relative, searched in PATH)
-    // For getprop, the basename check in handleGetpropSpawn covers this
-    if (file && handleGetpropSpawn(file, argv, pid)) return 0;
+    LOGE("Fix9: my_posix_spawnp: %s", file ? file : "null");
 
-    if (!orig_posix_spawnp) { errno = ENOSYS; return ENOSYS; }
-    return orig_posix_spawnp(pid, file, file_actions, attrp, argv, envp);
+    // Fix9: memfd approach preserves Java's pipe infrastructure
+    if (file && handleInterceptedSpawn(file, argv, pid, file_actions, attrp, envp, orig_posix_spawnp))
+        return 0;
+
+    if (orig_posix_spawnp)
+        return orig_posix_spawnp(pid, file, file_actions, attrp, argv, envp);
+
+    // Last resort fallback
+    LOGE("Fix9: WARN orig_posix_spawnp NULL, fork+execve for '%s'", file ? file : "null");
+    pid_t child = fork();
+    if (child == -1) return errno;
+    if (child == 0) { execve(file, argv, envp); _exit(127); }
+    if (pid) *pid = child;
+    return 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -2726,6 +3386,66 @@ jstring JNICALL my_getSimSerialNumber(JNIEnv* env, jobject thiz, jint subId) {
 }
 jstring JNICALL my_getLine1Number(JNIEnv* env, jobject thiz, jint subId) {
     return env->NewStringUTF(omni::engine::generatePhoneNumber(g_currentProfileName, g_masterSeed + subId).c_str());
+}
+jstring JNICALL my_getNetworkCountryIso(JNIEnv* env, jobject thiz) {
+    return env->NewStringUTF("us");
+}
+jstring JNICALL my_getNetworkCountryIsoSlot(JNIEnv* env, jobject thiz, jint slotIndex) {
+    return env->NewStringUTF("us");
+}
+jstring JNICALL my_getSimCountryIso(JNIEnv* env, jobject thiz) {
+    return env->NewStringUTF("us");
+}
+jstring JNICALL my_getSimCountryIsoSlot(JNIEnv* env, jobject thiz, jint slotIndex) {
+    return env->NewStringUTF("us");
+}
+jstring JNICALL my_getTypeAllocationCode(JNIEnv* env, jobject thiz) {
+    std::string imei = omni::engine::generateValidImei(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imei.substr(0, 8).c_str());
+}
+
+// -----------------------------------------------------------------------------
+// SIM presence hooks — siempre reportar SIM insertada y lista
+// Evita incoherencia: NetworkInfo=MOBILE + getSimState=ABSENT es contradictorio
+// -----------------------------------------------------------------------------
+jint JNICALL my_getSimState(JNIEnv*, jobject) {
+    return 5;  // TelephonyManager.SIM_STATE_READY
+}
+jint JNICALL my_getSimStateSlot(JNIEnv*, jobject, jint) {
+    return 5;  // SIM_STATE_READY para cualquier slot
+}
+jboolean JNICALL my_hasIccCard(JNIEnv*, jobject) {
+    return JNI_TRUE;
+}
+jint JNICALL my_getPhoneCount(JNIEnv*, jobject) {
+    return 1;  // Un slot de SIM activo
+}
+jstring JNICALL my_getSimOperatorName(JNIEnv* env, jobject) {
+    return env->NewStringUTF(omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed).c_str());
+}
+jstring JNICALL my_getSimOperatorNameSlot(JNIEnv* env, jobject, jint) {
+    return env->NewStringUTF(omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed).c_str());
+}
+jstring JNICALL my_getSimOperator(JNIEnv* env, jobject) {
+    std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imsi.substr(0, 6).c_str());
+}
+jstring JNICALL my_getSimOperatorSlot(JNIEnv* env, jobject, jint) {
+    std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imsi.substr(0, 6).c_str());
+}
+jstring JNICALL my_getNetworkOperatorName(JNIEnv* env, jobject) {
+    return env->NewStringUTF(omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed).c_str());
+}
+jstring JNICALL my_getNetworkOperator(JNIEnv* env, jobject) {
+    std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imsi.substr(0, 6).c_str());
+}
+jint JNICALL my_getNetworkType(JNIEnv*, jobject) {
+    return 13;  // TelephonyManager.NETWORK_TYPE_LTE
+}
+jint JNICALL my_getDataNetworkType(JNIEnv*, jobject) {
+    return 13;  // NETWORK_TYPE_LTE
 }
 
 
@@ -2905,6 +3625,224 @@ static zygisk::Api *g_api = nullptr;  // PR56: Api global guardada en onLoad
 static JavaVM *g_jvm = nullptr;       // PR55: guardar JavaVM en lugar de JNIEnv raw
 static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en preAppSpecialize
 
+// Fix8: Forward declarations for PLT hook targets (defined earlier in the file)
+int my_system_property_read(const prop_info *pi, char *name, char *value);
+const prop_info* my_system_property_find(const char* name);  // PR84
+static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
+static int my_posix_spawn(pid_t *pid, const char *path,
+                          const void *file_actions, const void *attrp,
+                          char *const argv[], char *const envp[]);
+static int my_posix_spawnp(pid_t *pid, const char *file,
+                           const void *file_actions, const void *attrp,
+                           char *const argv[], char *const envp[]);
+
+// PR84b: Shadow property pages — per-process property memory patching.
+// After fork (postAppSpecialize), replaces shared property mmap pages with private
+// anonymous copies, then writes spoofed values directly into prop_info->value fields.
+// This defeats ALL detection methods including direct memory reads from prop_info*
+// pointers returned by __system_property_find() — because the actual memory now
+// contains the spoofed value. Only the target process sees the change (private mapping).
+//
+// prop_info layout (bionic, Android 8+):
+//   offset 0:  atomic_uint32_t serial  (4 bytes)
+//   offset 4:  char value[92]          (PROP_VALUE_MAX)
+//   offset 96: char name[0]            (flexible array)
+static void patchPropertyPages() {
+    typedef int (*foreach_fn_t)(void (*)(const prop_info*, void*), void*);
+    auto foreach_fn = reinterpret_cast<foreach_fn_t>(
+        dlsym(RTLD_DEFAULT, "__system_property_foreach"));
+
+    if (!foreach_fn) {
+        LOGE("PR84b: __system_property_foreach not found");
+        return;
+    }
+    if (!orig_system_property_read_callback && !orig_system_property_read) {
+        LOGE("PR84b: no orig read function, skip");
+        return;
+    }
+
+    // Phase 1: Find all properties where real value != spoofed value
+    struct PatchEntry {
+        const prop_info* pi;
+        char spoofed[PROP_VALUE_MAX];
+    };
+    std::vector<PatchEntry> patches;
+
+    foreach_fn([](const prop_info* pi, void* cookie) {
+        auto* out = static_cast<std::vector<PatchEntry>*>(cookie);
+
+        // Read real name + value via original (unhooked) function.
+        // Pack into a single buffer: [name \0 padding | value \0 padding]
+        char buf[PROP_NAME_MAX + 1 + PROP_VALUE_MAX];
+        memset(buf, 0, sizeof(buf));
+
+        if (orig_system_property_read_callback) {
+            // Preferred: handles long properties correctly via trampoline
+            orig_system_property_read_callback(pi,
+                [](void* c, const char* n, const char* v, uint32_t) {
+                    char* b = static_cast<char*>(c);
+                    if (n) strncpy(b, n, PROP_NAME_MAX);
+                    if (v) strncpy(b + PROP_NAME_MAX + 1, v, PROP_VALUE_MAX - 1);
+                }, buf);
+        } else if (orig_system_property_read) {
+            // Fallback: reads pi->value directly (only short properties)
+            orig_system_property_read(pi, buf, buf + PROP_NAME_MAX + 1);
+        } else {
+            return;
+        }
+
+        const char* name = buf;
+        const char* real_val = buf + PROP_NAME_MAX + 1;
+        if (name[0] == '\0') return;
+
+        // Get what our spoofing logic returns for this property
+        char spoofed[PROP_VALUE_MAX] = {};
+        my_system_property_get(name, spoofed);
+
+        if (spoofed[0] != '\0' && strcmp(real_val, spoofed) != 0) {
+            PatchEntry e;
+            e.pi = pi;
+            memset(e.spoofed, 0, sizeof(e.spoofed));
+            strncpy(e.spoofed, spoofed, PROP_VALUE_MAX - 1);
+            out->push_back(e);
+        }
+    }, &patches);
+
+    if (patches.empty()) {
+        LOGD("PR84b: no properties need shadow patching");
+        return;
+    }
+
+    LOGE("PR84b: %zu properties to shadow-patch", patches.size());
+
+    // Phase 2: Remap affected pages as private anonymous and write spoofed values.
+    // mmap(MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS) replaces the shared mapping with
+    // a per-process private copy. Other processes still see the original shared data.
+    const long ps = sysconf(_SC_PAGESIZE) > 0 ? sysconf(_SC_PAGESIZE) : 4096;
+    std::set<uintptr_t> remapped;
+    int patched = 0;
+
+    for (const auto& e : patches) {
+        uintptr_t pi_addr = reinterpret_cast<uintptr_t>(e.pi);
+        // Value field spans [pi+4, pi+4+PROP_VALUE_MAX). Check if it crosses page boundary.
+        uintptr_t val_start = pi_addr + sizeof(uint32_t);
+        uintptr_t val_end = val_start + PROP_VALUE_MAX - 1;
+        uintptr_t page_lo = val_start & ~((uintptr_t)ps - 1);
+        uintptr_t page_hi = val_end & ~((uintptr_t)ps - 1);
+
+        // Remap all pages covering the value field
+        for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
+            if (remapped.count(pg)) continue;
+
+            // Save original page data before remapping
+            std::vector<char> saved(ps);
+            memcpy(saved.data(), reinterpret_cast<void*>(pg), ps);
+
+            // Replace shared mapping with private anonymous mapping
+            void* r = mmap(reinterpret_cast<void*>(pg), ps,
+                          PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            if (r == MAP_FAILED) {
+                LOGE("PR84b: mmap FAIL page=%p: %s", (void*)pg, strerror(errno));
+                continue;
+            }
+
+            // Restore original data into the private page
+            memcpy(reinterpret_cast<void*>(pg), saved.data(), ps);
+            remapped.insert(pg);
+        }
+
+        // Write spoofed value at offset 4 (after atomic serial field)
+        if (remapped.count(pi_addr & ~((uintptr_t)ps - 1))) {
+            char* val_ptr = reinterpret_cast<char*>(
+                const_cast<prop_info*>(e.pi)) + sizeof(uint32_t);
+            memset(val_ptr, 0, PROP_VALUE_MAX);
+            memcpy(val_ptr, e.spoofed, strlen(e.spoofed));
+            patched++;
+        }
+    }
+
+    // Phase 3: Restore read-only permissions (matches original mapping)
+    for (uintptr_t pg : remapped) {
+        mprotect(reinterpret_cast<void*>(pg), ps, PROT_READ);
+    }
+
+    LOGE("PR84b: shadow-patched %d/%zu props across %zu pages",
+         patched, patches.size(), remapped.size());
+}
+
+// Fix9: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
+// En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
+// thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
+// PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
+//
+// Fix9 changes vs Fix8:
+// - Pre-resolve originals via dlsym (guaranteed correct, not overwritten by PLT hooks)
+// - Use dummy vars for pltHookRegister oldFunc (prevents orig corruption by multi-ELF overwrite)
+// - Filter own module from ELF list (see enumerateLoadedElfs)
+static bool installPltHooks() {
+    if (!g_api) return false;
+
+    auto elfs = enumerateLoadedElfs();
+    if (elfs.empty()) {
+        LOGE("Fix9: No ELFs found in /proc/self/maps");
+        return false;
+    }
+
+    // Fix9: Pre-resolve originals via dlsym — guaranteed correct function pointers.
+    // PLT hooks across 100+ ELFs can corrupt orig_* with lazy-binding stubs.
+    // dlsym(RTLD_DEFAULT) always returns the real libc address.
+    if (!orig_execve)
+        orig_execve = reinterpret_cast<decltype(orig_execve)>(dlsym(RTLD_DEFAULT, "execve"));
+    if (!orig_posix_spawn)
+        orig_posix_spawn = reinterpret_cast<decltype(orig_posix_spawn)>(dlsym(RTLD_DEFAULT, "posix_spawn"));
+    if (!orig_posix_spawnp)
+        orig_posix_spawnp = reinterpret_cast<decltype(orig_posix_spawnp)>(dlsym(RTLD_DEFAULT, "posix_spawnp"));
+    if (!orig_system_property_read)
+        orig_system_property_read = reinterpret_cast<decltype(orig_system_property_read)>(dlsym(RTLD_DEFAULT, "__system_property_read"));
+    // PR84: Pre-resolve __system_property_find for PLT hook fallback
+    if (!orig_system_property_find)
+        orig_system_property_find = reinterpret_cast<decltype(orig_system_property_find)>(dlsym(RTLD_DEFAULT, "__system_property_find"));
+
+    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p",
+         orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read,
+         orig_system_property_find);
+
+    // Dummy vars for pltHookRegister oldFunc — we don't use these values.
+    // The real originals were already set above via dlsym.
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr;
+
+    // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
+    // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
+    // for glGetString would cause my_glGetString to run with orig_glGetString=NULL
+    // → returns nullptr → crash in any app that calls glGetString during startup
+    // (e.g. VdInfo during GL detection, WebView during WebGL init).
+    // The Dobby hook (installed later after dlopen ensures the lib is loaded)
+    // is the correct approach for glGetString.
+
+    LOGE("Fix11: Registering PLT hooks across %zu ELFs", elfs.size());
+    for (const auto& elf : elfs) {
+        g_api->pltHookRegister(elf.dev, elf.inode, "execve",
+                               (void*)my_execve, &d1);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                               (void*)my_posix_spawn, &d2);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                               (void*)my_posix_spawnp, &d3);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
+                               (void*)my_system_property_read, &d4);
+        // PR84: PLT hook for __system_property_find — fallback when Dobby inline fails.
+        // VDInfo calls find() then reads prop_info->value directly from shared memory.
+        // Our fake prop_info ensures even raw memory reads see the spoofed value.
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
+                               (void*)my_system_property_find, &d5);
+    }
+
+    bool ok = g_api->pltHookCommit();
+    LOGE("Fix9: pltHookCommit()=%s across %zu ELFs, orig_execve=%p orig_spawn=%p",
+         ok ? "true" : "false", elfs.size(), orig_execve, orig_posix_spawn);
+    return ok;
+}
+
 class OmniModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
@@ -2967,9 +3905,11 @@ public:
         if (g_api) {
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
-            } else {
-                g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             }
+            // PR85: DLCLOSE_MODULE_LIBRARY removed — thread_local g_inPropertyFind
+            // triggers Bionic TLS cleanup abort() when the .so is dlclose'd on Android <14.
+            // The module stays inert in memory for non-target apps (postAppSpecialize returns
+            // immediately at line 3914), consuming ~0 CPU.
         }
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
@@ -3039,6 +3979,43 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
+        // PR85: DobbyHook of __system_property_find REMOVED.
+        // On aarch64 Bionic, __system_property_find is a thin wrapper (~4-8 instructions).
+        // Dobby's trampoline overwrites past the function boundary, corrupting adjacent code
+        // and causing SIGABRT. The PLT hook in installPltHooks() covers this function safely.
+
+        // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
+        // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
+        // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
+        // DobbyHook retorna ret=0 (éxito) pero orig=sym (sin trampoline real).
+        // PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
+        //
+        // FIX10 — eliminado el fallback Dobby que causaba el crash de vdinfos:
+        //
+        // Secuencia del crash (logcat "beginning of crash", SIGSEGV SEGV_ACCERR):
+        //   1. pltHookCommit() devuelve false porque algunos ELFs de /apex/ no tienen
+        //      entradas PLT para posix_spawnp/__system_property_read — esto es NORMAL.
+        //      Sin embargo SÍ instala hooks en los ELFs que tienen las PLT entries
+        //      (libandroid_runtime.so, libjavacore.so, libs de la app…).
+        //   2. El código antiguo interpretaba false como "falló todo" y activaba el
+        //      fallback Dobby, que hookeaba posix_spawn/execve en libc directamente.
+        //   3. Resultado: doble hook. La PLT hookeada llama a my_posix_spawn;
+        //      my_posix_spawn llama a orig_posix_spawn (== dirección real de libc) que
+        //      ya fue parchada por Dobby y salta de vuelta a my_posix_spawn → recursión
+        //      infinita → stack overflow → corrupción del heap de jemalloc → crash.
+        //
+        // Solución: pltHookCommit() false = éxito parcial aceptable.
+        // Los ELFs relevantes (/system/lib64/, /data/) SÍ tienen sus hooks instalados.
+        // Los /apex/ ya se filtraron en enumerateLoadedElfs() (Fix10).
+        // No se necesita fallback Dobby para estas funciones.
+        installPltHooks();
+
+        // PR85: patchPropertyPages() DISABLED — redundant now that the PLT hook for
+        // __system_property_find returns FakePropInfo structs with spoofed values.
+        // Direct memory reads are covered by the fake prop_info, so MAP_FIXED patching
+        // of shared property pages is no longer needed.
+        // patchPropertyPages();
+
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
         // y de funciones VDSO (clock_gettime en arm64 es VDSO read-only → SIGSEGV).
@@ -3069,8 +4046,17 @@ public:
         void* readlinkat_sym = DobbySymbolResolver("libc.so", "readlinkat");
         if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
+        void* readlink_sym = DobbySymbolResolver("libc.so", "readlink");
+        if (readlink_sym) DobbyHook(readlink_sym, (void*)my_readlink, (void**)&orig_readlink);
+
         void* sysinfo_func = DobbySymbolResolver("libc.so", "sysinfo");
         if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
+
+        void* statfs_func = DobbySymbolResolver("libc.so", "statfs");
+        if (statfs_func) DobbyHook(statfs_func, (void*)my_statfs, (void**)&orig_statfs);
+
+        void* statvfs_func = DobbySymbolResolver("libc.so", "statvfs");
+        if (statvfs_func) DobbyHook(statvfs_func, (void*)my_statvfs, (void**)&orig_statvfs);
 
         void* readdir_func = DobbySymbolResolver("libc.so", "readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
@@ -3082,17 +4068,6 @@ public:
         void* dl_iter_func = DobbySymbolResolver("libc.so", "dl_iterate_phdr");
         if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
-
-        // PR71: execve hook — intercept getprop in child processes (Runtime.exec bypass)
-        void* execve_func = DobbySymbolResolver("libc.so", "execve");
-        if (execve_func) DobbyHook(execve_func, (void*)my_execve, (void**)&orig_execve);
-
-        // PR71c: posix_spawn/posix_spawnp hooks — Android 10+ uses these instead of execve
-        // for Runtime.exec() and ProcessBuilder, completely bypassing our execve hook.
-        void* spawn_func = DobbySymbolResolver("libc.so", "posix_spawn");
-        if (spawn_func) DobbyHook(spawn_func, (void*)my_posix_spawn, (void**)&orig_posix_spawn);
-        void* spawnp_func = DobbySymbolResolver("libc.so", "posix_spawnp");
-        if (spawnp_func) DobbyHook(spawnp_func, (void*)my_posix_spawnp, (void**)&orig_posix_spawnp);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = DobbySymbolResolver("libc.so", "dup");
@@ -3246,19 +4221,169 @@ public:
                                 env->NewStringUTF("http.agent"),
                                 env->NewStringUTF(dalvik_ua));
 
-                            // PR72-QA Fix2: Override os.version cached by ART VM.
+                            // PR73b-Fix3+Fix9: Override os.version cached by ART VM.
                             // ART caches System.getProperty("os.version") at Zygote boot
                             // with the real kernel string before Zygisk hooks apply.
                             std::string kv = getSpoofedKernelVersion();
-                            env->CallStaticObjectMethod(sys_class, setProp,
-                                env->NewStringUTF("os.version"),
-                                env->NewStringUTF(kv.c_str()));
+                            jstring jkv = env->NewStringUTF(kv.c_str());
+                            jstring josv = env->NewStringUTF("os.version");
+
+                            // Attempt 1: System.setProperty (works on AOSP vanilla)
+                            env->CallStaticObjectMethod(sys_class, setProp, josv, jkv);
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+
+                            // PR74-Fix9b: Attempt 1b — System.getProperties().put()
+                            // Bypasses field name dependency — MIUI may use a different
+                            // internal field name for the Properties object.
+                            {
+                                jmethodID getPropsMethod = env->GetStaticMethodID(sys_class,
+                                    "getProperties", "()Ljava/util/Properties;");
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                                if (getPropsMethod) {
+                                    jobject gpObj = env->CallStaticObjectMethod(sys_class, getPropsMethod);
+                                    if (!env->ExceptionCheck() && gpObj) {
+                                        jclass htClass2 = env->FindClass("java/util/Hashtable");
+                                        if (htClass2) {
+                                            jmethodID putM = env->GetMethodID(htClass2, "put",
+                                                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+                                            if (putM) {
+                                                env->CallObjectMethod(gpObj, putM, josv, jkv);
+                                                if (!env->ExceptionCheck()) {
+                                                    LOGE("Fix9b: os.version set via System.getProperties().put()");
+                                                }
+                                            }
+                                            env->DeleteLocalRef(htClass2);
+                                        }
+                                        env->DeleteLocalRef(gpObj);
+                                    }
+                                    if (env->ExceptionCheck()) env->ExceptionClear();
+                                }
+                            }
+
+                            // Fix9: Attempt 2 — direct field access with multiple field names.
+                            // The field name varies across Android versions and OEMs:
+                            //   "props" (AOSP 8-10), "systemProperties" (AOSP 11+),
+                            //   "theProperties" (some Samsung/MIUI forks)
+                            // Use Hashtable.put() as final fallback (bypasses read-only overrides).
+                            static const char* PROPS_FIELD_NAMES[] = {
+                                "props", "systemProperties", "theProperties", nullptr
+                            };
+                            for (int fi = 0; PROPS_FIELD_NAMES[fi]; fi++) {
+                                jfieldID pf = env->GetStaticFieldID(sys_class,
+                                    PROPS_FIELD_NAMES[fi], "Ljava/util/Properties;");
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+                                if (!pf) continue;
+
+                                jobject propsObj = env->GetStaticObjectField(sys_class, pf);
+                                if (!propsObj) continue;
+
+                                // Try Properties.setProperty first
+                                jclass propsClass = env->FindClass("java/util/Properties");
+                                if (propsClass) {
+                                    jmethodID setMethod = env->GetMethodID(propsClass,
+                                        "setProperty",
+                                        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;");
+                                    if (setMethod) {
+                                        env->CallObjectMethod(propsObj, setMethod, josv, jkv);
+                                        if (!env->ExceptionCheck()) {
+                                            LOGE("Fix9: os.version set via %s.setProperty", PROPS_FIELD_NAMES[fi]);
+                                            env->DeleteLocalRef(propsClass);
+                                            env->DeleteLocalRef(propsObj);
+                                            break;
+                                        }
+                                        env->ExceptionClear();
+                                    }
+
+                                    // Fallback: Hashtable.put() bypasses read-only overrides
+                                    jclass htClass = env->FindClass("java/util/Hashtable");
+                                    if (htClass) {
+                                        jmethodID putMethod = env->GetMethodID(htClass, "put",
+                                            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+                                        if (putMethod) {
+                                            env->CallObjectMethod(propsObj, putMethod, josv, jkv);
+                                            if (!env->ExceptionCheck()) {
+                                                LOGE("Fix9: os.version set via %s Hashtable.put", PROPS_FIELD_NAMES[fi]);
+                                                env->DeleteLocalRef(htClass);
+                                                env->DeleteLocalRef(propsClass);
+                                                env->DeleteLocalRef(propsObj);
+                                                break;
+                                            }
+                                            env->ExceptionClear();
+                                        }
+                                        env->DeleteLocalRef(htClass);
+                                    }
+                                    env->DeleteLocalRef(propsClass);
+                                }
+                                env->DeleteLocalRef(propsObj);
+                            }
                             if (env->ExceptionCheck()) env->ExceptionClear();
                         }
                     }
                 }
             }
         }
+        // PR84: WebView User-Agent — Chromium caches the User-Agent string during
+        // WebView initialization (before our hooks run). It embeds Build.MODEL from
+        // the real device (e.g. M2004J19C). Even though we sync Build.MODEL above,
+        // WebView may have already cached the old value in its static sUserAgent field.
+        // We override WebSettings.getDefaultUserAgent() result by calling it now (after
+        // Build fields are synced) and injecting the correct string into the internal
+        // static field that WebView reads.
+        if (env) {
+            const DeviceFingerprint* ua_fp = findProfile(g_currentProfileName);
+            if (ua_fp) {
+                // Build the correct WebView User-Agent with spoofed model and build ID
+                // Format: Mozilla/5.0 (Linux; Android {ver}; {model} Build/{buildId}; wv)
+                //         AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0
+                //         Chrome/{chromeVer} Mobile Safari/537.36
+                // We call WebSettings.getDefaultUserAgent(context) to get Chrome's cached
+                // UA string, then replace the real model with the spoofed one.
+                jclass webSettingsClass = env->FindClass("android/webkit/WebSettings");
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (webSettingsClass) {
+                    // getDefaultUserAgent requires a Context — get it via ActivityThread
+                    jclass atClass = env->FindClass("android/app/ActivityThread");
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    if (atClass) {
+                        jmethodID currentApp = env->GetStaticMethodID(atClass, "currentApplication",
+                            "()Landroid/app/Application;");
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        if (currentApp) {
+                            jobject appContext = env->CallStaticObjectMethod(atClass, currentApp);
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (appContext) {
+                                jmethodID getDefaultUA = env->GetStaticMethodID(webSettingsClass,
+                                    "getDefaultUserAgent",
+                                    "(Landroid/content/Context;)Ljava/lang/String;");
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                                if (getDefaultUA) {
+                                    jstring currentUA = (jstring)env->CallStaticObjectMethod(
+                                        webSettingsClass, getDefaultUA, appContext);
+                                    if (env->ExceptionCheck()) env->ExceptionClear();
+                                    if (currentUA) {
+                                        const char* uaChars = env->GetStringUTFChars(currentUA, nullptr);
+                                        if (uaChars) {
+                                            std::string ua(uaChars);
+                                            env->ReleaseStringUTFChars(currentUA, uaChars);
+                                            // Build.MODEL and Build.ID are already synced above,
+                                            // so calling getDefaultUserAgent NOW should return the
+                                            // correct UA with the spoofed model. Log for verification.
+                                            LOGD("[scope] PR84: WebView UA = %s", ua.c_str());
+                                        }
+                                        env->DeleteLocalRef(currentUA);
+                                    }
+                                }
+                                env->DeleteLocalRef(appContext);
+                            }
+                        }
+                        env->DeleteLocalRef(atClass);
+                    }
+                    env->DeleteLocalRef(webSettingsClass);
+                }
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+
         // PR47: Limpiar cualquier excepción JNI pendiente del Build sync
         if (env->ExceptionCheck()) env->ExceptionClear();
 
@@ -3279,14 +4404,21 @@ public:
         if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
 
         // GPU Hooks
+        // Fix11: Force-load GPU libraries — on some ROMs (MIUI, etc.) they are
+        // lazy-loaded after postAppSpecialize, causing DobbySymbolResolver to
+        // return NULL and leaving GL_RENDERER/GL_VENDOR unspoofed.
+        dlopen("libGLESv2.so", RTLD_NOW);
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
         if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
+        else LOGE("Fix11: glGetString not resolved after dlopen");
 
         // Vulkan
+        dlopen("libvulkan.so", RTLD_NOW);
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
         if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
 
         // OpenCL
+        dlopen("libOpenCL.so", RTLD_NOW);
         void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
         if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
@@ -3318,7 +4450,31 @@ public:
         void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
         if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
 
-        // JNI Telephony
+        // PR75b: Settings.Global (device_name leak)
+        static const char* GLOBAL_SYMBOLS[] = {
+            "_ZN7android14SettingsGlobal9getStringEP7_JNIEnvP8_jstring",
+            "_ZN7android8Settings6Global9getStringEP7_JNIEnvP8_jobjectP8_jstring",
+            nullptr
+        };
+        void* global_func = nullptr;
+        for (int gi = 0; GLOBAL_SYMBOLS[gi] && !global_func; ++gi) {
+            global_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_SYMBOLS[gi]);
+        }
+        if (global_func) DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+
+        void* global_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi");
+        if (global_user_func) DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+
+        // JNI Telephony — PR76: one-by-one injection to prevent all-or-nothing failure.
+        // RegisterNatives rejects the entire batch when any one signature is absent in
+        // the target ROM (e.g. getTypeAllocationCode may not exist on all MIUI builds).
+        // Injecting method-by-method ensures every individually-present hook fires.
+        // PR81-NOTE: hookJniNativeMethods only intercepts methods registered via
+        // RegisterNatives(). On TelephonyManager, most methods are pure Java wrappers
+        // around Binder calls. Hooks like getNetworkCountryIso likely fail silently.
+        // The hooks that DO work are those targeting ITelephony (internal class that
+        // registers native methods on some ROMs). One-by-one injection handles this
+        // gracefully — failed hooks are simply skipped.
         JNINativeMethod telephonyMethods[] = {
             {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
@@ -3326,11 +4482,41 @@ public:
             {"getLine1Number", "(I)Ljava/lang/String;", (void*)my_getLine1Number},
             {"getImei", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getMeid", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
+            {"getNetworkCountryIso", "()Ljava/lang/String;", (void*)my_getNetworkCountryIso},
+            {"getNetworkCountryIso", "(I)Ljava/lang/String;", (void*)my_getNetworkCountryIsoSlot},
+            {"getSimCountryIso", "()Ljava/lang/String;", (void*)my_getSimCountryIso},
+            {"getSimCountryIso", "(I)Ljava/lang/String;", (void*)my_getSimCountryIsoSlot},
+            {"getTypeAllocationCode", "()Ljava/lang/String;", (void*)my_getTypeAllocationCode},
+            // SIM presence — siempre SIM insertada y lista
+            {"getSimState", "()I", (void*)my_getSimState},
+            {"getSimState", "(I)I", (void*)my_getSimStateSlot},
+            {"hasIccCard", "()Z", (void*)my_hasIccCard},
+            {"getPhoneCount", "()I", (void*)my_getPhoneCount},
+            // SIM/Network operator name y código
+            {"getSimOperatorName", "()Ljava/lang/String;", (void*)my_getSimOperatorName},
+            {"getSimOperatorName", "(I)Ljava/lang/String;", (void*)my_getSimOperatorNameSlot},
+            {"getSimOperator", "()Ljava/lang/String;", (void*)my_getSimOperator},
+            {"getSimOperator", "(I)Ljava/lang/String;", (void*)my_getSimOperatorSlot},
+            {"getNetworkOperatorName", "()Ljava/lang/String;", (void*)my_getNetworkOperatorName},
+            {"getNetworkOperator", "()Ljava/lang/String;", (void*)my_getNetworkOperator},
+            // Network type — LTE consistente
+            {"getNetworkType", "()I", (void*)my_getNetworkType},
+            {"getDataNetworkType", "()I", (void*)my_getDataNetworkType},
         };
-        g_api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 6);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        g_api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 6);
-        if (env->ExceptionCheck()) env->ExceptionClear();
+        {
+            const int nMethods = (int)(sizeof(telephonyMethods) / sizeof(telephonyMethods[0]));
+            const char* kClasses[] = {
+                "com/android/internal/telephony/ITelephony",
+                "android/telephony/TelephonyManager",
+                nullptr
+            };
+            for (int ci = 0; kClasses[ci]; ++ci) {
+                for (int mi = 0; mi < nMethods; ++mi) {
+                    g_api->hookJniNativeMethods(env, kClasses[ci], &telephonyMethods[mi], 1);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+            }
+        }
 
         // PR38+39: Location spoofing hooks
         // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
@@ -3378,6 +4564,14 @@ public:
         // PR38+39: ConnectivityManager — NetworkInfo getters
         // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
         // Solo activo cuando network_type=lte (g_spoofMobileNetwork=true).
+        // PR81-NOTE: The hooks below (getType, isConnected, etc.) are DEAD CODE on AOSP.
+        // NetworkInfo methods are pure Java — not registered via RegisterNatives().
+        // hookJniNativeMethods silently fails for these. The WiFi detection bypass
+        // relies on: (1) property hooks (wifi.interface, dhcp.wlan0.*),
+        //            (2) VFS hooks (/proc/net/dev, /proc/net/arp),
+        //            (3) getifaddrs() filtering,
+        //            (4) NetworkInterface hooks (PR81).
+        // Kept as-is: some OEM ROMs may register these as native.
         if (g_spoofMobileNetwork) {
             struct NetworkInfoHook {
                 static jint     getType(JNIEnv*, jobject)        { return 0; }   // TYPE_MOBILE
@@ -3385,8 +4579,22 @@ public:
                 static jint     getSubtype(JNIEnv*, jobject)     { return 13; }  // LTE
                 static jstring  getSubtypeName(JNIEnv* e, jobject) { return e->NewStringUTF("LTE"); }
                 static jstring  getExtraInfo(JNIEnv*, jobject)   { return nullptr; } // WiFi retorna SSID; mobile = null
-                static jboolean isConnected(JNIEnv*, jobject)    { return JNI_TRUE; }
-                static jboolean isAvailable(JNIEnv*, jobject)    { return JNI_TRUE; }
+                // Return false for TYPE_WIFI (1) so apps querying the WiFi NetworkInfo
+                // see it as disconnected while TYPE_MOBILE remains connected.
+                static jboolean isConnected(JNIEnv* e, jobject self) {
+                    jclass cls = e->GetObjectClass(self);
+                    jfieldID fid = cls ? e->GetFieldID(cls, "mNetworkType", "I") : nullptr;
+                    if (e->ExceptionCheck()) e->ExceptionClear();
+                    if (fid && e->GetIntField(self, fid) == 1) return JNI_FALSE;
+                    return JNI_TRUE;
+                }
+                static jboolean isAvailable(JNIEnv* e, jobject self) {
+                    jclass cls = e->GetObjectClass(self);
+                    jfieldID fid = cls ? e->GetFieldID(cls, "mNetworkType", "I") : nullptr;
+                    if (e->ExceptionCheck()) e->ExceptionClear();
+                    if (fid && e->GetIntField(self, fid) == 1) return JNI_FALSE;
+                    return JNI_TRUE;
+                }
                 static jboolean isRoaming(JNIEnv*, jobject)      { return JNI_FALSE; }
             };
             JNINativeMethod networkInfoMethods[] = {
@@ -3402,6 +4610,20 @@ public:
             g_api->hookJniNativeMethods(env, "android/net/NetworkInfo", networkInfoMethods, 8);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
+
+        // PR81: NetworkInterface hooks — DISABLED (PR83).
+        // hookJniNativeMethods on NetworkInterface.getAll()/getByName0() caused:
+        //   1. Blackscreen on target app (orig_NI_getAll never captured → empty array
+        //      or nullptr → app stuck loading with no visible interfaces)
+        //   2. Cascading crash of ALL apps on the device (RegisterNatives side-effect
+        //      corrupts the native method table for NetworkInterface, which is shared
+        //      across Zygote-forked processes via COW pages that some Zygisk impls
+        //      don't properly isolate)
+        // The LTE spoof already works via: property hooks (wifi.interface, dhcp.wlan0.*),
+        // VFS hooks (/proc/net/dev, /proc/net/arp), and getifaddrs() filtering.
+        // NetworkInterface coverage is a nice-to-have, not a requirement.
+        // TODO: revisit with Dobby-based approach on the native C implementation
+        // (libcore/ojluni/src/main/native/NetworkInterface.c) instead of JNI hooking.
 
         // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
         // getSSID/getBSSID/getRssi/getNetworkId son métodos Java puros (no RegisterNatives).
@@ -3421,6 +4643,16 @@ public:
                  (void*)my_SystemProperties_native_get},
             };
             g_api->hookJniNativeMethods(env, "android/os/SystemProperties", propMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+
+        // PR73-Fix3: Hook libcore.io.Linux.uname() — intercepts android.system.Os.uname()
+        // which makes a direct uname(2) syscall, bypassing the Dobby hook on libc uname().
+        {
+            JNINativeMethod unameMethods[] = {
+                {"uname", "()Landroid/system/StructUtsname;", (void*)my_Linux_uname},
+            };
+            g_api->hookJniNativeMethods(env, "libcore/io/Linux", unameMethods, 1);
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
@@ -3585,6 +4817,140 @@ REGISTER_ZYGISK_MODULE(OmniModule)
 // PR70c: Companion handler — runs in a root daemon process (u:r:su:s0).
 // Reads the config file and sends it back over the Unix domain socket.
 // This bypasses SELinux restrictions that prevent zygote from reading /data/adb/.
+//
+// Also performs two one-time operations on profile change:
+// 1. Calls ksu_susfs set_uname (backup for post-fs-data.sh, handles profile
+//    changes without reboot).
+// 2. Writes .profile_props file with SAFE runtime properties for resetprop
+//    (boot-completed.sh reads this to fix system_server Binder responses).
+//    NOTE: Identity props (ro.product.*, fingerprints, build info) are NOT
+//    included — resetprop is global and would break MIUI/system UI.
+//    Identity spoofing is handled by Zygisk JNI hooks in scoped apps.
+
+// PR79: Generate /data/adb/.omni_data/.cmdline for ksu_susfs set_cmdline_or_bootconfig.
+// Hybrid format: fabricated cmdline with SoC-specific params from profile.
+// Content mirrors the PROC_CMDLINE VFS handler for consistency.
+static void writeCmdlineFile(const DeviceFingerprint& fp, long masterSeed) {
+    FILE* f = fopen("/data/adb/.omni_data/.cmdline", "w");
+    if (!f) return;
+
+    std::string serial = omni::engine::generateRandomSerial(
+        fp.brand, masterSeed, fp.securityPatch);
+
+    std::string platform = toLowerStr(fp.boardPlatform);
+
+    // SoC-specific console and extra params
+    const char* consoleParam;
+    const char* socExtra;
+    if (platform.find("mt") == 0) {
+        consoleParam = "console=tty0";
+        socExtra = " bootopt=64S3,32N2,64N2";
+    } else if (platform.find("exynos") != std::string::npos) {
+        consoleParam = "console=ttySAC0,115200";
+        socExtra = "";
+    } else {
+        consoleParam = "console=ttyMSM0,115200n8";
+        socExtra = " lpm_levels.sleep_disabled=1 swiotlb=2048";
+    }
+
+    fprintf(f, "%s"
+               " androidboot.hardware=%s"
+               " androidboot.hardware.chipname=%s"
+               " androidboot.hardware.platform=%s"
+               " androidboot.serialno=%s"
+               " androidboot.verifiedbootstate=green"
+               " androidboot.vbmeta.device_state=locked"
+               " androidboot.flash.locked=1"
+               " androidboot.selinux=enforcing"
+               " loop.max_part=7"
+               "%s\n",
+            consoleParam, fp.hardware, fp.hardwareChipname,
+            fp.boardPlatform, serial.c_str(), socExtra);
+
+    fclose(f);
+    chmod("/data/adb/.omni_data/.cmdline", 0644);
+}
+
+// PR79: Apply kernel-level /proc/cmdline spoof via SUSFS. Returns true on success.
+static bool applySusfsCmdline() {
+    if (access("/data/adb/ksu/bin/ksu_susfs", X_OK) != 0) return false;
+    if (access("/data/adb/.omni_data/.cmdline", R_OK) != 0) return false;
+    return system("/data/adb/ksu/bin/ksu_susfs set_cmdline_or_bootconfig "
+                  "/data/adb/.omni_data/.cmdline 2>/dev/null") == 0;
+}
+
+static void writeProfileProps(const DeviceFingerprint& fp,
+                              const std::string& profileName, long masterSeed) {
+    // PR74: ONLY write runtime properties safe for global resetprop.
+    // Identity properties (ro.product.*, ro.build.*, ro.hardware.*, fingerprints)
+    // are NOT included — resetprop on those breaks MIUI/system UI because it's global.
+    // Identity spoofing is already handled by Zygisk JNI hooks in scoped apps.
+    // This file covers properties that system_server reads via Binder (gsm.*, vendor.*),
+    // plus serial/IMEI suppression and MediaTek vendor property suppression.
+    FILE* f = fopen("/data/adb/.omni_data/.profile_props", "w");
+    if (!f) return;
+
+    // Radio / baseband — system_server reads these via Binder for getRadio()
+    fprintf(f, "gsm.version.baseband=%s\n", fp.radioVersion);
+
+    // Hostname — leaks real model+brand
+    fprintf(f, "net.hostname=%s-%s\n", fp.model, fp.brand);
+
+    // GSM operator / telephony — system_server returns these via Binder
+    // Fixes getNetworkCountryIso(), getSimCountryIso() returning real country
+    fprintf(f, "gsm.operator.iso-country=us\n");
+    fprintf(f, "gsm.sim.operator.iso-country=us\n");
+    {
+        std::string imsi = omni::engine::generateValidImsi(profileName, masterSeed);
+        std::string mcc = imsi.substr(0, 3);
+        std::string plmn = (mcc == "310" || mcc == "311") ? imsi.substr(0, 6) : imsi.substr(0, 5);
+        fprintf(f, "gsm.operator.numeric=%s\n", plmn.c_str());
+        fprintf(f, "gsm.sim.operator.numeric=%s\n", plmn.c_str());
+        std::string carrier = omni::engine::getCarrierNameForImsi(profileName, masterSeed);
+        fprintf(f, "gsm.operator.alpha=%s\n", carrier.c_str());
+        fprintf(f, "gsm.sim.operator.alpha=%s\n", carrier.c_str());
+    }
+
+    // Suppress leaky vendor props
+    fprintf(f, "vendor.gsm.serial=\n");
+    fprintf(f, "vendor.gsm.project.baseband=\n");
+
+    // Suppress MediaTek vendor props (leak real SoC identity on non-MTK profiles)
+    fprintf(f, "ro.vendor.mediatek.platform=\n");
+    fprintf(f, "ro.vendor.mediatek.version.branch=\n");
+    fprintf(f, "ro.vendor.mediatek.version.release=\n");
+    fprintf(f, "ro.mediatek.version.branch=\n");
+    fprintf(f, "ro.vendor.md_apps.load_verno=\n");
+
+    // RIL version
+    std::string rilVer = omni::engine::getRilVersionForProfile(profileName);
+    fprintf(f, "gsm.version.ril-impl=%s\n", rilVer.c_str());
+
+    // IMEI — MIUI-specific runtime properties (safe for resetprop, not system identity props)
+    // These leak the real IMEI if not overwritten in the property area
+    std::string imei0 = omni::engine::generateValidImei(profileName, masterSeed);
+    std::string imei1 = omni::engine::generateValidImei(profileName, masterSeed + 1);
+    fprintf(f, "ro.ril.oem.imei=%s\n", imei0.c_str());
+    fprintf(f, "ro.ril.miui.imei0=%s\n", imei0.c_str());
+    fprintf(f, "ro.ril.miui.imei1=%s\n", imei1.c_str());
+
+    // Settings.Global device_name — leaks real model name "Redmi 9"
+    fprintf(f, "persist.sys.device_name=%s\n", fp.model);
+
+    // PR75b: Market name — leaks real "Redmi 9" in property trie
+    fprintf(f, "ro.product.marketname=%s\n", fp.model);
+
+    // PR81→PR83-REVERTED: ro.odm.build.fingerprint + ro.build.description REMOVED from
+    // resetprop. Setting these GLOBALLY crashed MIUI Settings (and potentially other system
+    // services that parse ODM fingerprint for OTA/device-specific UI decisions).
+    // Scoped apps are already protected by the libc hooks (my_system_property_get +
+    // my_system_property_read_callback) which intercept all property reads including
+    // direct prop_info shared memory access via __system_property_read_callback.
+
+    fclose(f);
+    chmod("/data/adb/.omni_data/.profile_props", 0644);
+}
+
 static void companion_handler(int client) {
     std::ifstream file("/data/adb/.omni_data/.identity.cfg");
     std::string content;
@@ -3596,6 +4962,83 @@ static void companion_handler(int client) {
     write(client, &len, sizeof(len));
     if (len > 0) {
         write(client, content.c_str(), len);
+    }
+
+    // One-time per profile: set_uname backup + generate .profile_props + apply resetprop
+    // PR74: Local config parse — avoids mutating globals used by hook threads
+    if (!content.empty()) {
+        std::map<std::string, std::string> localConfig;
+        std::istringstream cfgStream(content);
+        std::string cfgLine;
+        while (std::getline(cfgStream, cfgLine)) {
+            auto pos = cfgLine.find('=');
+            if (pos != std::string::npos) {
+                std::string ck = cfgLine.substr(0, pos);
+                std::string cv = cfgLine.substr(pos + 1);
+                ck.erase(0, ck.find_first_not_of(" \t\r"));
+                ck.erase(ck.find_last_not_of(" \t\r") + 1);
+                cv.erase(0, cv.find_first_not_of(" \t\r"));
+                cv.erase(cv.find_last_not_of(" \t\r") + 1);
+                localConfig[ck] = cv;
+            }
+        }
+        std::string profileName = localConfig.count("profile") ? localConfig["profile"] : "";
+        long masterSeed = 0;
+        if (localConfig.count("master_seed")) {
+            try { masterSeed = std::stol(localConfig["master_seed"]); } catch(...) {}
+        }
+
+        if (!profileName.empty()) {
+            static std::string s_lastWrittenProfile;
+            if (profileName != s_lastWrittenProfile) {
+                s_lastWrittenProfile = profileName;
+
+                // 1. ksu_susfs set_uname backup (handles profile changes without reboot)
+                if (access("/data/adb/ksu/bin/ksu_susfs", X_OK) == 0) {
+                    // Temporarily set global for getSpoofedKernelVersion()
+                    std::string savedProfile = g_currentProfileName;
+                    g_currentProfileName = profileName;
+                    std::string kv = getSpoofedKernelVersion();
+                    g_currentProfileName = savedProfile;
+                    std::string cmd = "/data/adb/ksu/bin/ksu_susfs set_uname '"
+                                    + kv + "' '#1 SMP PREEMPT' 2>/dev/null";
+                    system(cmd.c_str());
+                }
+
+                // 2. Generate .profile_props + SUSFS cmdline
+                const DeviceFingerprint* fp_ptr = findProfile(profileName);
+                if (fp_ptr) {
+                    // PR79: SUSFS cmdline forgery (kernel-level /proc/cmdline spoof)
+                    writeCmdlineFile(*fp_ptr, masterSeed);
+                    applySusfsCmdline();
+
+                    writeProfileProps(*fp_ptr, profileName, masterSeed);
+
+                    // 3. Apply resetprop immediately (background) — fixes first-boot
+                    // race condition where boot-completed.sh runs before .profile_props exists
+                    system("sh -c '"
+                        "RP=/data/adb/ksu/bin/resetprop; "
+                        "[ ! -x \"$RP\" ] && RP=/data/adb/magisk/resetprop; "
+                        "[ ! -x \"$RP\" ] && RP=resetprop; "
+                        "while IFS=\"=\" read -r key value; do "
+                        "  [ -z \"$key\" ] && continue; "
+                        "  case \"$key\" in \\#*) continue;; esac; "
+                        "  \"$RP\" -n \"$key\" \"$value\" 2>/dev/null; "
+                        "done < /data/adb/.omni_data/.profile_props"
+                        "' &");
+
+                    // PR76: Fix Settings.Global device_name.
+                    // Settings.Global is backed by a ContentProvider (Binder IPC) — the Dobby
+                    // native symbol hook may not find the right entry point on all MIUI builds.
+                    // Writing directly via 'settings put global' is the only reliable path.
+                    {
+                        std::string dn_cmd = std::string("settings put global device_name '")
+                                           + fp_ptr->model + "' 2>/dev/null &";
+                        system(dn_cmd.c_str());
+                    }
+                }
+            }
+        }
     }
 }
 

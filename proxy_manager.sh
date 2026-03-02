@@ -19,7 +19,7 @@ LOG_FILE="$OMNI_DIR/proxy.log"
 LOCK_DIR="$OMNI_DIR/.proxy.lock"
 
 # TUN interface config
-TUN_NAME="tun_omni"
+TUN_NAME="tun0"
 TUN_ADDR="172.19.0.1"
 TUN_MTU="8500"
 

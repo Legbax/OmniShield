@@ -30,6 +30,11 @@ const JA3_PRESETS = [
 // "Save failed" errors on certain ROMs and KernelSU Next builds.
 // Falls back to `import('kernelsu')` if the global is missing.
 let _ksuExecFn = null;
+// PR-UIFreeze: Reduced from 30 s → 8 s.  The old 30 s timeout per call meant
+// 4 sequential calls could lock the binder/JS thread for up to 2 minutes,
+// starving the system UI and freezing the entire phone.
+const KSU_EXEC_TIMEOUT = 8000;
+
 async function ksu_exec(cmd) {
   try {
     if (!_ksuExecFn) {
@@ -39,7 +44,7 @@ async function ksu_exec(cmd) {
           const cb = '_omni_' + Date.now() + '_' + Math.random().toString(36).slice(2);
           const timer = setTimeout(() => {
             delete window[cb]; resolve({ errno: 1, stdout: '', stderr: 'timeout' });
-          }, 30000);
+          }, KSU_EXEC_TIMEOUT);
           window[cb] = (errno, stdout, stderr) => {
             clearTimeout(timer); delete window[cb];
             resolve({ errno, stdout, stderr: stderr || '' });
@@ -62,6 +67,12 @@ async function ksu_exec(cmd) {
   } catch(e) {
     return { errno: 1, stdout: '', stderr: '' };
   }
+}
+
+// PR-UIFreeze: Yield to the browser event loop so the OS can service touch
+// events, render frames, and process binder calls between heavy operations.
+function yieldToUI() {
+  return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
 }
 
 // ─── Config management ──────────────────────────────────────────────
@@ -126,7 +137,7 @@ const state = {
   wifiSsid: '', wifiBssid: '', mccmnc: '', simOperator: '',
   lat: 0, lon: 0, alt: 0, tz: '',
   carrier: '', simCountry: '', correlation: 0,
-  deviceIp: '', deviceModel: ''
+  deviceIp: '', deviceModel: '', proxyIp: ''
 };
 
 // overrides — per-field manual seeds (each "randomize" just picks a new random seed for that field)
@@ -136,7 +147,7 @@ const overrides = {};
 async function loadState() {
   state.cfg = await readConfig();
   state.profile      = state.cfg.profile      || 'Redmi 9';
-  state.seed         = parseInt(state.cfg.master_seed) || generateRandomSeed();
+  state.seed         = parseInt(state.cfg.master_seed, 10) || generateRandomSeed();
   state.jitter       = (state.cfg.jitter || 'true') !== 'false';
   state.networkType  = (state.cfg.network_type === 'lte' || state.cfg.network_type === 'mobile') ? 'lte' : 'wifi';
   state.seedVersion  = parseInt(state.cfg.seed_version) || 0;
@@ -177,7 +188,9 @@ async function loadState() {
   if (ov.ja3_idx != null)         overrides.ja3Idx        = parseInt(ov.ja3_idx) || 0;
 
   computeAll();
-  await loadSystemInfo();
+  // PR-UIFreeze: loadSystemInfo() is now called AFTER the loading screen is
+  // removed (see DOMContentLoaded handler) so the UI paints immediately and
+  // doesn't block the system while waiting for the ksu bridge.
 }
 
 function computeAll() {
@@ -188,7 +201,7 @@ function computeAll() {
   const brand = (fp.brand || 'xiaomi').toLowerCase();
 
   state.imei       = overrides.imei       ?? generateIMEI(profile, seed);
-  state.imei2      = overrides.imei2      ?? generateIMEI(profile, seed + 137);
+  state.imei2      = overrides.imei2      ?? generateIMEI(profile, seed + 1);
   state.iccid      = overrides.iccid      ?? generateICCID(profile, seed);
   state.imsi       = overrides.imsi       ?? generateIMSI(profile, seed);
   state.phone      = overrides.phone      ?? generatePhoneNumber(profile, seed);
@@ -197,7 +210,10 @@ function computeAll() {
   state.serial     = overrides.serial     ?? generateSerial(brand, seed, fp.securityPatch || '');
   state.hwSerial   = overrides.hwSerial   ?? generateSerial(brand, seed + 99, fp.securityPatch || '');
   state.androidId  = overrides.androidId  ?? generateAndroidId(seed);
-  state.ssaid      = state.androidId;    // SSAID = Android ID on Android 8+
+  // Android 8+: SSAID es per-app (cada UID obtiene valor único).
+  // En la UI mostramos un valor de referencia con seed diferente.
+  // El C++ usa seed ^ (uid * 2654435761) para cada app real.
+  state.ssaid      = generateAndroidId(seed ^ 10000);
   state.gsfId      = overrides.gsfId      ?? generateGsfId(seed);
   state.widevineId = overrides.widevineId ?? generateWidevineId(seed);
   state.mediaDrmId = overrides.mediaDrmId ?? generateUUID(seed + 31);
@@ -224,18 +240,45 @@ function computeAll() {
     state.alt = generateAltitude(profile, seed);
   }
 
-  state.correlation = computeCorrelation(profile, seed, {
+  const corr = computeCorrelation(profile, seed, {
     imei: state.imei, imsi: state.imsi, iccid: state.iccid,
-    phone: state.phone, wifiMac: state.wifiMac
+    phone: state.phone, wifiMac: state.wifiMac, serial: state.serial,
+    androidId: state.androidId, gsfId: state.gsfId, bootId: state.bootId,
+    widevineId: state.widevineId
   });
+  state.correlation = corr.score;
+  state.corrChecks  = corr.checks;
 }
 
+// PR-UIFreeze: Combined 3 sequential ksu_exec calls into a single shell
+// command.  This reduces binder round-trips from 3 → 1 and eliminates the
+// scenario where each 8 s timeout compounds into a 24 s system-wide freeze.
 async function loadSystemInfo() {
-  const ipRes = await ksu_exec("ip -4 addr show wlan0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1");
-  const ipRes2 = ipRes.stdout || (await ksu_exec("ip -4 addr show rmnet0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -1")).stdout || '';
-  state.deviceIp = ipRes2 || '–';
-  const modelRes = await ksu_exec('getprop ro.product.model');
-  state.deviceModel = modelRes.stdout || state.profile;
+  // Build a single shell command that fetches local IP, model, and proxy exit IP
+  let cmd =
+    "IP=$(ip -4 addr show wlan0 2>/dev/null|grep 'inet '|awk '{print $2}'|cut -d/ -f1|head -1);" +
+    "[ -z \"$IP\" ]&&IP=$(ip -4 addr show rmnet0 2>/dev/null|grep 'inet '|awk '{print $2}'|cut -d/ -f1|head -1);" +
+    "MODEL=$(getprop ro.product.model 2>/dev/null);" +
+    "PROXYIP=;";
+
+  // If proxy is enabled, query public exit IP through the SOCKS5 tunnel
+  if (state.proxyEnabled && state.proxyHost && state.proxyPort) {
+    const auth = state.proxyUser
+      ? `${state.proxyUser}:${state.proxyPass || ''}@`
+      : '';
+    const proxyUrl = `socks5h://${auth}${state.proxyHost}:${state.proxyPort}`;
+    // curl through proxy with short timeout; try ifconfig.me then api.ipify.org
+    cmd += `PROXYIP=$(curl -s -m 5 -x '${proxyUrl}' https://api.ipify.org 2>/dev/null);` +
+           `[ -z "$PROXYIP" ]&&PROXYIP=$(curl -s -m 5 -x '${proxyUrl}' https://ifconfig.me 2>/dev/null);`;
+  }
+
+  cmd += "echo \"${IP}||${MODEL}||${PROXYIP}\"";
+
+  const { stdout } = await ksu_exec(cmd);
+  const parts = (stdout || '').split('||');
+  state.deviceIp    = parts[0] || '–';
+  state.deviceModel = (parts[1] || '').trim() || state.profile;
+  state.proxyIp     = (parts[2] || '').trim() || '';
 }
 
 // ─── Persist helpers ────────────────────────────────────────────────
@@ -366,7 +409,14 @@ function renderStatus() {
   updateGauge(state.correlation);
   setCell('status-device', state.profile);
   setCell('status-model', state.deviceModel);
-  setCell('status-ip', state.deviceIp);
+  // Show proxy exit IP when proxy is active, otherwise local IP
+  if (state.proxyEnabled && state.proxyIp) {
+    setCell('status-ip', state.proxyIp);
+    setCell('status-ip-label', 'Proxy IP');
+  } else {
+    setCell('status-ip', state.deviceIp);
+    setCell('status-ip-label', 'IP Address');
+  }
   setCell('status-simcountry', state.simCountry);
   setCell('status-phone', state.phone);
   setCell('status-carrier', state.carrier);
@@ -375,6 +425,15 @@ function renderStatus() {
   setCell('status-network', state.networkType.toUpperCase());
   setCell('status-seed', state.seed.toString());
   setCell('status-corr-label', `${state.correlation}% coherence`);
+  renderCorrBreakdown();
+}
+
+function renderCorrBreakdown() {
+  const el = document.getElementById('corr-breakdown');
+  if (!el || !state.corrChecks) return;
+  el.innerHTML = state.corrChecks.map(c =>
+    `<div class="corr-row"><span class="corr-icon">${c.passed ? '\u2713' : '\u2717'}</span><span class="corr-name">${escHtml(c.name)}</span><span class="corr-wt${c.passed ? '' : ' fail'}">${c.passed ? '+' : '\u2212'}${c.weight}</span></div>`
+  ).join('');
 }
 
 function updateGauge(score) {
@@ -627,9 +686,28 @@ function renderField(id, value, valid) {
 // ─── Event handlers: Identity/Device ─────────────────────────────────
 window.selectProfile = function(name) {
   if (!DEVICE_PROFILES[name]) return;
+  if (state.profile !== name) {
+    // Preserve current identity values as overrides so correlation
+    // correctly shows mismatches against the new profile.
+    // User can then regenerate individual fields or use "Randomize All".
+    overrides.imei          = state.imei;
+    overrides.imei2         = state.imei2;
+    overrides.iccid         = state.iccid;
+    overrides.imsi          = state.imsi;
+    overrides.phone         = state.phone;
+    overrides.wifiMac       = state.wifiMac;
+    overrides.btMac         = state.btMac;
+    overrides.serial        = state.serial;
+    overrides.hwSerial      = state.hwSerial;
+    overrides.androidId     = state.androidId;
+    overrides.gsfId         = state.gsfId;
+    overrides.widevineId    = state.widevineId;
+    overrides.bootId        = state.bootId;
+    overrides.gmailAccount  = state.gmailAccount;
+    overrides.wifiSsid      = state.wifiSsid;
+    overrides.wifiBssid     = state.wifiBssid;
+  }
   state.profile = name;
-  // clear overrides on profile change
-  for (const k in overrides) delete overrides[k];
   computeAll();
   addRecentProfile(name);
   renderDeviceTab();
@@ -677,7 +755,7 @@ window.randomizeField = function(field) {
     'f-imei2':      () => { overrides.imei2         = generateIMEI(state.profile, newSubSeed); state.imei2 = overrides.imei2; },
     'f-serial':     () => { overrides.serial        = generateSerial(brand, newSubSeed, fp.securityPatch||''); state.serial = overrides.serial; },
     'f-hw-serial':  () => { overrides.hwSerial      = generateSerial(brand, newSubSeed+1, fp.securityPatch||''); state.hwSerial = overrides.hwSerial; },
-    'f-android-id': () => { overrides.androidId     = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; state.ssaid = state.androidId; },
+    'f-android-id': () => { overrides.androidId     = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; state.ssaid = generateAndroidId(newSubSeed ^ 10000); },
     'f-gsf-id':     () => { overrides.gsfId         = generateGsfId(newSubSeed); state.gsfId = overrides.gsfId; },
     'f-widevine':   () => { overrides.widevineId    = generateWidevineId(newSubSeed); state.widevineId = overrides.widevineId; },
     'f-media-drm':  () => { overrides.mediaDrmId    = generateUUID(newSubSeed); state.mediaDrmId = overrides.mediaDrmId; },
@@ -695,9 +773,60 @@ window.randomizeField = function(field) {
   };
   if (actions[field]) {
     actions[field]();
-    state.correlation = computeCorrelation(state.profile, state.seed, { imei: state.imei, imsi: state.imsi, iccid: state.iccid, phone: state.phone, wifiMac: state.wifiMac });
+    const corr = computeCorrelation(state.profile, state.seed, {
+      imei: state.imei, imsi: state.imsi, iccid: state.iccid, phone: state.phone,
+      wifiMac: state.wifiMac, serial: state.serial, androidId: state.androidId,
+      gsfId: state.gsfId, bootId: state.bootId, widevineId: state.widevineId
+    });
+    state.correlation = corr.score;
+    state.corrChecks  = corr.checks;
     renderPage(currentPage);
   }
+};
+
+// ─── Inline field editing (WiFi SSID, Gmail) ─────────────────────────
+// Converts the field-value div into an input for manual text entry.
+// On Enter or blur, saves the value as an override and re-renders.
+window.editField = function(fieldId) {
+  const el = document.getElementById(fieldId);
+  if (!el || el.tagName === 'INPUT') return;
+
+  const currentValue = el.textContent === '–' ? '' : el.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentValue;
+  input.className = 'field-value editable';
+  input.id = fieldId;
+
+  const commitEdit = () => {
+    const val = input.value.trim();
+    if (!val) return;  // don't accept empty
+
+    const setters = {
+      'f-gmail':     v => { overrides.gmailAccount = v; state.gmailAccount = v; },
+      'f-wifi-ssid': v => { overrides.wifiSsid = v; state.wifiSsid = v; },
+    };
+    if (setters[fieldId]) setters[fieldId](val);
+
+    const corr = computeCorrelation(state.profile, state.seed, {
+      imei: state.imei, imsi: state.imsi, iccid: state.iccid, phone: state.phone,
+      wifiMac: state.wifiMac, serial: state.serial, androidId: state.androidId,
+      gsfId: state.gsfId, bootId: state.bootId, widevineId: state.widevineId
+    });
+    state.correlation = corr.score;
+    state.corrChecks  = corr.checks;
+    renderPage(currentPage);
+  };
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); commitEdit(); }
+    if (e.key === 'Escape') { renderPage(currentPage); }
+  });
+  input.addEventListener('blur', commitEdit);
+
+  el.replaceWith(input);
+  input.focus();
+  input.select();
 };
 
 // ─── Event handlers: Network/Telephony ───────────────────────────────
@@ -759,6 +888,18 @@ function initMap() {
 }
 
 // ─── Event handlers: Advanced/Proxy ───────────────────────────────────
+window.togglePassVisibility = function() {
+  const input = document.getElementById('proxy-pass');
+  const icon = document.getElementById('pass-eye-icon');
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  // Swap icon: open eye → slashed eye
+  icon.innerHTML = show
+    ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
+    : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+};
+
 window.applyProxy = async function() {
   state.proxyEnabled = document.getElementById('proxy-enabled')?.checked || false;
   state.proxyType = document.getElementById('proxy-type')?.value || 'socks5';
@@ -963,6 +1104,43 @@ window.rebootDevice = async function() {
   setTimeout(() => ksu_exec('reboot'), 1600);
 };
 
+// ─── Wipe Google Traces ───────────────────────────────────────────────
+window.wipeGoogleTraces = async function() {
+  const ok = await showDialog('Wipe Google Traces',
+    `This will force stop and wipe data for:<br>
+    <ul style="margin:8px 0 0 16px;line-height:2">
+      <li><b>WebView provider</b> — cookies, localStorage, cache</li>
+      <li><b>Google Play Store</b> — device fingerprint, account cache</li>
+      <li><b>Google Play Services</b> — device registration, checkin</li>
+      <li><b>Google Services Framework</b> — GSF ID reset</li>
+    </ul>
+    <br><span style="color:var(--error)">The UI will close immediately.</span>
+    Reopen KernelSU Manager to continue.`,
+    [{label:'Cancel',cls:'btn-secondary',value:false},
+     {label:'Wipe & Close',cls:'destroy-btn btn',value:true}]);
+  if (!ok) return;
+
+  toast('Wiping Google traces in 2 seconds...', 'warn', 2000);
+
+  // Detect the active WebView provider package, then background the
+  // destructive commands with nohup so they survive WebView process death.
+  await ksu_exec(
+    `nohup sh -c "` +
+    `sleep 2; ` +
+    `WV=$(cmd webviewupdate current-webview-package 2>/dev/null || echo com.google.android.webview); ` +
+    `am force-stop com.android.vending 2>/dev/null; ` +
+    `am force-stop com.google.android.gms 2>/dev/null; ` +
+    `am force-stop com.google.android.gsf 2>/dev/null; ` +
+    `am force-stop \\$WV 2>/dev/null; ` +
+    `pm clear --user 0 com.google.android.gsf 2>/dev/null; ` +
+    `pm clear --user 0 com.google.android.gms 2>/dev/null; ` +
+    `pm clear --user 0 com.android.vending 2>/dev/null; ` +
+    `pm clear --user 0 \\$WV 2>/dev/null; ` +
+    `rm -rf /data/user/0/\\$WV/ /data/data/\\$WV/ /data/user_de/0/\\$WV/ 2>/dev/null` +
+    `" >/dev/null 2>&1 &`
+  );
+};
+
 // ─── Destroy Identity ──────────────────────────────────────────────────
 window.destroyIdentity = async function() {
   const ok = await showDialog('Destroy Identity',
@@ -1030,88 +1208,13 @@ window.refreshStatus = async function() {
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escAttr(s) { return String(s||'').replace(/'/g,'&#39;').replace(/"/g,'&quot;'); }
 
-// ─── System nav bar inset detection ───────────────────────────────────
-// env(safe-area-inset-bottom) returns 0 on MIUI / Android 11 WebViews even
-// when viewport-fit=cover is set, because KernelSU's activity doesn't forward
-// window insets to the WebView on those builds.
-// This function measures the actual gap using 4 methods and sets the CSS
-// custom property --inset-bottom on :root so the bottom nav compensates.
-function detectNavInset() {
-  // ── Method 1: probe whether env() is already working ─────────────────
-  const probe = document.createElement('div');
-  probe.style.cssText =
-    'position:fixed;bottom:0;left:0;width:0;' +
-    'height:env(safe-area-inset-bottom,0px);visibility:hidden;pointer-events:none';
-  document.documentElement.appendChild(probe);
-  const envH = probe.offsetHeight;
-  probe.remove();
-  if (envH > 5) return; // env() is working — CSS already handles it
-
-  // ── Method 2: visualViewport API (most precise, Android WebView 67+) ──
-  // IMPORTANT: Only return early if we actually measured a real inset (> 10px).
-  // On MIUI / Android 11 KernelSU WebView, visualViewport often reports 0 even
-  // though a physical nav bar is present. In that case we fall through to Methods
-  // 3 and 4. The resize listener is still registered so future viewport changes
-  // (e.g. keyboard) are handled dynamically.
-  if (window.visualViewport) {
-    const applyVV = () => {
-      const layoutH = document.documentElement.clientHeight;
-      const inset = Math.max(
-        0,
-        Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
-      );
-      if (inset > 10) {
-        document.documentElement.style.setProperty('--inset-bottom', inset + 'px');
-      }
-    };
-    window.visualViewport.addEventListener('resize', applyVV);
-    const layoutH = document.documentElement.clientHeight;
-    const initInset = Math.max(
-      0,
-      Math.round(layoutH - window.visualViewport.offsetTop - window.visualViewport.height)
-    );
-    if (initInset > 10) {
-      document.documentElement.style.setProperty('--inset-bottom', initInset + 'px');
-      return; // real measurement obtained — done
-    }
-    // initInset = 0 → fall through to Methods 3 & 4
-  }
-
-  // ── Method 3: screen vs window height heuristic ───────────────────────
-  // On Android, screen.height can be physical px or CSS px depending on build.
-  // We try both interpretations and use whichever lands in a plausible nav bar
-  // range (30–120 CSS px).
-  const dpr      = window.devicePixelRatio || 1;
-  const diffCss  = window.screen.height - window.innerHeight;
-  const diffPhys = Math.round(window.screen.height / dpr) - window.innerHeight;
-  const diff = (diffCss > 20 && diffCss < 200)   ? diffCss
-             : (diffPhys > 20 && diffPhys < 120)  ? diffPhys
-             : 0;
-  if (diff > 0) {
-    document.documentElement.style.setProperty('--inset-bottom', diff + 'px');
-    return;
-  }
-
-  // ── Method 4: Android UA hardcoded fallback ────────────────────────────
-  // All measurement methods returned 0. On Android the system navigation bar
-  // (gesture strip or 3-button bar) is always present and is typically 48 px
-  // tall in CSS pixels. Apply this safe fallback so the bottom nav is always
-  // above the system bar on any Android device.
-  if (/Android/i.test(navigator.userAgent)) {
-    document.documentElement.style.setProperty('--inset-bottom', '48px');
-  }
-}
 
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Detect system nav bar height immediately — before any async work so the
-  // bottom nav is already correctly positioned during the loading screen.
-  detectNavInset();
-
-  // loadState() is wrapped in try/finally so the loading screen is ALWAYS
-  // removed even if ksu_exec times out, throws, or the config is missing.
-  // Without this guarantee the #loading-screen stays on top and blocks every
-  // click / touch event on the underlying UI.
+  // PR-UIFreeze: loadState() is wrapped in try/finally so the loading screen
+  // is ALWAYS removed even if ksu_exec times out, throws, or the config is
+  // missing.  yieldToUI() calls give the OS event loop a chance to breathe
+  // between heavy operations, preventing the system-wide freeze.
   try {
     await loadState();
   } catch(e) {
@@ -1125,6 +1228,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       setTimeout(() => loader.remove(), 600);
     }
   }
+
+  // PR-UIFreeze: Yield to let the browser paint the first frame with the
+  // loading screen removed before doing more work.
+  await yieldToUI();
 
   // ── Event listeners are registered AFTER the finally block so they are
   //    always attached regardless of whether loadState() succeeded. ──────
@@ -1165,8 +1272,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Profile search
-  document.getElementById('profile-search')?.addEventListener('input', () => renderDeviceTab());
+  // Profile search — PR-UIFreeze: debounced to avoid re-rendering 40+ DOM
+  // elements on every keystroke, which caused layout thrashing on slow devices.
+  let _profileSearchTimer = 0;
+  document.getElementById('profile-search')?.addEventListener('input', () => {
+    clearTimeout(_profileSearchTimer);
+    _profileSearchTimer = setTimeout(renderDeviceTab, 180);
+  });
 
   // Profile list click (delegated)
   document.getElementById('profile-list')?.addEventListener('click', e => {
@@ -1198,4 +1310,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   navigate('status');
+
+  // PR-UIFreeze: Load system info (IP, model) in the background AFTER the
+  // UI is already visible and interactive.  When it resolves, refresh the
+  // status page so the real values replace the defaults.
+  loadSystemInfo().then(() => {
+    if (currentPage === 'status') renderStatus();
+  }).catch(() => {});
 });
