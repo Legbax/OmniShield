@@ -210,7 +210,10 @@ function computeAll() {
   state.serial     = overrides.serial     ?? generateSerial(brand, seed, fp.securityPatch || '');
   state.hwSerial   = overrides.hwSerial   ?? generateSerial(brand, seed + 99, fp.securityPatch || '');
   state.androidId  = overrides.androidId  ?? generateAndroidId(seed);
-  state.ssaid      = state.androidId;    // SSAID = Android ID on Android 8+
+  // Android 8+: SSAID es per-app (cada UID obtiene valor único).
+  // En la UI mostramos un valor de referencia con seed diferente.
+  // El C++ usa seed ^ (uid * 2654435761) para cada app real.
+  state.ssaid      = generateAndroidId(seed ^ 10000);
   state.gsfId      = overrides.gsfId      ?? generateGsfId(seed);
   state.widevineId = overrides.widevineId ?? generateWidevineId(seed);
   state.mediaDrmId = overrides.mediaDrmId ?? generateUUID(seed + 31);
@@ -710,7 +713,7 @@ window.randomizeField = function(field) {
     'f-imei2':      () => { overrides.imei2         = generateIMEI(state.profile, newSubSeed); state.imei2 = overrides.imei2; },
     'f-serial':     () => { overrides.serial        = generateSerial(brand, newSubSeed, fp.securityPatch||''); state.serial = overrides.serial; },
     'f-hw-serial':  () => { overrides.hwSerial      = generateSerial(brand, newSubSeed+1, fp.securityPatch||''); state.hwSerial = overrides.hwSerial; },
-    'f-android-id': () => { overrides.androidId     = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; state.ssaid = state.androidId; },
+    'f-android-id': () => { overrides.androidId     = generateAndroidId(newSubSeed); state.androidId = overrides.androidId; state.ssaid = generateAndroidId(newSubSeed ^ 10000); },
     'f-gsf-id':     () => { overrides.gsfId         = generateGsfId(newSubSeed); state.gsfId = overrides.gsfId; },
     'f-widevine':   () => { overrides.widevineId    = generateWidevineId(newSubSeed); state.widevineId = overrides.widevineId; },
     'f-media-drm':  () => { overrides.mediaDrmId    = generateUUID(newSubSeed); state.mediaDrmId = overrides.mediaDrmId; },

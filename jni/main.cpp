@@ -2609,8 +2609,12 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
 
     jstring result = nullptr;
     if (strcmp(key, "android_id") == 0) {
+        // Android 8.0+: SSAID es per-app — cada UID obtiene un valor único.
+        // Incorporar getuid() al seed garantiza que cada app ve un android_id
+        // diferente, replicando el comportamiento real del SettingsProvider.
+        long perAppSeed = g_masterSeed ^ ((long)getuid() * 2654435761L);
         result = env->NewStringUTF(
-            omni::engine::generateRandomId(16, g_masterSeed).c_str()
+            omni::engine::generateRandomId(16, perAppSeed).c_str()
         );
     } else if (strcmp(key, "gsf_id") == 0) {
         result = env->NewStringUTF(
