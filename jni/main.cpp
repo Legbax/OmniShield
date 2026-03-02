@@ -4002,15 +4002,18 @@ static bool installPltHooks() {
 // the one just loaded. For already-hooked ELFs, pltHookCommit() is idempotent
 // (xhook_refresh skips entries whose GOT already points to our hook function).
 // For the newly loaded ELF, it patches the GOT entries for property functions.
-// Only re-applies property hooks (not execve/posix_spawn) since those are the critical
-// ones for the dual-read detection bypass.
+// PR89: Also re-applies execve/posix_spawn/posix_spawnp hooks. Without this,
+// late-loaded native libraries (e.g. VDInfo's .so via System.loadLibrary) retain
+// real libc addresses in their GOT for spawn functions, allowing them to launch
+// unintercepted getprop subprocesses that return real property values.
 static void reapplyPltHooksForNewLibraries() {
     if (!g_api) return;
 
     auto elfs = enumerateLoadedElfs();
     if (elfs.empty()) return;
 
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr,
+         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
 
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
@@ -4023,6 +4026,15 @@ static void reapplyPltHooksForNewLibraries() {
             g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
                                    (void*)my_system_property_foreach, &d3);
         }
+        // PR89: Re-hook subprocess spawn functions for late-loaded libraries.
+        // VDInfo's native lib calls posix_spawn("getprop") to read real property values.
+        // Without this, the new library's GOT retains real libc spawn addresses.
+        g_api->pltHookRegister(elf.dev, elf.inode, "execve",
+                               (void*)my_execve, &d4);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                               (void*)my_posix_spawn, &d5);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                               (void*)my_posix_spawnp, &d6);
     }
 
     g_api->pltHookCommit();
