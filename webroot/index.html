@@ -669,7 +669,12 @@
               </div>
               <div style="flex:1">
                 <div class="input-label">Password (optional)</div>
-                <input id="proxy-pass" class="input" type="password" placeholder="pass">
+                <div style="position:relative">
+                  <input id="proxy-pass" class="input" type="password" placeholder="pass" style="padding-right:36px">
+                  <button type="button" class="btn-icon pass-toggle" onclick="togglePassVisibility()" title="Show/hide password" style="position:absolute;right:4px;top:50%;transform:translateY(-50%)">
+                    <svg id="pass-eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  </button>
+                </div>
               </div>
             </div>
             <div class="input-group">

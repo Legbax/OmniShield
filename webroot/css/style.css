@@ -797,6 +797,12 @@ hr.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; 
 }
 .field-value.editable:focus { border-color: rgba(0,229,255,.4); }
 
+.pass-toggle {
+  background: none; border: none; cursor: pointer;
+  color: var(--text2); padding: 4px;
+}
+.pass-toggle:hover { color: var(--text); }
+
 /* PR72: Inline code styling */
 code {
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
