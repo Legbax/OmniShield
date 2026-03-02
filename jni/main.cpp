@@ -232,6 +232,7 @@ static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
 static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
 static bool g_propForeachInlineHooked = false;           // PR88: true if Dobby inline hook on __system_property_foreach succeeded
+static bool g_spawnInlineHooked = false;                 // PR90: true if Dobby inline hooks on posix_spawn/posix_spawnp succeeded
 
 // PR86: dlsym hook — intercept dynamic symbol resolution for property functions.
 // When detection apps call dlsym(RTLD_DEFAULT, "__system_property_find") to get a raw
@@ -3965,14 +3966,19 @@ static bool installPltHooks() {
     // The Dobby hook (installed later after dlopen ensures the lib is loaded)
     // is the correct approach for glGetString.
 
-    LOGE("Fix11: Registering PLT hooks across %zu ELFs", elfs.size());
+    LOGE("Fix11: Registering PLT hooks across %zu ELFs (spawnInline=%d)", elfs.size(), g_spawnInlineHooked);
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "execve",
                                (void*)my_execve, &d1);
-        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
-                               (void*)my_posix_spawn, &d2);
-        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
-                               (void*)my_posix_spawnp, &d3);
+        // PR90: Only PLT-hook posix_spawn/posix_spawnp if Dobby inline hooks failed.
+        // When both are active, PLT calls my_posix_spawn → orig (= libc start addr,
+        // patched by Dobby) → my_posix_spawn → infinite recursion → crash.
+        if (!g_spawnInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                                   (void*)my_posix_spawn, &d2);
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                                   (void*)my_posix_spawnp, &d3);
+        }
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
                                (void*)my_system_property_read, &d4);
         // PR84/PR86: PLT hook for __system_property_find — only if Dobby inline hook
@@ -4027,14 +4033,15 @@ static void reapplyPltHooksForNewLibraries() {
                                    (void*)my_system_property_foreach, &d3);
         }
         // PR89: Re-hook subprocess spawn functions for late-loaded libraries.
-        // VDInfo's native lib calls posix_spawn("getprop") to read real property values.
-        // Without this, the new library's GOT retains real libc spawn addresses.
+        // PR90: posix_spawn/posix_spawnp only via PLT if Dobby inline failed.
         g_api->pltHookRegister(elf.dev, elf.inode, "execve",
                                (void*)my_execve, &d4);
-        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
-                               (void*)my_posix_spawn, &d5);
-        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
-                               (void*)my_posix_spawnp, &d6);
+        if (!g_spawnInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                                   (void*)my_posix_spawn, &d5);
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                                   (void*)my_posix_spawnp, &d6);
+        }
     }
 
     bool ok = g_api->pltHookCommit();
@@ -4270,30 +4277,48 @@ public:
             }
         }
 
-        // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
-        // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
-        // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
-        // DobbyHook retorna ret=0 (éxito) pero orig=sym (sin trampoline real).
-        // PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
-        //
-        // FIX10 — eliminado el fallback Dobby que causaba el crash de vdinfos:
-        //
-        // Secuencia del crash (logcat "beginning of crash", SIGSEGV SEGV_ACCERR):
-        //   1. pltHookCommit() devuelve false porque algunos ELFs de /apex/ no tienen
-        //      entradas PLT para posix_spawnp/__system_property_read — esto es NORMAL.
-        //      Sin embargo SÍ instala hooks en los ELFs que tienen las PLT entries
-        //      (libandroid_runtime.so, libjavacore.so, libs de la app…).
-        //   2. El código antiguo interpretaba false como "falló todo" y activaba el
-        //      fallback Dobby, que hookeaba posix_spawn/execve en libc directamente.
-        //   3. Resultado: doble hook. La PLT hookeada llama a my_posix_spawn;
-        //      my_posix_spawn llama a orig_posix_spawn (== dirección real de libc) que
-        //      ya fue parchada por Dobby y salta de vuelta a my_posix_spawn → recursión
-        //      infinita → stack overflow → corrupción del heap de jemalloc → crash.
-        //
-        // Solución: pltHookCommit() false = éxito parcial aceptable.
-        // Los ELFs relevantes (/system/lib64/, /data/) SÍ tienen sus hooks instalados.
-        // Los /apex/ ya se filtraron en enumerateLoadedElfs() (Fix10).
-        // No se necesita fallback Dobby para estas funciones.
+        // PR90: Dobby inline hook posix_spawn/posix_spawnp in libc.
+        // These are NOT thin syscall wrappers — they are substantial userspace functions
+        // (fork + exec logic, 100+ ARM64 instructions) well above Dobby's 12-byte minimum.
+        // The Fix10 comment incorrectly claimed they were too small for Dobby.
+        // Inline hooks intercept ALL callers from ANY library (including late-loaded .so
+        // files from VDInfo), unlike PLT hooks which only cover ELFs present at hook time
+        // and depend on pltHookCommit() succeeding for each ELF.
+        // MUST be installed BEFORE installPltHooks() so g_spawnInlineHooked prevents
+        // double-hook registration (PLT + inline → infinite recursion, as documented in Fix10).
+        {
+            void* spawn_addr = dlsym(RTLD_DEFAULT, "posix_spawn");
+            void* spawnp_addr = dlsym(RTLD_DEFAULT, "posix_spawnp");
+            bool spawn_ok = false, spawnp_ok = false;
+            if (spawn_addr) {
+                int ret = DobbyHook(spawn_addr, (void*)my_posix_spawn,
+                                    (void**)&orig_posix_spawn);
+                spawn_ok = (ret == 0);
+                LOGE("PR90: posix_spawn Dobby hook %s at %p (ret=%d)",
+                     spawn_ok ? "SUCCESS" : "FAILED", spawn_addr, ret);
+            }
+            if (spawnp_addr) {
+                int ret = DobbyHook(spawnp_addr, (void*)my_posix_spawnp,
+                                    (void**)&orig_posix_spawnp);
+                spawnp_ok = (ret == 0);
+                LOGE("PR90: posix_spawnp Dobby hook %s at %p (ret=%d)",
+                     spawnp_ok ? "SUCCESS" : "FAILED", spawnp_addr, ret);
+            }
+            if (spawn_ok && spawnp_ok) {
+                g_spawnInlineHooked = true;
+                LOGE("PR90: Both spawn Dobby hooks active — PLT spawn hooks will be SKIPPED");
+            } else {
+                LOGE("PR90: Dobby spawn hooks incomplete — falling back to PLT hooks");
+            }
+        }
+
+        // Fix10: PLT hooks for functions where Dobby inline hooks fail or as fallback.
+        // execve is a thin syscall wrapper (~3 instructions, 12 bytes) — borderline for
+        // Dobby. __system_property_read may also be small on some ROMs. These remain
+        // PLT-only. posix_spawn/posix_spawnp are now Dobby inline hooked (PR90).
+        // pltHookCommit() returning false is normal — some /apex/ ELFs lack PLT entries
+        // for our target functions. The relevant ELFs (libandroid_runtime, libjavacore,
+        // app libs) DO get hooked.
         installPltHooks();
 
         // PR86: Hook dlsym for defense-in-depth against dynamic symbol resolution bypass.
