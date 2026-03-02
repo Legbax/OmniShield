@@ -3903,7 +3903,10 @@ public:
         void* global_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi");
         if (global_user_func) DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
 
-        // JNI Telephony
+        // JNI Telephony — PR76: one-by-one injection to prevent all-or-nothing failure.
+        // RegisterNatives rejects the entire batch when any one signature is absent in
+        // the target ROM (e.g. getTypeAllocationCode may not exist on all MIUI builds).
+        // Injecting method-by-method ensures every individually-present hook fires.
         JNINativeMethod telephonyMethods[] = {
             {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
             {"getSubscriberId", "(I)Ljava/lang/String;", (void*)my_getSubscriberId},
@@ -3917,10 +3920,20 @@ public:
             {"getSimCountryIso", "(I)Ljava/lang/String;", (void*)my_getSimCountryIsoSlot},
             {"getTypeAllocationCode", "()Ljava/lang/String;", (void*)my_getTypeAllocationCode},
         };
-        g_api->hookJniNativeMethods(env, "com/android/internal/telephony/ITelephony", telephonyMethods, 11);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        g_api->hookJniNativeMethods(env, "android/telephony/TelephonyManager", telephonyMethods, 11);
-        if (env->ExceptionCheck()) env->ExceptionClear();
+        {
+            const int nMethods = (int)(sizeof(telephonyMethods) / sizeof(telephonyMethods[0]));
+            const char* kClasses[] = {
+                "com/android/internal/telephony/ITelephony",
+                "android/telephony/TelephonyManager",
+                nullptr
+            };
+            for (int ci = 0; kClasses[ci]; ++ci) {
+                for (int mi = 0; mi < nMethods; ++mi) {
+                    g_api->hookJniNativeMethods(env, kClasses[ci], &telephonyMethods[mi], 1);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+            }
+        }
 
         // PR38+39: Location spoofing hooks
         // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
@@ -4330,6 +4343,16 @@ static void companion_handler(int client) {
                         "  \"$RP\" -n \"$key\" \"$value\" 2>/dev/null; "
                         "done < /data/adb/.omni_data/.profile_props"
                         "' &");
+
+                    // PR76: Fix Settings.Global device_name.
+                    // Settings.Global is backed by a ContentProvider (Binder IPC) — the Dobby
+                    // native symbol hook may not find the right entry point on all MIUI builds.
+                    // Writing directly via 'settings put global' is the only reliable path.
+                    {
+                        std::string dn_cmd = std::string("settings put global device_name '")
+                                           + fp_ptr->model + "' 2>/dev/null &";
+                        system(dn_cmd.c_str());
+                    }
                 }
             }
         }

@@ -16,3 +16,8 @@ while IFS='=' read -r key value; do
     case "$key" in \#*) continue ;; esac
     "$RP" -n "$key" "$value" 2>/dev/null
 done < "$PROPS_FILE"
+
+# PR76: Fix Settings.Global device_name — Binder IPC, not interceptable via JNI.
+# Read model from persist.sys.device_name already written to .profile_props.
+_DN=$(grep "^persist.sys.device_name=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+[ -n "$_DN" ] && settings put global device_name "$_DN" 2>/dev/null
