@@ -3636,6 +3636,141 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
                            const void *file_actions, const void *attrp,
                            char *const argv[], char *const envp[]);
 
+// PR84b: Shadow property pages — per-process property memory patching.
+// After fork (postAppSpecialize), replaces shared property mmap pages with private
+// anonymous copies, then writes spoofed values directly into prop_info->value fields.
+// This defeats ALL detection methods including direct memory reads from prop_info*
+// pointers returned by __system_property_find() — because the actual memory now
+// contains the spoofed value. Only the target process sees the change (private mapping).
+//
+// prop_info layout (bionic, Android 8+):
+//   offset 0:  atomic_uint32_t serial  (4 bytes)
+//   offset 4:  char value[92]          (PROP_VALUE_MAX)
+//   offset 96: char name[0]            (flexible array)
+static void patchPropertyPages() {
+    typedef int (*foreach_fn_t)(void (*)(const prop_info*, void*), void*);
+    auto foreach_fn = reinterpret_cast<foreach_fn_t>(
+        dlsym(RTLD_DEFAULT, "__system_property_foreach"));
+
+    if (!foreach_fn) {
+        LOGE("PR84b: __system_property_foreach not found");
+        return;
+    }
+    if (!orig_system_property_read_callback && !orig_system_property_read) {
+        LOGE("PR84b: no orig read function, skip");
+        return;
+    }
+
+    // Phase 1: Find all properties where real value != spoofed value
+    struct PatchEntry {
+        const prop_info* pi;
+        char spoofed[PROP_VALUE_MAX];
+    };
+    std::vector<PatchEntry> patches;
+
+    foreach_fn([](const prop_info* pi, void* cookie) {
+        auto* out = static_cast<std::vector<PatchEntry>*>(cookie);
+
+        // Read real name + value via original (unhooked) function.
+        // Pack into a single buffer: [name \0 padding | value \0 padding]
+        char buf[PROP_NAME_MAX + 1 + PROP_VALUE_MAX];
+        memset(buf, 0, sizeof(buf));
+
+        if (orig_system_property_read_callback) {
+            // Preferred: handles long properties correctly via trampoline
+            orig_system_property_read_callback(pi,
+                [](void* c, const char* n, const char* v, uint32_t) {
+                    char* b = static_cast<char*>(c);
+                    if (n) strncpy(b, n, PROP_NAME_MAX);
+                    if (v) strncpy(b + PROP_NAME_MAX + 1, v, PROP_VALUE_MAX - 1);
+                }, buf);
+        } else if (orig_system_property_read) {
+            // Fallback: reads pi->value directly (only short properties)
+            orig_system_property_read(pi, buf, buf + PROP_NAME_MAX + 1);
+        } else {
+            return;
+        }
+
+        const char* name = buf;
+        const char* real_val = buf + PROP_NAME_MAX + 1;
+        if (name[0] == '\0') return;
+
+        // Get what our spoofing logic returns for this property
+        char spoofed[PROP_VALUE_MAX] = {};
+        my_system_property_get(name, spoofed);
+
+        if (spoofed[0] != '\0' && strcmp(real_val, spoofed) != 0) {
+            PatchEntry e;
+            e.pi = pi;
+            memset(e.spoofed, 0, sizeof(e.spoofed));
+            strncpy(e.spoofed, spoofed, PROP_VALUE_MAX - 1);
+            out->push_back(e);
+        }
+    }, &patches);
+
+    if (patches.empty()) {
+        LOGD("PR84b: no properties need shadow patching");
+        return;
+    }
+
+    LOGE("PR84b: %zu properties to shadow-patch", patches.size());
+
+    // Phase 2: Remap affected pages as private anonymous and write spoofed values.
+    // mmap(MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS) replaces the shared mapping with
+    // a per-process private copy. Other processes still see the original shared data.
+    const long ps = sysconf(_SC_PAGESIZE) > 0 ? sysconf(_SC_PAGESIZE) : 4096;
+    std::set<uintptr_t> remapped;
+    int patched = 0;
+
+    for (const auto& e : patches) {
+        uintptr_t pi_addr = reinterpret_cast<uintptr_t>(e.pi);
+        // Value field spans [pi+4, pi+4+PROP_VALUE_MAX). Check if it crosses page boundary.
+        uintptr_t val_start = pi_addr + sizeof(uint32_t);
+        uintptr_t val_end = val_start + PROP_VALUE_MAX - 1;
+        uintptr_t page_lo = val_start & ~((uintptr_t)ps - 1);
+        uintptr_t page_hi = val_end & ~((uintptr_t)ps - 1);
+
+        // Remap all pages covering the value field
+        for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
+            if (remapped.count(pg)) continue;
+
+            // Save original page data before remapping
+            std::vector<char> saved(ps);
+            memcpy(saved.data(), reinterpret_cast<void*>(pg), ps);
+
+            // Replace shared mapping with private anonymous mapping
+            void* r = mmap(reinterpret_cast<void*>(pg), ps,
+                          PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+            if (r == MAP_FAILED) {
+                LOGE("PR84b: mmap FAIL page=%p: %s", (void*)pg, strerror(errno));
+                continue;
+            }
+
+            // Restore original data into the private page
+            memcpy(reinterpret_cast<void*>(pg), saved.data(), ps);
+            remapped.insert(pg);
+        }
+
+        // Write spoofed value at offset 4 (after atomic serial field)
+        if (remapped.count(pi_addr & ~((uintptr_t)ps - 1))) {
+            char* val_ptr = reinterpret_cast<char*>(
+                const_cast<prop_info*>(e.pi)) + sizeof(uint32_t);
+            memset(val_ptr, 0, PROP_VALUE_MAX);
+            memcpy(val_ptr, e.spoofed, strlen(e.spoofed));
+            patched++;
+        }
+    }
+
+    // Phase 3: Restore read-only permissions (matches original mapping)
+    for (uintptr_t pg : remapped) {
+        mprotect(reinterpret_cast<void*>(pg), ps, PROT_READ);
+    }
+
+    LOGE("PR84b: shadow-patched %d/%zu props across %zu pages",
+         patched, patches.size(), remapped.size());
+}
+
 // Fix9: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
 // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
 // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
@@ -3875,6 +4010,13 @@ public:
         // Los /apex/ ya se filtraron en enumerateLoadedElfs() (Fix10).
         // No se necesita fallback Dobby para estas funciones.
         installPltHooks();
+
+        // PR84b: Shadow property pages — patch shared property memory per-process.
+        // Must run AFTER Dobby hooks (orig_system_property_read_callback set)
+        // and AFTER installPltHooks (orig_system_property_read set via dlsym).
+        // Replaces shared mmap pages with private copies containing spoofed values.
+        // This defeats direct memory reads that bypass all function-level hooks.
+        patchPropertyPages();
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
