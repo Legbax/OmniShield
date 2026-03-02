@@ -1751,7 +1751,33 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     content = "02:00:00:00:00:00\n";
 
                 } else if (type == PROC_CMDLINE) {
-                    content = "console=tty0 root=/dev/ram0 rw init=/init loglevel=4 androidboot.hardware=" + std::string(fp.hardware) + " androidboot.verifiedbootstate=green androidboot.vbmeta.device_state=locked androidboot.flash.locked=1\n";
+                    // PR79: Hybrid cmdline — SoC-specific params for realistic fingerprint
+                    std::string serial = omni::engine::generateRandomSerial(
+                        fp.brand, g_masterSeed, fp.securityPatch);
+                    std::string platform = toLowerStr(fp.boardPlatform);
+                    const char* consoleP;
+                    const char* socE;
+                    if (platform.find("mt") == 0) {
+                        consoleP = "console=tty0";
+                        socE = " bootopt=64S3,32N2,64N2";
+                    } else if (platform.find("exynos") != std::string::npos) {
+                        consoleP = "console=ttySAC0,115200";
+                        socE = "";
+                    } else {
+                        consoleP = "console=ttyMSM0,115200n8";
+                        socE = " lpm_levels.sleep_disabled=1 swiotlb=2048";
+                    }
+                    content = std::string(consoleP)
+                        + " androidboot.hardware=" + fp.hardware
+                        + " androidboot.hardware.chipname=" + fp.hardwareChipname
+                        + " androidboot.hardware.platform=" + fp.boardPlatform
+                        + " androidboot.serialno=" + serial
+                        + " androidboot.verifiedbootstate=green"
+                        + " androidboot.vbmeta.device_state=locked"
+                        + " androidboot.flash.locked=1"
+                        + " androidboot.selinux=enforcing"
+                        + " loop.max_part=7"
+                        + socE + "\n";
 
                 } else if (type == PROC_OSRELEASE) {
                     std::string plat = toLowerStr(fp.boardPlatform);
@@ -4371,6 +4397,59 @@ REGISTER_ZYGISK_MODULE(OmniModule)
 //    NOTE: Identity props (ro.product.*, fingerprints, build info) are NOT
 //    included — resetprop is global and would break MIUI/system UI.
 //    Identity spoofing is handled by Zygisk JNI hooks in scoped apps.
+
+// PR79: Generate /data/adb/.omni_data/.cmdline for ksu_susfs set_cmdline_or_bootconfig.
+// Hybrid format: fabricated cmdline with SoC-specific params from profile.
+// Content mirrors the PROC_CMDLINE VFS handler for consistency.
+static void writeCmdlineFile(const DeviceFingerprint& fp, long masterSeed) {
+    FILE* f = fopen("/data/adb/.omni_data/.cmdline", "w");
+    if (!f) return;
+
+    std::string serial = omni::engine::generateRandomSerial(
+        fp.brand, masterSeed, fp.securityPatch);
+
+    std::string platform = toLowerStr(fp.boardPlatform);
+
+    // SoC-specific console and extra params
+    const char* consoleParam;
+    const char* socExtra;
+    if (platform.find("mt") == 0) {
+        consoleParam = "console=tty0";
+        socExtra = " bootopt=64S3,32N2,64N2";
+    } else if (platform.find("exynos") != std::string::npos) {
+        consoleParam = "console=ttySAC0,115200";
+        socExtra = "";
+    } else {
+        consoleParam = "console=ttyMSM0,115200n8";
+        socExtra = " lpm_levels.sleep_disabled=1 swiotlb=2048";
+    }
+
+    fprintf(f, "%s"
+               " androidboot.hardware=%s"
+               " androidboot.hardware.chipname=%s"
+               " androidboot.hardware.platform=%s"
+               " androidboot.serialno=%s"
+               " androidboot.verifiedbootstate=green"
+               " androidboot.vbmeta.device_state=locked"
+               " androidboot.flash.locked=1"
+               " androidboot.selinux=enforcing"
+               " loop.max_part=7"
+               "%s\n",
+            consoleParam, fp.hardware, fp.hardwareChipname,
+            fp.boardPlatform, serial.c_str(), socExtra);
+
+    fclose(f);
+    chmod("/data/adb/.omni_data/.cmdline", 0644);
+}
+
+// PR79: Apply kernel-level /proc/cmdline spoof via SUSFS. Returns true on success.
+static bool applySusfsCmdline() {
+    if (access("/data/adb/ksu/bin/ksu_susfs", X_OK) != 0) return false;
+    if (access("/data/adb/.omni_data/.cmdline", R_OK) != 0) return false;
+    return system("/data/adb/ksu/bin/ksu_susfs set_cmdline_or_bootconfig "
+                  "/data/adb/.omni_data/.cmdline 2>/dev/null") == 0;
+}
+
 static void writeProfileProps(const DeviceFingerprint& fp,
                               const std::string& profileName, long masterSeed) {
     // PR74: ONLY write runtime properties safe for global resetprop.
@@ -4490,9 +4569,13 @@ static void companion_handler(int client) {
                     system(cmd.c_str());
                 }
 
-                // 2. Generate .profile_props
+                // 2. Generate .profile_props + SUSFS cmdline
                 const DeviceFingerprint* fp_ptr = findProfile(profileName);
                 if (fp_ptr) {
+                    // PR79: SUSFS cmdline forgery (kernel-level /proc/cmdline spoof)
+                    writeCmdlineFile(*fp_ptr, masterSeed);
+                    applySusfsCmdline();
+
                     writeProfileProps(*fp_ptr, profileName, masterSeed);
 
                     // 3. Apply resetprop immediately (background) — fixes first-boot
