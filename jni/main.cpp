@@ -1434,9 +1434,10 @@ int my_system_property_get(const char *key, char *value) {
                  k == "ro.product.build.version.release" ||
                  k == "ro.system.build.version.release" ||
                  k == "ro.system_ext.build.version.release" ||
-                 k == "ro.vendor.build.version.release_or_codename" ||
+                 k == "ro.vendor.build.version.release_or_codename"  ||
+                 k == "ro.odm.build.version.release_or_codename"     ||
                  k == "ro.product.build.version.release_or_codename" ||
-                 k == "ro.system.build.version.release_or_codename" ||
+                 k == "ro.system.build.version.release_or_codename"  ||
                  k == "ro.system_ext.build.version.release_or_codename") dynamic_buffer = fp.release;
         else if (k == "ro.vendor.build.version.sdk" ||
                  k == "ro.odm.build.version.sdk" ||
@@ -1449,7 +1450,9 @@ int my_system_property_get(const char *key, char *value) {
             else dynamic_buffer = "30";
         }
         else if (k == "ro.vendor.build.version.security_patch" ||
-                 k == "ro.vendor.build.security_patch")          dynamic_buffer = fp.securityPatch;
+                 k == "ro.vendor.build.security_patch"          ||
+                 k == "ro.odm.build.security_patch"             ||
+                 k == "ro.odm.build.version.security_patch")    dynamic_buffer = fp.securityPatch;
         // Build dates for all partitions
         else if (k == "ro.vendor.build.date.utc"    ||
                  k == "ro.odm.build.date.utc"       ||
@@ -4178,8 +4181,22 @@ public:
                 static jint     getSubtype(JNIEnv*, jobject)     { return 13; }  // LTE
                 static jstring  getSubtypeName(JNIEnv* e, jobject) { return e->NewStringUTF("LTE"); }
                 static jstring  getExtraInfo(JNIEnv*, jobject)   { return nullptr; } // WiFi retorna SSID; mobile = null
-                static jboolean isConnected(JNIEnv*, jobject)    { return JNI_TRUE; }
-                static jboolean isAvailable(JNIEnv*, jobject)    { return JNI_TRUE; }
+                // Return false for TYPE_WIFI (1) so apps querying the WiFi NetworkInfo
+                // see it as disconnected while TYPE_MOBILE remains connected.
+                static jboolean isConnected(JNIEnv* e, jobject self) {
+                    jclass cls = e->GetObjectClass(self);
+                    jfieldID fid = cls ? e->GetFieldID(cls, "mNetworkType", "I") : nullptr;
+                    if (e->ExceptionCheck()) e->ExceptionClear();
+                    if (fid && e->GetIntField(self, fid) == 1) return JNI_FALSE;
+                    return JNI_TRUE;
+                }
+                static jboolean isAvailable(JNIEnv* e, jobject self) {
+                    jclass cls = e->GetObjectClass(self);
+                    jfieldID fid = cls ? e->GetFieldID(cls, "mNetworkType", "I") : nullptr;
+                    if (e->ExceptionCheck()) e->ExceptionClear();
+                    if (fid && e->GetIntField(self, fid) == 1) return JNI_FALSE;
+                    return JNI_TRUE;
+                }
                 static jboolean isRoaming(JNIEnv*, jobject)      { return JNI_FALSE; }
             };
             JNINativeMethod networkInfoMethods[] = {
