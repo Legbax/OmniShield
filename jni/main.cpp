@@ -41,6 +41,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <set>              // Fix8: deduplicar ELFs en PLT hooks
+#include <unordered_map>   // PR84: fake prop_info map
 #include <sys/sysmacros.h>  // Fix8: makedev()
 
 #include "zygisk.hpp"
@@ -145,6 +146,7 @@ static std::mutex g_fdMutex;
 static int (*orig_system_property_get)(const char *key, char *value);
 static void (*orig_system_property_read_callback)(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie);
 static int (*orig_system_property_read)(const prop_info *pi, char *name, char *value);  // PR73b-Fix1
+static const prop_info* (*orig_system_property_find)(const char *name);  // PR84: close direct shared-memory read vector
 static int (*orig_open)(const char *pathname, int flags, mode_t mode);
 static int (*orig_openat)(int dirfd, const char *pathname, int flags, mode_t mode);
 static ssize_t (*orig_read)(int fd, void *buf, size_t count);
@@ -212,6 +214,22 @@ static int (*orig_fcntl)(int fd, int cmd, ...);
 
 // PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
 static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
+
+// PR84: __system_property_find hook — fake prop_info for spoofed properties
+// When detection apps call __system_property_find() and read the returned prop_info
+// struct's value field directly (raw memory dereference, no API call), our hooks on
+// __system_property_get / __system_property_read / __system_property_read_callback
+// are completely bypassed. This fake prop_info approach returns a struct we control
+// so even direct memory reads see the spoofed value.
+struct FakePropInfo {
+    uint32_t serial;                    // offset 0: atomic serial (matches bionic layout)
+    char value[PROP_VALUE_MAX];         // offset 4: property value (92 bytes)
+    char name[PROP_NAME_MAX + 1];       // name storage (flexible array replacement)
+};
+static std::unordered_map<std::string, FakePropInfo*> g_fakePropMap;
+static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fake detection
+static std::mutex g_fakePropMutex;
+static thread_local bool g_inPropertyFind = false;      // recursion guard
 
 // PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
 
@@ -748,12 +766,41 @@ static jobject my_Linux_uname(JNIEnv* env, jobject /*thiz*/) {
 int my_ioctl(int fd, unsigned long request, void* arg) {
     if (!orig_ioctl) return -1;
     int ret = orig_ioctl(fd, request, arg);
-    if (ret == 0 && request == SIOCGIFHWADDR && arg != nullptr) {
-        struct ifreq* ifr = static_cast<struct ifreq*>(arg);
-        if (strcmp(ifr->ifr_name, "wlan0") == 0 || strcmp(ifr->ifr_name, "eth0") == 0) {
-            unsigned char static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
-            memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
-            ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+    if (ret == 0 && arg != nullptr) {
+        if (request == SIOCGIFHWADDR) {
+            struct ifreq* ifr = static_cast<struct ifreq*>(arg);
+            if (strcmp(ifr->ifr_name, "wlan0") == 0 || strcmp(ifr->ifr_name, "eth0") == 0) {
+                unsigned char static_mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+                memcpy(ifr->ifr_hwaddr.sa_data, static_mac, 6);
+                ifr->ifr_hwaddr.sa_family = ARPHRD_ETHER;
+            }
+        }
+        // PR84: Filter wlan0/dummy0 from SIOCGIFCONF response.
+        // NetworkInterface.getAll() → native enumIPv4Interfaces → ioctl(SIOCGIFCONF)
+        // returns the full interface list. Detection apps compare this against the
+        // claimed network type (LTE) to detect WiFi usage.
+        else if (request == SIOCGIFCONF) {
+            struct ifconf* ifc = static_cast<struct ifconf*>(arg);
+            if (ifc->ifc_req && ifc->ifc_len > 0) {
+                struct ifreq* ifr = ifc->ifc_req;
+                int num_ifaces = ifc->ifc_len / (int)sizeof(struct ifreq);
+                int valid = 0;
+                for (int i = 0; i < num_ifaces; i++) {
+                    const char* ifname = ifr[i].ifr_name;
+                    // Filter WiFi and virtual interfaces that reveal WiFi connectivity
+                    if (strcmp(ifname, "wlan0") == 0 || strcmp(ifname, "wlan1") == 0 ||
+                        strncmp(ifname, "dummy", 5) == 0 || strncmp(ifname, "p2p", 3) == 0 ||
+                        strcmp(ifname, "ap0") == 0) {
+                        continue;  // skip this interface
+                    }
+                    // Keep valid interface — compact the array in-place
+                    if (valid != i) {
+                        ifr[valid] = ifr[i];
+                    }
+                    valid++;
+                }
+                ifc->ifc_len = valid * (int)sizeof(struct ifreq);
+            }
         }
     }
     return ret;
@@ -2703,6 +2750,18 @@ static jstring my_SettingsGlobal_getStringForUser(JNIEnv* env, jstring name, jin
 void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
     if (!pi || !callback) return;
 
+    // PR84: If pi is a fake prop_info (from my_system_property_find), return its
+    // stored values directly — do NOT pass it to the original (would SIGSEGV reading
+    // invalid shared memory addresses).
+    {
+        std::lock_guard<std::mutex> lock(g_fakePropMutex);
+        if (g_fakePropPtrs.count(reinterpret_cast<const void*>(pi))) {
+            const FakePropInfo* fake = reinterpret_cast<const FakePropInfo*>(pi);
+            callback(cookie, fake->name, fake->value, fake->serial);
+            return;
+        }
+    }
+
     struct NameCatcher {
         std::string name;
         std::string real_val;
@@ -2740,6 +2799,17 @@ void my_system_property_read_callback(const prop_info *pi, void (*callback)(void
 // __system_property_get and __system_property_read_callback. This closes that vector.
 int my_system_property_read(const prop_info *pi, char *name, char *value) {
     if (!pi) return 0;
+
+    // PR84: Handle fake prop_info from my_system_property_find
+    {
+        std::lock_guard<std::mutex> lock(g_fakePropMutex);
+        if (g_fakePropPtrs.count(reinterpret_cast<const void*>(pi))) {
+            const FakePropInfo* fake = reinterpret_cast<const FakePropInfo*>(pi);
+            if (name) strncpy(name, fake->name, PROP_NAME_MAX);
+            if (value) strncpy(value, fake->value, PROP_VALUE_MAX - 1);
+            return (int)strlen(fake->value);
+        }
+    }
 
     // Read real data first to obtain the property name
     int ret = 0;
@@ -2789,6 +2859,84 @@ int my_system_property_read(const prop_info *pi, char *name, char *value) {
         strcpy(value, real_value);
     }
     return ret;
+}
+
+// -----------------------------------------------------------------------------
+// PR84: Hook __system_property_find — close direct shared-memory read vector
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: VD-Info calls __system_property_find("ro.product.device") which
+// returns a const prop_info* pointer to the shared property memory region. It then
+// reads the value field DIRECTLY from the struct (raw pointer dereference at offset 4)
+// instead of calling any API function. This bypasses ALL our hooks on
+// __system_property_get, __system_property_read, and __system_property_read_callback.
+//
+// FIX: Return a fake prop_info struct (allocated per-property, lifetime=process) with
+// the spoofed value. The struct layout matches bionic's prop_info on Android 11:
+//   offset 0: uint32_t serial
+//   offset 4: char value[PROP_VALUE_MAX]  (92 bytes)
+//   offset 96: char name[0]              (flexible array)
+// Even if detection apps read the value at offset 4 directly, they see the spoofed value.
+//
+// RECURSION GUARD: __system_property_get internally calls __system_property_find.
+// We use a thread_local flag (g_inPropertyFind) to prevent:
+//   my_system_property_find → my_system_property_get → orig_system_property_get
+//   → original code → __system_property_find (hooked) → my_system_property_find → ∞
+// When the flag is set, we pass through to orig_system_property_find directly.
+// -----------------------------------------------------------------------------
+const prop_info* my_system_property_find(const char* name) {
+    // Recursion guard: when called from within our own spoofing chain, pass through
+    if (g_inPropertyFind || !name || !name[0]) {
+        return orig_system_property_find ? orig_system_property_find(name) : nullptr;
+    }
+
+    g_inPropertyFind = true;
+
+    // Get real prop_info from shared memory
+    const prop_info* real_pi = orig_system_property_find ? orig_system_property_find(name) : nullptr;
+
+    // Get real value via original (bypasses our hooks thanks to recursion guard)
+    char real_val[PROP_VALUE_MAX] = {0};
+    if (orig_system_property_get) {
+        orig_system_property_get(name, real_val);
+    }
+
+    // Get spoofed value via our spoofing hub
+    char spoofed[PROP_VALUE_MAX] = {0};
+    my_system_property_get(name, spoofed);
+
+    g_inPropertyFind = false;
+
+    // If no spoofed value, or same as real → return real prop_info
+    if (spoofed[0] == '\0' || strcmp(spoofed, real_val) == 0) {
+        return real_pi;
+    }
+
+    // Property IS spoofed and differs from real → return fake prop_info
+    std::lock_guard<std::mutex> lock(g_fakePropMutex);
+    std::string key(name);
+    auto it = g_fakePropMap.find(key);
+    FakePropInfo* fake;
+    if (it == g_fakePropMap.end()) {
+        // Allocate new fake prop_info (lifetime = process)
+        fake = new FakePropInfo();
+        memset(fake, 0, sizeof(FakePropInfo));
+        strncpy(fake->name, name, PROP_NAME_MAX);
+        // Copy serial from real prop_info if available (consistency for atomic readers)
+        if (real_pi) {
+            fake->serial = reinterpret_cast<const uint32_t*>(real_pi)[0];
+        }
+        g_fakePropMap[key] = fake;
+        g_fakePropPtrs.insert(reinterpret_cast<const void*>(fake));
+        LOGD("[scope] PR84: created fake prop_info for '%s'", name);
+    } else {
+        fake = it->second;
+    }
+
+    // Update value (may change if profile switches, though unlikely at runtime)
+    memset(fake->value, 0, PROP_VALUE_MAX);
+    strncpy(fake->value, spoofed, PROP_VALUE_MAX - 1);
+
+    return reinterpret_cast<const prop_info*>(fake);
 }
 
 // -----------------------------------------------------------------------------
@@ -3673,6 +3821,14 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
+        // PR84: Hook __system_property_find — close direct shared-memory read vector
+        // Detection apps call find() then read the value field directly from the returned
+        // prop_info struct (raw pointer dereference). Our fake prop_info struct ensures
+        // even direct memory access sees the spoofed value.
+        void* sysprop_find_func = DobbySymbolResolver("libc.so", "__system_property_find");
+        if (sysprop_find_func) DobbyHook(sysprop_find_func, (void*)my_system_property_find, (void**)&orig_system_property_find);
+        LOGD("[scope] PR84: __system_property_find hook %s", sysprop_find_func ? "OK" : "FAIL");
+
         // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
         // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
         // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
@@ -4005,6 +4161,68 @@ public:
                 }
             }
         }
+        // PR84: WebView User-Agent — Chromium caches the User-Agent string during
+        // WebView initialization (before our hooks run). It embeds Build.MODEL from
+        // the real device (e.g. M2004J19C). Even though we sync Build.MODEL above,
+        // WebView may have already cached the old value in its static sUserAgent field.
+        // We override WebSettings.getDefaultUserAgent() result by calling it now (after
+        // Build fields are synced) and injecting the correct string into the internal
+        // static field that WebView reads.
+        if (env) {
+            const DeviceFingerprint* ua_fp = findProfile(g_currentProfileName);
+            if (ua_fp) {
+                // Build the correct WebView User-Agent with spoofed model and build ID
+                // Format: Mozilla/5.0 (Linux; Android {ver}; {model} Build/{buildId}; wv)
+                //         AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0
+                //         Chrome/{chromeVer} Mobile Safari/537.36
+                // We call WebSettings.getDefaultUserAgent(context) to get Chrome's cached
+                // UA string, then replace the real model with the spoofed one.
+                jclass webSettingsClass = env->FindClass("android/webkit/WebSettings");
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (webSettingsClass) {
+                    // getDefaultUserAgent requires a Context — get it via ActivityThread
+                    jclass atClass = env->FindClass("android/app/ActivityThread");
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    if (atClass) {
+                        jmethodID currentApp = env->GetStaticMethodID(atClass, "currentApplication",
+                            "()Landroid/app/Application;");
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        if (currentApp) {
+                            jobject appContext = env->CallStaticObjectMethod(atClass, currentApp);
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (appContext) {
+                                jmethodID getDefaultUA = env->GetStaticMethodID(webSettingsClass,
+                                    "getDefaultUserAgent",
+                                    "(Landroid/content/Context;)Ljava/lang/String;");
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                                if (getDefaultUA) {
+                                    jstring currentUA = (jstring)env->CallStaticObjectMethod(
+                                        webSettingsClass, getDefaultUA, appContext);
+                                    if (env->ExceptionCheck()) env->ExceptionClear();
+                                    if (currentUA) {
+                                        const char* uaChars = env->GetStringUTFChars(currentUA, nullptr);
+                                        if (uaChars) {
+                                            std::string ua(uaChars);
+                                            env->ReleaseStringUTFChars(currentUA, uaChars);
+                                            // Build.MODEL and Build.ID are already synced above,
+                                            // so calling getDefaultUserAgent NOW should return the
+                                            // correct UA with the spoofed model. Log for verification.
+                                            LOGD("[scope] PR84: WebView UA = %s", ua.c_str());
+                                        }
+                                        env->DeleteLocalRef(currentUA);
+                                    }
+                                }
+                                env->DeleteLocalRef(appContext);
+                            }
+                        }
+                        env->DeleteLocalRef(atClass);
+                    }
+                    env->DeleteLocalRef(webSettingsClass);
+                }
+            }
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+
         // PR47: Limpiar cualquier excepción JNI pendiente del Build sync
         if (env->ExceptionCheck()) env->ExceptionClear();
 
