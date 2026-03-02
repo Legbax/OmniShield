@@ -1104,6 +1104,42 @@ window.rebootDevice = async function() {
   setTimeout(() => ksu_exec('reboot'), 1600);
 };
 
+// ─── Wipe Google Traces ───────────────────────────────────────────────
+window.wipeGoogleTraces = async function() {
+  const ok = await showDialog('Wipe Google Traces',
+    `This will force stop and wipe data for:<br>
+    <ul style="margin:8px 0 0 16px;line-height:2">
+      <li><b>WebView provider</b> — cookies, localStorage, cache</li>
+      <li><b>Google Play Store</b> — device fingerprint, account cache</li>
+      <li><b>Google Play Services</b> — device registration, checkin</li>
+      <li><b>Google Services Framework</b> — GSF ID reset</li>
+    </ul>
+    <br><span style="color:var(--error)">The UI will close immediately.</span>
+    Reopen KernelSU Manager to continue.`,
+    [{label:'Cancel',cls:'btn-secondary',value:false},
+     {label:'Wipe & Close',cls:'destroy-btn btn',value:true}]);
+  if (!ok) return;
+
+  toast('Wiping Google traces in 2 seconds...', 'warn', 2000);
+
+  // Detect the active WebView provider package, then background the
+  // destructive commands with nohup so they survive WebView process death.
+  await ksu_exec(
+    `nohup sh -c "` +
+    `sleep 2; ` +
+    `WV=$(cmd webviewupdate current-webview-package 2>/dev/null || echo com.google.android.webview); ` +
+    `am force-stop com.android.vending 2>/dev/null; ` +
+    `am force-stop com.google.android.gms 2>/dev/null; ` +
+    `am force-stop com.google.android.gsf 2>/dev/null; ` +
+    `am force-stop \\$WV 2>/dev/null; ` +
+    `pm clear com.google.android.gsf 2>/dev/null; ` +
+    `pm clear com.google.android.gms 2>/dev/null; ` +
+    `pm clear com.android.vending 2>/dev/null; ` +
+    `pm clear \\$WV 2>/dev/null` +
+    `" >/dev/null 2>&1 &`
+  );
+};
+
 // ─── Destroy Identity ──────────────────────────────────────────────────
 window.destroyIdentity = async function() {
   const ok = await showDialog('Destroy Identity',
