@@ -147,7 +147,7 @@ const overrides = {};
 async function loadState() {
   state.cfg = await readConfig();
   state.profile      = state.cfg.profile      || 'Redmi 9';
-  state.seed         = parseInt(state.cfg.master_seed) || generateRandomSeed();
+  state.seed         = parseInt(state.cfg.master_seed, 10) || generateRandomSeed();
   state.jitter       = (state.cfg.jitter || 'true') !== 'false';
   state.networkType  = (state.cfg.network_type === 'lte' || state.cfg.network_type === 'mobile') ? 'lte' : 'wifi';
   state.seedVersion  = parseInt(state.cfg.seed_version) || 0;
@@ -201,7 +201,7 @@ function computeAll() {
   const brand = (fp.brand || 'xiaomi').toLowerCase();
 
   state.imei       = overrides.imei       ?? generateIMEI(profile, seed);
-  state.imei2      = overrides.imei2      ?? generateIMEI(profile, seed + 137);
+  state.imei2      = overrides.imei2      ?? generateIMEI(profile, seed + 1);
   state.iccid      = overrides.iccid      ?? generateICCID(profile, seed);
   state.imsi       = overrides.imsi       ?? generateIMSI(profile, seed);
   state.phone      = overrides.phone      ?? generatePhoneNumber(profile, seed);

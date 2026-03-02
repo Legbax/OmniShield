@@ -31,6 +31,8 @@
 #include <cstdlib>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
+#include <sys/vfs.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
@@ -166,6 +168,9 @@ static int (*orig_getifaddrs)(struct ifaddrs **ifap);
 
 // Phase 3 Originals
 static ssize_t (*orig_readlinkat)(int dirfd, const char *pathname, char *buf, size_t bufsiz);
+static ssize_t (*orig_readlink)(const char *pathname, char *buf, size_t bufsiz);
+static int (*orig_statfs)(const char *path, struct statfs *buf);
+static int (*orig_statvfs)(const char *path, struct statvfs *buf);
 
 // PR71: execve hook — intercept getprop exec to prevent property leak via child process
 static int (*orig_execve)(const char *pathname, char *const argv[], char *const envp[]);
@@ -962,6 +967,77 @@ ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
     return orig_readlinkat(dirfd, pathname, buf, bufsiz);
 }
 
+ssize_t my_readlink(const char *pathname, char *buf, size_t bufsiz) {
+    if (!orig_readlink) { errno = ENOSYS; return -1; }
+    if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
+    return orig_readlink(pathname, buf, bufsiz);
+}
+
+// -----------------------------------------------------------------------------
+// statfs/statvfs — Consistencia de tamaño de disco con perfil
+// android.os.StatFs usa la syscall statfs() internamente.
+// Sin este hook, StatFs reporta el tamaño real del disco aunque /sys/block/size
+// esté spoofed, creando una incoherencia detectable.
+// -----------------------------------------------------------------------------
+static long getProfileStorageSectors() {
+    const DeviceFingerprint* fp = findProfile(g_currentProfileName);
+    if (!fp) return 268435456L;  // 128GB default
+    if (fp->ram_gb <= 4)       return 134217728L;   // 64 GB
+    else if (fp->ram_gb <= 10) return 268435456L;   // 128 GB
+    else                       return 536870912L;    // 256 GB
+}
+
+int my_statfs(const char *path, struct statfs *buf) {
+    if (!orig_statfs) { errno = ENOSYS; return -1; }
+    if (isHiddenPath(path)) { errno = ENOENT; return -1; }
+    int ret = orig_statfs(path, buf);
+    if (ret != 0) return ret;
+
+    // Solo spoofear particiones de datos internos (/data, /storage, /sdcard)
+    if (path && (strstr(path, "/data") == path ||
+                 strstr(path, "/storage") == path ||
+                 strstr(path, "/sdcard") == path)) {
+        long targetSectors = getProfileStorageSectors();
+        // Convertir sectores de 512B a bloques del filesystem
+        unsigned long targetBytes = (unsigned long)targetSectors * 512UL;
+        if (buf->f_bsize > 0) {
+            unsigned long targetBlocks = targetBytes / buf->f_bsize;
+            // Mantener la proporción usado/libre del sistema real
+            if (buf->f_blocks > 0) {
+                double usedRatio = 1.0 - ((double)buf->f_bfree / (double)buf->f_blocks);
+                buf->f_blocks = targetBlocks;
+                buf->f_bfree  = (unsigned long)(targetBlocks * (1.0 - usedRatio));
+                buf->f_bavail = buf->f_bfree;
+            }
+        }
+    }
+    return ret;
+}
+
+int my_statvfs(const char *path, struct statvfs *buf) {
+    if (!orig_statvfs) { errno = ENOSYS; return -1; }
+    if (isHiddenPath(path)) { errno = ENOENT; return -1; }
+    int ret = orig_statvfs(path, buf);
+    if (ret != 0) return ret;
+
+    if (path && (strstr(path, "/data") == path ||
+                 strstr(path, "/storage") == path ||
+                 strstr(path, "/sdcard") == path)) {
+        long targetSectors = getProfileStorageSectors();
+        unsigned long targetBytes = (unsigned long)targetSectors * 512UL;
+        if (buf->f_frsize > 0) {
+            unsigned long targetBlocks = targetBytes / buf->f_frsize;
+            if (buf->f_blocks > 0) {
+                double usedRatio = 1.0 - ((double)buf->f_bfree / (double)buf->f_blocks);
+                buf->f_blocks = targetBlocks;
+                buf->f_bfree  = (unsigned long)(targetBlocks * (1.0 - usedRatio));
+                buf->f_bavail = buf->f_bfree;
+            }
+        }
+    }
+    return ret;
+}
+
 // PR37: UUID v4 determinístico desde seed para boot_id
 static std::string generateBootId(long seed) {
     long s = seed ^ 0xDEADBEEFL;
@@ -1191,13 +1267,22 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "gsm.network.type")             dynamic_buffer = "LTE";
         else if (k == "gsm.current.phone-type")       dynamic_buffer = "1";
+        else if (k == "gsm.sim.state")                dynamic_buffer = "READY";
+        else if (k == "gsm.sim.state2")               dynamic_buffer = "";
         // PR37: Network type spoofing — activo solo cuando network_type=lte en config
         // Oculta señales de conectividad WiFi ante apps que leen system properties
         else if (g_spoofMobileNetwork && (k == "wifi.interface" ||
                  k == "dhcp.wlan0.ipaddress" || k == "dhcp.wlan0.dns1" ||
                  k == "dhcp.wlan0.server"    || k == "net.wifi.ssid"   ||
-                 k == "wifi.on"              || k == "wlan.driver.status")) {
-            dynamic_buffer = "";  // Ocultar señales WiFi
+                 k == "dhcp.wlan0.gateway"   || k == "dhcp.wlan0.mask" ||
+                 k == "dhcp.wlan0.leasetime" || k == "dhcp.wlan0.domain")) {
+            dynamic_buffer = "";  // Ocultar señales WiFi — sin valor
+        }
+        else if (g_spoofMobileNetwork && k == "wifi.on") {
+            dynamic_buffer = "0";  // WiFi explícitamente apagado
+        }
+        else if (g_spoofMobileNetwork && k == "wlan.driver.status") {
+            dynamic_buffer = "unloaded";  // Driver WiFi no cargado
         }
         else if (g_spoofMobileNetwork && k == "gsm.network.state") {
             dynamic_buffer = "CONNECTED";  // Confirmar conexión celular activa
@@ -2559,6 +2644,13 @@ static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
         const DeviceFingerprint* fp = findProfile(g_currentProfileName);
         if (fp) result = env->NewStringUTF(fp->model);
     }
+    // Force LTE: ocultar WiFi en Settings.Global
+    else if (g_spoofMobileNetwork && strcmp(key, "wifi_on") == 0) {
+        result = env->NewStringUTF("0");
+    }
+    else if (g_spoofMobileNetwork && strcmp(key, "wifi_sleep_policy") == 0) {
+        result = env->NewStringUTF("2");  // WIFI_SLEEP_POLICY_NEVER (irrelevante si off)
+    }
     env->ReleaseStringUTFChars(name, key);
 
     if (result) return result;
@@ -3115,6 +3207,50 @@ jstring JNICALL my_getTypeAllocationCode(JNIEnv* env, jobject thiz) {
     return env->NewStringUTF(imei.substr(0, 8).c_str());
 }
 
+// -----------------------------------------------------------------------------
+// SIM presence hooks — siempre reportar SIM insertada y lista
+// Evita incoherencia: NetworkInfo=MOBILE + getSimState=ABSENT es contradictorio
+// -----------------------------------------------------------------------------
+jint JNICALL my_getSimState(JNIEnv*, jobject) {
+    return 5;  // TelephonyManager.SIM_STATE_READY
+}
+jint JNICALL my_getSimStateSlot(JNIEnv*, jobject, jint) {
+    return 5;  // SIM_STATE_READY para cualquier slot
+}
+jboolean JNICALL my_hasIccCard(JNIEnv*, jobject) {
+    return JNI_TRUE;
+}
+jint JNICALL my_getPhoneCount(JNIEnv*, jobject) {
+    return 1;  // Un slot de SIM activo
+}
+jstring JNICALL my_getSimOperatorName(JNIEnv* env, jobject) {
+    return env->NewStringUTF(omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed).c_str());
+}
+jstring JNICALL my_getSimOperatorNameSlot(JNIEnv* env, jobject, jint) {
+    return env->NewStringUTF(omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed).c_str());
+}
+jstring JNICALL my_getSimOperator(JNIEnv* env, jobject) {
+    std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imsi.substr(0, 6).c_str());
+}
+jstring JNICALL my_getSimOperatorSlot(JNIEnv* env, jobject, jint) {
+    std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imsi.substr(0, 6).c_str());
+}
+jstring JNICALL my_getNetworkOperatorName(JNIEnv* env, jobject) {
+    return env->NewStringUTF(omni::engine::getCarrierNameForImsi(g_currentProfileName, g_masterSeed).c_str());
+}
+jstring JNICALL my_getNetworkOperator(JNIEnv* env, jobject) {
+    std::string imsi = omni::engine::generateValidImsi(g_currentProfileName, g_masterSeed);
+    return env->NewStringUTF(imsi.substr(0, 6).c_str());
+}
+jint JNICALL my_getNetworkType(JNIEnv*, jobject) {
+    return 13;  // TelephonyManager.NETWORK_TYPE_LTE
+}
+jint JNICALL my_getDataNetworkType(JNIEnv*, jobject) {
+    return 13;  // NETWORK_TYPE_LTE
+}
+
 
 // -----------------------------------------------------------------------------
 // PR44: Camera2 — auxiliar LENS_FACING oracle
@@ -3555,8 +3691,17 @@ public:
         void* readlinkat_sym = DobbySymbolResolver("libc.so", "readlinkat");
         if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
+        void* readlink_sym = DobbySymbolResolver("libc.so", "readlink");
+        if (readlink_sym) DobbyHook(readlink_sym, (void*)my_readlink, (void**)&orig_readlink);
+
         void* sysinfo_func = DobbySymbolResolver("libc.so", "sysinfo");
         if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
+
+        void* statfs_func = DobbySymbolResolver("libc.so", "statfs");
+        if (statfs_func) DobbyHook(statfs_func, (void*)my_statfs, (void**)&orig_statfs);
+
+        void* statvfs_func = DobbySymbolResolver("libc.so", "statvfs");
+        if (statvfs_func) DobbyHook(statvfs_func, (void*)my_statvfs, (void**)&orig_statvfs);
 
         void* readdir_func = DobbySymbolResolver("libc.so", "readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
@@ -3919,6 +4064,21 @@ public:
             {"getSimCountryIso", "()Ljava/lang/String;", (void*)my_getSimCountryIso},
             {"getSimCountryIso", "(I)Ljava/lang/String;", (void*)my_getSimCountryIsoSlot},
             {"getTypeAllocationCode", "()Ljava/lang/String;", (void*)my_getTypeAllocationCode},
+            // SIM presence — siempre SIM insertada y lista
+            {"getSimState", "()I", (void*)my_getSimState},
+            {"getSimState", "(I)I", (void*)my_getSimStateSlot},
+            {"hasIccCard", "()Z", (void*)my_hasIccCard},
+            {"getPhoneCount", "()I", (void*)my_getPhoneCount},
+            // SIM/Network operator name y código
+            {"getSimOperatorName", "()Ljava/lang/String;", (void*)my_getSimOperatorName},
+            {"getSimOperatorName", "(I)Ljava/lang/String;", (void*)my_getSimOperatorNameSlot},
+            {"getSimOperator", "()Ljava/lang/String;", (void*)my_getSimOperator},
+            {"getSimOperator", "(I)Ljava/lang/String;", (void*)my_getSimOperatorSlot},
+            {"getNetworkOperatorName", "()Ljava/lang/String;", (void*)my_getNetworkOperatorName},
+            {"getNetworkOperator", "()Ljava/lang/String;", (void*)my_getNetworkOperator},
+            // Network type — LTE consistente
+            {"getNetworkType", "()I", (void*)my_getNetworkType},
+            {"getDataNetworkType", "()I", (void*)my_getDataNetworkType},
         };
         {
             const int nMethods = (int)(sizeof(telephonyMethods) / sizeof(telephonyMethods[0]));

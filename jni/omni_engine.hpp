@@ -65,15 +65,20 @@ public:
     Random() : rng(std::random_device{}()) {}
 
     int nextInt(int bound) {
-        return std::uniform_int_distribution<int>(0, bound - 1)(rng);
+        // Modulo simple — coincide exactamente con el JS: gen() % BigInt(bound)
+        // std::uniform_int_distribution usa rejection sampling que consume
+        // outputs extra del engine, desincronizando C++ y JS permanentemente.
+        return (int)(rng() % (uint64_t)bound);
     }
 
     int nextInt() {
-        return std::uniform_int_distribution<int>()(rng);
+        return (int)(rng() & 0x7FFFFFFF);
     }
 
     float nextFloat(float min, float max) {
-        return std::uniform_real_distribution<float>(min, max)(rng);
+        // Coincide con JS: Number(gen() & 0xFFFFFFFFn) / 4294967295
+        float v = (float)(rng() & 0xFFFFFFFF) / 4294967295.0f;
+        return min + v * (max - min);
     }
 };
 
