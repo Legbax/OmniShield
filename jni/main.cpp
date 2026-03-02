@@ -3905,9 +3905,11 @@ public:
         if (g_api) {
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
-            } else {
-                g_api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             }
+            // PR85: DLCLOSE_MODULE_LIBRARY removed — thread_local g_inPropertyFind
+            // triggers Bionic TLS cleanup abort() when the .so is dlclose'd on Android <14.
+            // The module stays inert in memory for non-target apps (postAppSpecialize returns
+            // immediately at line 3914), consuming ~0 CPU.
         }
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
@@ -3977,13 +3979,10 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
-        // PR84: Hook __system_property_find — close direct shared-memory read vector
-        // Detection apps call find() then read the value field directly from the returned
-        // prop_info struct (raw pointer dereference). Our fake prop_info struct ensures
-        // even direct memory access sees the spoofed value.
-        void* sysprop_find_func = DobbySymbolResolver("libc.so", "__system_property_find");
-        if (sysprop_find_func) DobbyHook(sysprop_find_func, (void*)my_system_property_find, (void**)&orig_system_property_find);
-        LOGD("[scope] PR84: __system_property_find hook %s", sysprop_find_func ? "OK" : "FAIL");
+        // PR85: DobbyHook of __system_property_find REMOVED.
+        // On aarch64 Bionic, __system_property_find is a thin wrapper (~4-8 instructions).
+        // Dobby's trampoline overwrites past the function boundary, corrupting adjacent code
+        // and causing SIGABRT. The PLT hook in installPltHooks() covers this function safely.
 
         // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
         // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
@@ -4011,12 +4010,11 @@ public:
         // No se necesita fallback Dobby para estas funciones.
         installPltHooks();
 
-        // PR84b: Shadow property pages — patch shared property memory per-process.
-        // Must run AFTER Dobby hooks (orig_system_property_read_callback set)
-        // and AFTER installPltHooks (orig_system_property_read set via dlsym).
-        // Replaces shared mmap pages with private copies containing spoofed values.
-        // This defeats direct memory reads that bypass all function-level hooks.
-        patchPropertyPages();
+        // PR85: patchPropertyPages() DISABLED — redundant now that the PLT hook for
+        // __system_property_find returns FakePropInfo structs with spoofed values.
+        // Direct memory reads are covered by the fake prop_info, so MAP_FIXED patching
+        // of shared property pages is no longer needed.
+        // patchPropertyPages();
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
