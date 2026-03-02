@@ -1132,10 +1132,11 @@ window.wipeGoogleTraces = async function() {
     `am force-stop com.google.android.gms 2>/dev/null; ` +
     `am force-stop com.google.android.gsf 2>/dev/null; ` +
     `am force-stop \\$WV 2>/dev/null; ` +
-    `pm clear com.google.android.gsf 2>/dev/null; ` +
-    `pm clear com.google.android.gms 2>/dev/null; ` +
-    `pm clear com.android.vending 2>/dev/null; ` +
-    `pm clear \\$WV 2>/dev/null` +
+    `pm clear --user 0 com.google.android.gsf 2>/dev/null; ` +
+    `pm clear --user 0 com.google.android.gms 2>/dev/null; ` +
+    `pm clear --user 0 com.android.vending 2>/dev/null; ` +
+    `pm clear --user 0 \\$WV 2>/dev/null; ` +
+    `rm -rf /data/user/0/\\$WV/ /data/data/\\$WV/ /data/user_de/0/\\$WV/ 2>/dev/null` +
     `" >/dev/null 2>&1 &`
   );
 };
