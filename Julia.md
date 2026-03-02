@@ -1,7 +1,7 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.63 (The Void)
-**Last updated:** 2026-03-02 (PR87: Hook android_dlopen_ext/dlopen to re-apply PLT hooks to late-loaded libraries)
+**Version:** v12.9.64 (The Void)
+**Last updated:** 2026-03-02 (PR88: Hook __system_property_foreach — intercept property enumeration to eliminate dual reads)
 
 ---
 
@@ -135,7 +135,9 @@ These rules are derived from past crashes and regressions. Violating any will ca
 
 7h. **PR86: `dlsym` hook MUST be installed AFTER all `dlsym`/`DobbySymbolResolver` calls.** Our own code uses `dlsym(RTLD_DEFAULT, ...)` to pre-resolve `orig_*` pointers. If the `dlsym` hook is active during this resolution, `my_dlsym` would return our hook functions instead of the real ones, corrupting `orig_*` pointers. Install `dlsym` hook last, after all symbol resolution is complete. The `thread_local g_inDlsym` guard prevents recursion within the hook itself.
 
-7i. **PR87: `android_dlopen_ext`/`dlopen` hooks re-apply PLT hooks to late-loaded libraries.** After a new .so is loaded, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find` and `__system_property_read`. Uses `thread_local g_dlopenReapplyDepth` as recursion guard (nested dlopen for dependency loading) and `g_reapplyMutex` for thread safety. MUST be installed AFTER `installPltHooks()` and the `dlsym` hook. The `pltHookCommit()` call is idempotent — xhook_refresh skips already-patched GOT entries.
+7i. **PR87: `android_dlopen_ext`/`dlopen` hooks re-apply PLT hooks to late-loaded libraries.** After a new .so is loaded, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find`, `__system_property_read`, and `__system_property_foreach`. Uses `thread_local g_dlopenReapplyDepth` as recursion guard (nested dlopen for dependency loading) and `g_reapplyMutex` for thread safety. MUST be installed AFTER `installPltHooks()` and the `dlsym` hook. The `pltHookCommit()` call is idempotent — xhook_refresh skips already-patched GOT entries.
+
+7j. **PR88: `__system_property_foreach` Dobby inline + PLT hook are MUTUALLY EXCLUSIVE** (same pattern as invariant 7g). If the Dobby inline hook succeeds (`g_propForeachInlineHooked = true`), the PLT hook for `__system_property_foreach` MUST NOT be registered. The Dobby hook MUST be installed BEFORE `installPltHooks()` so the guard flag is set in time. The wrapper callback extracts the property name from each real `prop_info*`, calls `my_system_property_find(name)` to get the (possibly spoofed) `prop_info*`, and passes it to the user's original callback.
 
 ### Property Spoofing
 
@@ -228,15 +230,15 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 ### Zygisk PLT Hooks (Fix8+Fix9, primary for thin syscall wrappers)
 
 **libc (Process):** execve, posix_spawn, posix_spawnp
-**libc (Properties):** __system_property_read, __system_property_find (fallback if Dobby inline fails)
+**libc (Properties):** __system_property_read, __system_property_find (fallback if Dobby inline fails), __system_property_foreach (PR88: fallback if Dobby inline fails)
 
-> These functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. PR86: `__system_property_find` PLT hook only activates if the Dobby inline hook fails (mutual exclusion to prevent Fix10 recursion crash).
+> These functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. PR86: `__system_property_find` PLT hook only activates if the Dobby inline hook fails (mutual exclusion to prevent Fix10 recursion crash). PR88: `__system_property_foreach` PLT hook same pattern.
 
-### Dobby Native Hooks (~37, remaining)
+### Dobby Native Hooks (~38, remaining)
 
 **libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
 **libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
-**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_find (PR86: via `dlsym(RTLD_DEFAULT)`)
+**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_find (PR86: via `dlsym(RTLD_DEFAULT)`), __system_property_foreach (PR88: callback wrapper for property enumeration)
 **Dynamic Linker:** dlsym (PR86: defense-in-depth against dynamic symbol resolution bypass), android_dlopen_ext (PR87: re-apply PLT hooks to late-loaded .so), dlopen (PR87: same for native dlopen calls)
 **Stealth:** dl_iterate_phdr
 **Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
@@ -320,6 +322,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
+| 88 | v12.9.64 | **Hook `__system_property_foreach` — eliminate dual reads (Layer 5)**: Post-PR87 logcat confirmed ALL hooks install successfully (Dobby inline on `__system_property_find` SUCCESS, dlsym hook SUCCESS, android_dlopen_ext/dlopen hooks SUCCESS). Yet VDInfo still showed identical dual reads. Root cause: VDInfo calls `__system_property_foreach(callback, cookie)` to iterate ALL properties. The callback receives real `prop_info*` pointers directly from the property trie, completely bypassing `__system_property_find` (which we hook to return `FakePropInfo`). **Fix**: Dobby inline hook on `__system_property_foreach` (libc.so, ~50+ ARM64 instructions — safe for Dobby). Wrapper callback extracts property name from real `prop_info*` via `orig_system_property_read`, calls `my_system_property_find(name)` to get the spoofed `FakePropInfo`, passes it to the user's original callback. PLT hook as fallback if Dobby inline fails. Also intercepted in `my_dlsym`. Installed BEFORE `installPltHooks()` (same pattern as `__system_property_find`) with `g_propForeachInlineHooked` mutual exclusion guard. |
 | 87 | v12.9.63 | **Late-loaded library PLT re-patching (Layer 4)**: Post-PR86 VDInfo report showed dual reads persist — Dobby inline hook on `__system_property_find` likely FAILED on Redmi 9/mt6768, and `dlsym` hook is irrelevant because the dynamic linker resolves symbols via internal routines, never calling the public `dlsym()`. Root cause: when `System.loadLibrary("vdinfo")` loads VDInfo's native .so, the linker writes real libc addresses to its GOT, bypassing all existing hooks. **Fix**: Dobby inline hooks on `android_dlopen_ext` (libdl.so, covers Java `System.loadLibrary`) and `dlopen` (covers native loads). After each library load, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs from `/proc/self/maps` and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find` and `__system_property_read` on the new .so. Thread-safe (`std::mutex`), recursion-guarded (`thread_local` depth counter for nested dependency loading). `pltHookCommit` is idempotent (xhook_refresh skips already-patched GOT entries). |
 | 86 | v12.9.62 | **VDInfo dual-read fix (3 layers)**: (1) Dobby inline hook on `__system_property_find` via `dlsym(RTLD_DEFAULT)` instead of `DobbySymbolResolver("libc.so")` — PR85 removal was likely caused by wrong address resolution, re-attempt with correct symbol lookup. Inline hook intercepts ALL callers including late-loaded .so files (VDInfo's native lib). (2) `dlsym` hook (defense-in-depth) — intercepts `dlsym("__system_property_find/read/get/read_callback")` and returns spoofed function pointers. Thread-local recursion guard. (3) `service.sh` modem property stabilizer — `resetprop -n` loop every 5s for `gsm.operator.iso-country`/`gsm.sim.operator.iso-country` to counteract RIL daemon overwrites (fixes `getNetworkCountryIso` returning real country). PLT hook for `__system_property_find` now conditional on Dobby inline failure (mutual exclusion prevents Fix10 recursion crash). |
 | 73b | v12.9.61 | Fix1–Fix8: see previous, **Fix9: subprocess regression fix** — Fix8 PLT hooks broke ALL subprocesses (`error=-634729984, Exec failed`). Root causes: (A) `orig_posix_spawn` corrupted by multi-ELF overwrite (PLT hooks across ~100 ELFs, last write could be lazy-binding stub), (B) `handleGetpropSpawn` fork() bypassed Java's `posix_spawn_file_actions_t` pipe infrastructure, (C) self-hooking (own module included in ELF scan). **Fixes**: `dlsym(RTLD_DEFAULT)` pre-resolves orig_* before PLT hooks (guaranteed correct), dummy vars for `pltHookRegister` oldFunc, `isHiddenPath()` filter in `enumerateLoadedElfs`, **memfd + orig_posix_spawn approach** replaces fork+write — generates spoofed content to memfd, calls real posix_spawn with `["cat", "/proc/self/fd/<N>"]` + ORIGINAL file_actions preserving Java pipes, `os.version` override tries multiple System field names (`props`/`systemProperties`/`theProperties`) + `Hashtable.put()` fallback |

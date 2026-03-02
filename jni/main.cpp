@@ -231,6 +231,7 @@ static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fa
 static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
 static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
+static bool g_propForeachInlineHooked = false;           // PR88: true if Dobby inline hook on __system_property_foreach succeeded
 
 // PR86: dlsym hook — intercept dynamic symbol resolution for property functions.
 // When detection apps call dlsym(RTLD_DEFAULT, "__system_property_find") to get a raw
@@ -248,6 +249,15 @@ static void* (*orig_android_dlopen_ext)(const char*, int, const void*) = nullptr
 static void* (*orig_dlopen_hook)(const char*, int) = nullptr;
 static thread_local int g_dlopenReapplyDepth = 0;  // recursion guard (nested dlopen for deps)
 static std::mutex g_reapplyMutex;                   // thread safety for pltHookRegister/Commit
+
+// PR88: __system_property_foreach hook — intercept property enumeration.
+// Detection apps call __system_property_foreach(callback, cookie) to iterate ALL properties
+// in the shared memory area. The callback receives real prop_info* pointers directly,
+// bypassing __system_property_find (which we hook). Our wrapper callback reads the property
+// name from each real prop_info, then passes a FakePropInfo (with spoofed value) to the
+// user's callback for properties that should be spoofed.
+static int (*orig_system_property_foreach)(
+    void (*propfn)(const prop_info* pi, void* cookie), void* cookie) = nullptr;
 
 // PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
 
@@ -2969,6 +2979,71 @@ const prop_info* my_system_property_find(const char* name) {
 }
 
 // -----------------------------------------------------------------------------
+// PR88: Hook __system_property_foreach — intercept property enumeration
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: Detection apps call __system_property_foreach(callback, cookie) to
+// iterate ALL properties in the shared memory property area. The callback receives
+// real prop_info* pointers directly from the property trie, bypassing our hook on
+// __system_property_find (which returns FakePropInfo with spoofed values). This is
+// confirmed as the root cause of dual reads: VDInfo enumerates properties via foreach,
+// reads the real value from the raw prop_info*, then compares with Build.* Java fields.
+//
+// FIX: Wrap the user's callback. For each property, extract its name from the real
+// prop_info, then call my_system_property_find(name) which returns a FakePropInfo
+// (with the spoofed value) for spoofed properties, or the real prop_info for others.
+// The user's callback sees only spoofed values — no dual read.
+// -----------------------------------------------------------------------------
+struct ForeachWrapperCtx {
+    void (*userFn)(const prop_info*, void*);
+    void* userCookie;
+};
+
+static void foreachWrapperCallback(const prop_info* pi, void* cookie) {
+    auto* ctx = static_cast<ForeachWrapperCtx*>(cookie);
+    if (!pi || !ctx || !ctx->userFn) return;
+
+    // Extract property name from the real prop_info
+    char name[PROP_NAME_MAX + 1] = {};
+    char value[PROP_VALUE_MAX] = {};
+
+    if (orig_system_property_read) {
+        orig_system_property_read(pi, name, value);
+    } else if (orig_system_property_read_callback) {
+        // Fallback: use read_callback to extract name
+        struct ReadCtx { char n[PROP_NAME_MAX+1]; char v[PROP_VALUE_MAX]; };
+        ReadCtx rctx = {};
+        orig_system_property_read_callback(pi,
+            [](void* c, const char* n, const char* v, uint32_t) {
+                auto* rc = static_cast<ReadCtx*>(c);
+                if (n) strncpy(rc->n, n, PROP_NAME_MAX);
+                if (v) strncpy(rc->v, v, PROP_VALUE_MAX - 1);
+            }, &rctx);
+        strncpy(name, rctx.n, PROP_NAME_MAX);
+    }
+
+    if (!name[0]) {
+        // Could not extract name — pass through real prop_info unchanged
+        ctx->userFn(pi, ctx->userCookie);
+        return;
+    }
+
+    // Get (possibly spoofed) prop_info via my_system_property_find
+    const prop_info* resolved = my_system_property_find(name);
+    ctx->userFn(resolved ? resolved : pi, ctx->userCookie);
+}
+
+static int my_system_property_foreach(
+    void (*propfn)(const prop_info* pi, void* cookie), void* cookie) {
+    if (!orig_system_property_foreach || !propfn) {
+        return orig_system_property_foreach ?
+            orig_system_property_foreach(propfn, cookie) : -1;
+    }
+
+    ForeachWrapperCtx ctx = { propfn, cookie };
+    return orig_system_property_foreach(foreachWrapperCallback, &ctx);
+}
+
+// -----------------------------------------------------------------------------
 // PR86: Hook dlsym — intercept dynamic symbol resolution for property functions
 // -----------------------------------------------------------------------------
 // ROOT CAUSE: Detection apps (VDInfo, Snapchat) can call dlsym(RTLD_DEFAULT,
@@ -3004,6 +3079,9 @@ static void* my_dlsym(void* handle, const char* symbol) {
     } else if (strcmp(symbol, "__system_property_read_callback") == 0) {
         result = (void*)my_system_property_read_callback;
         LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_read_callback", symbol);
+    } else if (strcmp(symbol, "__system_property_foreach") == 0) {
+        result = (void*)my_system_property_foreach;
+        LOGD("[scope] PR88: dlsym intercepted '%s' → my_system_property_foreach", symbol);
     } else {
         result = orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
     }
@@ -3690,6 +3768,8 @@ static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en p
 // Fix8: Forward declarations for PLT hook targets (defined earlier in the file)
 int my_system_property_read(const prop_info *pi, char *name, char *value);
 const prop_info* my_system_property_find(const char* name);  // PR84
+static int my_system_property_foreach(                       // PR88
+    void (*propfn)(const prop_info* pi, void* cookie), void* cookie);
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
 static int my_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions, const void *attrp,
@@ -3865,14 +3945,17 @@ static bool installPltHooks() {
     // PR84: Pre-resolve __system_property_find for PLT hook fallback
     if (!orig_system_property_find)
         orig_system_property_find = reinterpret_cast<decltype(orig_system_property_find)>(dlsym(RTLD_DEFAULT, "__system_property_find"));
+    // PR88: Pre-resolve __system_property_foreach
+    if (!orig_system_property_foreach)
+        orig_system_property_foreach = reinterpret_cast<decltype(orig_system_property_foreach)>(dlsym(RTLD_DEFAULT, "__system_property_foreach"));
 
-    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p",
+    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p prop_foreach=%p",
          orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read,
-         orig_system_property_find);
+         orig_system_property_find, orig_system_property_foreach);
 
     // Dummy vars for pltHookRegister oldFunc — we don't use these values.
     // The real originals were already set above via dlsym.
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
 
     // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
     // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
@@ -3900,6 +3983,12 @@ static bool installPltHooks() {
             g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
                                    (void*)my_system_property_find, &d5);
         }
+        // PR88: PLT hook for __system_property_foreach — only if Dobby inline hook
+        // was not installed (same double-hook recursion guard as __system_property_find).
+        if (!g_propForeachInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
+                                   (void*)my_system_property_foreach, &d6);
+        }
     }
 
     bool ok = g_api->pltHookCommit();
@@ -3921,7 +4010,7 @@ static void reapplyPltHooksForNewLibraries() {
     auto elfs = enumerateLoadedElfs();
     if (elfs.empty()) return;
 
-    void *d1 = nullptr, *d2 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr;
 
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
@@ -3929,6 +4018,10 @@ static void reapplyPltHooksForNewLibraries() {
         if (!g_propFindInlineHooked) {
             g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
                                    (void*)my_system_property_find, &d2);
+        }
+        if (!g_propForeachInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
+                                   (void*)my_system_property_foreach, &d3);
         }
     }
 
@@ -4136,6 +4229,30 @@ public:
                 }
             } else {
                 LOGE("PR86: dlsym(RTLD_DEFAULT, __system_property_find) returned NULL");
+            }
+        }
+
+        // PR88: Hook __system_property_foreach — intercept property enumeration.
+        // Detection apps iterate ALL properties via foreach, receiving raw prop_info*
+        // pointers from the property trie. Our wrapper callback substitutes FakePropInfo
+        // (with spoofed values) for spoofed properties. __system_property_foreach in
+        // libc.so traverses the property trie (~50+ ARM64 instructions) — well above
+        // Dobby's 12-byte minimum. Also installed as PLT hook fallback in installPltHooks.
+        // MUST be installed BEFORE installPltHooks() so g_propForeachInlineHooked guard
+        // prevents double-hook recursion (same pattern as __system_property_find above).
+        {
+            void* foreach_addr = DobbySymbolResolver("libc.so", "__system_property_foreach");
+            if (!foreach_addr) foreach_addr = dlsym(RTLD_DEFAULT, "__system_property_foreach");
+            if (foreach_addr) {
+                int ret = DobbyHook(foreach_addr, (void*)my_system_property_foreach,
+                                    (void**)&orig_system_property_foreach);
+                if (ret == 0) {
+                    g_propForeachInlineHooked = true;
+                }
+                LOGE("PR88: __system_property_foreach hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", foreach_addr, ret);
+            } else {
+                LOGE("PR88: Could not resolve __system_property_foreach");
             }
         }
 
