@@ -4037,7 +4037,9 @@ static void reapplyPltHooksForNewLibraries() {
                                (void*)my_posix_spawnp, &d6);
     }
 
-    g_api->pltHookCommit();
+    bool ok = g_api->pltHookCommit();
+    LOGE("PR89: reapplyPltHooks (spawn+props) across %zu ELFs, commit=%s",
+         elfs.size(), ok ? "true" : "false");
 }
 
 // PR87: Intercept android_dlopen_ext — called by System.loadLibrary() via JNI.
@@ -4056,7 +4058,7 @@ static void* my_android_dlopen_ext(const char* filename, int flags, const void* 
     if (handle) {
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
-        LOGD("[scope] PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
+        LOGE("PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
     }
 
     g_dlopenReapplyDepth--;
@@ -4076,7 +4078,7 @@ static void* my_dlopen_hook(const char* filename, int flags) {
     if (handle) {
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
-        LOGD("[scope] PR87: Re-applied PLT hooks after dlopen(%s)", filename ? filename : "(null)");
+        LOGE("PR87: Re-applied PLT hooks after dlopen(%s)", filename ? filename : "(null)");
     }
 
     g_dlopenReapplyDepth--;
