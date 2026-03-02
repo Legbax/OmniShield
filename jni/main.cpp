@@ -4634,11 +4634,12 @@ static void writeProfileProps(const DeviceFingerprint& fp,
     // PR75b: Market name — leaks real "Redmi 9" in property trie
     fprintf(f, "ro.product.marketname=%s\n", fp.model);
 
-    // PR81: ODM fingerprint — leaks real device via direct prop_info shared memory
-    // access that bypasses all libc hooks. Safe for resetprop because MIUI system UI
-    // uses ro.build.fingerprint (not the ODM variant) for UI decisions.
-    fprintf(f, "ro.odm.build.fingerprint=%s\n", fp.fingerprint);
-    fprintf(f, "ro.build.description=%s\n", fp.buildDescription);
+    // PR81→PR83-REVERTED: ro.odm.build.fingerprint + ro.build.description REMOVED from
+    // resetprop. Setting these GLOBALLY crashed MIUI Settings (and potentially other system
+    // services that parse ODM fingerprint for OTA/device-specific UI decisions).
+    // Scoped apps are already protected by the libc hooks (my_system_property_get +
+    // my_system_property_read_callback) which intercept all property reads including
+    // direct prop_info shared memory access via __system_property_read_callback.
 
     fclose(f);
     chmod("/data/adb/.omni_data/.profile_props", 0644);
