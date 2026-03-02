@@ -2127,15 +2127,26 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     }
 
                 } else if (type == PROC_NET_IF_INET6) {
-                    // PR42: En modo LTE, ocultar wlan0 de IPv6.
-                    // En modo WiFi real, pasar el contenido original.
+                    // PR42+PR84: Filter network interfaces from /proc/net/if_inet6.
+                    // Always filter dummy0 (virtual, reveals non-standard config).
+                    // Filter wlan0 in LTE spoofing mode.
+                    // Format: hex_addr ifindex prefix_len scope flags ifname
                     if (g_spoofMobileNetwork) {
-                        // Solo mostrar la interfaz LTE (rmnet_data0) sin IPv6 real
-                        content = "";  // Interfaz LTE no tiene IPv6 en configuración estándar
+                        content = "";  // LTE mode: hide all IPv6 interfaces
                     } else {
-                        // Pasar contenido real del kernel
                         char tmpBuf[4096]; ssize_t r;
-                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) content.append(tmpBuf, r);
+                        std::string raw;
+                        while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) raw.append(tmpBuf, r);
+                        // Filter lines containing dummy0, p2p, tun interfaces
+                        std::istringstream iss(raw);
+                        std::string line;
+                        while (std::getline(iss, line)) {
+                            if (line.find("dummy") != std::string::npos ||
+                                line.find("p2p") != std::string::npos) {
+                                continue;  // skip this interface
+                            }
+                            content += line + "\n";
+                        }
                     }
 
                 // PR37: boot_id — UUID determinístico desde seed (Firebase/AppsFlyer lo correlacionan)
@@ -3616,6 +3627,7 @@ static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en p
 
 // Fix8: Forward declarations for PLT hook targets (defined earlier in the file)
 int my_system_property_read(const prop_info *pi, char *name, char *value);
+const prop_info* my_system_property_find(const char* name);  // PR84
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
 static int my_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions, const void *attrp,
@@ -3653,13 +3665,17 @@ static bool installPltHooks() {
         orig_posix_spawnp = reinterpret_cast<decltype(orig_posix_spawnp)>(dlsym(RTLD_DEFAULT, "posix_spawnp"));
     if (!orig_system_property_read)
         orig_system_property_read = reinterpret_cast<decltype(orig_system_property_read)>(dlsym(RTLD_DEFAULT, "__system_property_read"));
+    // PR84: Pre-resolve __system_property_find for PLT hook fallback
+    if (!orig_system_property_find)
+        orig_system_property_find = reinterpret_cast<decltype(orig_system_property_find)>(dlsym(RTLD_DEFAULT, "__system_property_find"));
 
-    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p",
-         orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read);
+    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p",
+         orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read,
+         orig_system_property_find);
 
     // Dummy vars for pltHookRegister oldFunc — we don't use these values.
     // The real originals were already set above via dlsym.
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr;
 
     // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
     // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
@@ -3679,6 +3695,11 @@ static bool installPltHooks() {
                                (void*)my_posix_spawnp, &d3);
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
                                (void*)my_system_property_read, &d4);
+        // PR84: PLT hook for __system_property_find — fallback when Dobby inline fails.
+        // VDInfo calls find() then reads prop_info->value directly from shared memory.
+        // Our fake prop_info ensures even raw memory reads see the spoofed value.
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
+                               (void*)my_system_property_find, &d5);
     }
 
     bool ok = g_api->pltHookCommit();
