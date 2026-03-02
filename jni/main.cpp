@@ -239,6 +239,16 @@ static bool g_propFindInlineHooked = false;              // PR86: true if Dobby 
 static void* (*orig_dlsym)(void* handle, const char* symbol) = nullptr;
 static thread_local bool g_inDlsym = false;  // recursion guard for dlsym hook
 
+// PR87: android_dlopen_ext / dlopen hooks — re-apply PLT hooks to late-loaded libraries.
+// When apps call System.loadLibrary() or dlopen(), the dynamic linker loads the .so
+// and writes real function addresses to its GOT using internal routines (NOT dlsym).
+// Our initial PLT hooks only covered libraries loaded during postAppSpecialize.
+// By hooking the load event, we re-apply PLT hooks to newly loaded libraries.
+static void* (*orig_android_dlopen_ext)(const char*, int, const void*) = nullptr;
+static void* (*orig_dlopen_hook)(const char*, int) = nullptr;
+static thread_local int g_dlopenReapplyDepth = 0;  // recursion guard (nested dlopen for deps)
+static std::mutex g_reapplyMutex;                   // thread safety for pltHookRegister/Commit
+
 // PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
 
 // SSL Pointers
@@ -3898,6 +3908,76 @@ static bool installPltHooks() {
     return ok;
 }
 
+// PR87: Re-apply PLT hooks after a new library is loaded via dlopen/android_dlopen_ext.
+// enumerateLoadedElfs() re-scans /proc/self/maps to find ALL loaded .so files, including
+// the one just loaded. For already-hooked ELFs, pltHookCommit() is idempotent
+// (xhook_refresh skips entries whose GOT already points to our hook function).
+// For the newly loaded ELF, it patches the GOT entries for property functions.
+// Only re-applies property hooks (not execve/posix_spawn) since those are the critical
+// ones for the dual-read detection bypass.
+static void reapplyPltHooksForNewLibraries() {
+    if (!g_api) return;
+
+    auto elfs = enumerateLoadedElfs();
+    if (elfs.empty()) return;
+
+    void *d1 = nullptr, *d2 = nullptr;
+
+    for (const auto& elf : elfs) {
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
+                               (void*)my_system_property_read, &d1);
+        if (!g_propFindInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
+                                   (void*)my_system_property_find, &d2);
+        }
+    }
+
+    g_api->pltHookCommit();
+}
+
+// PR87: Intercept android_dlopen_ext — called by System.loadLibrary() via JNI.
+// After the linker loads the new .so and resolves its GOT with real libc addresses,
+// we re-apply PLT hooks so the new library's calls go through our spoofing functions.
+// Recursion guard: loading a .so can trigger loading dependencies (nested dlopen).
+// Mutex: dlopen can be called from any thread; pltHookRegister/Commit may not be thread-safe.
+static void* my_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
+    if (g_dlopenReapplyDepth > 0 || !orig_android_dlopen_ext) {
+        return orig_android_dlopen_ext ? orig_android_dlopen_ext(filename, flags, extinfo) : nullptr;
+    }
+    g_dlopenReapplyDepth++;
+
+    void* handle = orig_android_dlopen_ext(filename, flags, extinfo);
+
+    if (handle) {
+        std::lock_guard<std::mutex> lock(g_reapplyMutex);
+        reapplyPltHooksForNewLibraries();
+        LOGD("[scope] PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
+    }
+
+    g_dlopenReapplyDepth--;
+    return handle;
+}
+
+// PR87: Intercept dlopen — called by native code loading libraries directly.
+// Same logic as my_android_dlopen_ext but for the simpler dlopen(filename, flags) API.
+static void* my_dlopen_hook(const char* filename, int flags) {
+    if (g_dlopenReapplyDepth > 0 || !orig_dlopen_hook) {
+        return orig_dlopen_hook ? orig_dlopen_hook(filename, flags) : nullptr;
+    }
+    g_dlopenReapplyDepth++;
+
+    void* handle = orig_dlopen_hook(filename, flags);
+
+    if (handle) {
+        std::lock_guard<std::mutex> lock(g_reapplyMutex);
+        reapplyPltHooksForNewLibraries();
+        LOGD("[scope] PR87: Re-applied PLT hooks after dlopen(%s)", filename ? filename : "(null)");
+    }
+
+    g_dlopenReapplyDepth--;
+    return handle;
+}
+
 class OmniModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
@@ -4104,6 +4184,38 @@ public:
                      ret == 0 ? "SUCCESS" : "FAILED", dlsym_addr, ret);
             } else {
                 LOGE("PR86: Could not resolve dlsym address for hooking");
+            }
+        }
+
+        // PR87: Hook android_dlopen_ext and dlopen to re-apply PLT hooks to late-loaded libraries.
+        // When apps call System.loadLibrary() (Java→JNI→android_dlopen_ext) or native dlopen(),
+        // the dynamic linker loads the .so and resolves its GOT with real libc addresses using
+        // internal routines (NOT the public dlsym). Our PLT hooks from installPltHooks() only
+        // covered libraries already loaded at that point. By hooking the load event, we detect
+        // new libraries and re-apply PLT hooks before the app can read unhooked property values.
+        // On Android 8+, android_dlopen_ext in libdl.so is a wrapper (~6 ARM64 instructions,
+        // ~24 bytes) around __loader_android_dlopen_ext — sufficient for Dobby's 12-byte trampoline.
+        {
+            void* dlopen_ext_addr = DobbySymbolResolver("libdl.so", "android_dlopen_ext");
+            if (!dlopen_ext_addr) dlopen_ext_addr = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
+            if (dlopen_ext_addr) {
+                int ret = DobbyHook(dlopen_ext_addr, (void*)my_android_dlopen_ext,
+                                    (void**)&orig_android_dlopen_ext);
+                LOGE("PR87: android_dlopen_ext hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", dlopen_ext_addr, ret);
+            } else {
+                LOGE("PR87: Could not resolve android_dlopen_ext");
+            }
+
+            void* dlopen_addr = DobbySymbolResolver("libdl.so", "dlopen");
+            if (!dlopen_addr) dlopen_addr = dlsym(RTLD_DEFAULT, "dlopen");
+            if (dlopen_addr) {
+                int ret = DobbyHook(dlopen_addr, (void*)my_dlopen_hook,
+                                    (void**)&orig_dlopen_hook);
+                LOGE("PR87: dlopen hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", dlopen_addr, ret);
+            } else {
+                LOGE("PR87: Could not resolve dlopen");
             }
         }
 

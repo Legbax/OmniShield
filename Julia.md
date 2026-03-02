@@ -1,7 +1,7 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.62 (The Void)
-**Last updated:** 2026-03-02 (PR86: Dobby inline hook on __system_property_find, dlsym hook, modem resetprop loop)
+**Version:** v12.9.63 (The Void)
+**Last updated:** 2026-03-02 (PR87: Hook android_dlopen_ext/dlopen to re-apply PLT hooks to late-loaded libraries)
 
 ---
 
@@ -135,6 +135,8 @@ These rules are derived from past crashes and regressions. Violating any will ca
 
 7h. **PR86: `dlsym` hook MUST be installed AFTER all `dlsym`/`DobbySymbolResolver` calls.** Our own code uses `dlsym(RTLD_DEFAULT, ...)` to pre-resolve `orig_*` pointers. If the `dlsym` hook is active during this resolution, `my_dlsym` would return our hook functions instead of the real ones, corrupting `orig_*` pointers. Install `dlsym` hook last, after all symbol resolution is complete. The `thread_local g_inDlsym` guard prevents recursion within the hook itself.
 
+7i. **PR87: `android_dlopen_ext`/`dlopen` hooks re-apply PLT hooks to late-loaded libraries.** After a new .so is loaded, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find` and `__system_property_read`. Uses `thread_local g_dlopenReapplyDepth` as recursion guard (nested dlopen for dependency loading) and `g_reapplyMutex` for thread safety. MUST be installed AFTER `installPltHooks()` and the `dlsym` hook. The `pltHookCommit()` call is idempotent — xhook_refresh skips already-patched GOT entries.
+
 ### Property Spoofing
 
 8. **`my_system_property_get` must NEVER early-return** before the spoofing logic. It's the central hub — `my_system_property_read_callback` and `my_SystemProperties_native_get` both depend on it. If `orig_system_property_get` is null, initialize `value[0] = '\0'` and continue to profile logic.
@@ -230,12 +232,12 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 
 > These functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. PR86: `__system_property_find` PLT hook only activates if the Dobby inline hook fails (mutual exclusion to prevent Fix10 recursion crash).
 
-### Dobby Native Hooks (~35, remaining)
+### Dobby Native Hooks (~37, remaining)
 
 **libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
 **libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
 **libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_find (PR86: via `dlsym(RTLD_DEFAULT)`)
-**Dynamic Linker:** dlsym (PR86: defense-in-depth against dynamic symbol resolution bypass)
+**Dynamic Linker:** dlsym (PR86: defense-in-depth against dynamic symbol resolution bypass), android_dlopen_ext (PR87: re-apply PLT hooks to late-loaded .so), dlopen (PR87: same for native dlopen calls)
 **Stealth:** dl_iterate_phdr
 **Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
 **Crypto:** SSL_CTX_set_ciphersuites, SSL_set1_tls13_ciphersuites, SSL_set_ciphersuites, SSL_set_cipher_list (libssl)
@@ -318,6 +320,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
+| 87 | v12.9.63 | **Late-loaded library PLT re-patching (Layer 4)**: Post-PR86 VDInfo report showed dual reads persist — Dobby inline hook on `__system_property_find` likely FAILED on Redmi 9/mt6768, and `dlsym` hook is irrelevant because the dynamic linker resolves symbols via internal routines, never calling the public `dlsym()`. Root cause: when `System.loadLibrary("vdinfo")` loads VDInfo's native .so, the linker writes real libc addresses to its GOT, bypassing all existing hooks. **Fix**: Dobby inline hooks on `android_dlopen_ext` (libdl.so, covers Java `System.loadLibrary`) and `dlopen` (covers native loads). After each library load, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs from `/proc/self/maps` and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find` and `__system_property_read` on the new .so. Thread-safe (`std::mutex`), recursion-guarded (`thread_local` depth counter for nested dependency loading). `pltHookCommit` is idempotent (xhook_refresh skips already-patched GOT entries). |
 | 86 | v12.9.62 | **VDInfo dual-read fix (3 layers)**: (1) Dobby inline hook on `__system_property_find` via `dlsym(RTLD_DEFAULT)` instead of `DobbySymbolResolver("libc.so")` — PR85 removal was likely caused by wrong address resolution, re-attempt with correct symbol lookup. Inline hook intercepts ALL callers including late-loaded .so files (VDInfo's native lib). (2) `dlsym` hook (defense-in-depth) — intercepts `dlsym("__system_property_find/read/get/read_callback")` and returns spoofed function pointers. Thread-local recursion guard. (3) `service.sh` modem property stabilizer — `resetprop -n` loop every 5s for `gsm.operator.iso-country`/`gsm.sim.operator.iso-country` to counteract RIL daemon overwrites (fixes `getNetworkCountryIso` returning real country). PLT hook for `__system_property_find` now conditional on Dobby inline failure (mutual exclusion prevents Fix10 recursion crash). |
 | 73b | v12.9.61 | Fix1–Fix8: see previous, **Fix9: subprocess regression fix** — Fix8 PLT hooks broke ALL subprocesses (`error=-634729984, Exec failed`). Root causes: (A) `orig_posix_spawn` corrupted by multi-ELF overwrite (PLT hooks across ~100 ELFs, last write could be lazy-binding stub), (B) `handleGetpropSpawn` fork() bypassed Java's `posix_spawn_file_actions_t` pipe infrastructure, (C) self-hooking (own module included in ELF scan). **Fixes**: `dlsym(RTLD_DEFAULT)` pre-resolves orig_* before PLT hooks (guaranteed correct), dummy vars for `pltHookRegister` oldFunc, `isHiddenPath()` filter in `enumerateLoadedElfs`, **memfd + orig_posix_spawn approach** replaces fork+write — generates spoofed content to memfd, calls real posix_spawn with `["cat", "/proc/self/fd/<N>"]` + ORIGINAL file_actions preserving Java pipes, `os.version` override tries multiple System field names (`props`/`systemProperties`/`theProperties`) + `Hashtable.put()` fallback |
 | 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
