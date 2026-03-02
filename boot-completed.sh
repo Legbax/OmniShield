@@ -7,8 +7,12 @@
 PROPS_FILE="/data/adb/.omni_data/.profile_props"
 [ ! -f "$PROPS_FILE" ] && exit 0
 
+RP=/data/adb/ksu/bin/resetprop
+[ ! -x "$RP" ] && RP=/data/adb/magisk/resetprop
+[ ! -x "$RP" ] && RP=resetprop
+
 while IFS='=' read -r key value; do
     [ -z "$key" ] && continue
     case "$key" in \#*) continue ;; esac
-    resetprop -n "$key" "$value" 2>/dev/null
+    "$RP" -n "$key" "$value" 2>/dev/null
 done < "$PROPS_FILE"

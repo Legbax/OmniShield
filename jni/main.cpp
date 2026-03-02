@@ -4192,6 +4192,17 @@ static void writeProfileProps(const DeviceFingerprint& fp,
     std::string rilVer = omni::engine::getRilVersionForProfile(profileName);
     fprintf(f, "gsm.version.ril-impl=%s\n", rilVer.c_str());
 
+    // IMEI — MIUI-specific runtime properties (safe for resetprop, not system identity props)
+    // These leak the real IMEI if not overwritten in the property area
+    std::string imei0 = omni::engine::generateValidImei(profileName, masterSeed);
+    std::string imei1 = omni::engine::generateValidImei(profileName, masterSeed + 1);
+    fprintf(f, "ro.ril.oem.imei=%s\n", imei0.c_str());
+    fprintf(f, "ro.ril.miui.imei0=%s\n", imei0.c_str());
+    fprintf(f, "ro.ril.miui.imei1=%s\n", imei1.c_str());
+
+    // Settings.Global device_name — leaks real model name "Redmi 9"
+    fprintf(f, "persist.sys.device_name=%s\n", fp.model);
+
     fclose(f);
     chmod("/data/adb/.omni_data/.profile_props", 0644);
 }
@@ -4258,10 +4269,13 @@ static void companion_handler(int client) {
                     // 3. Apply resetprop immediately (background) — fixes first-boot
                     // race condition where boot-completed.sh runs before .profile_props exists
                     system("sh -c '"
+                        "RP=/data/adb/ksu/bin/resetprop; "
+                        "[ ! -x \"$RP\" ] && RP=/data/adb/magisk/resetprop; "
+                        "[ ! -x \"$RP\" ] && RP=resetprop; "
                         "while IFS=\"=\" read -r key value; do "
                         "  [ -z \"$key\" ] && continue; "
                         "  case \"$key\" in \\#*) continue;; esac; "
-                        "  resetprop -n \"$key\" \"$value\" 2>/dev/null; "
+                        "  \"$RP\" -n \"$key\" \"$value\" 2>/dev/null; "
                         "done < /data/adb/.omni_data/.profile_props"
                         "' &");
                 }
