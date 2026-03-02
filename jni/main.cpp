@@ -230,6 +230,7 @@ static std::unordered_map<std::string, FakePropInfo*> g_fakePropMap;
 static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fake detection
 static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
+static bool g_realDeviceIsMiui = false;                  // PR91-fix: true if real device runs MIUI (preserve framework props)
 static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
 static bool g_propForeachInlineHooked = false;           // PR88: true if Dobby inline hook on __system_property_foreach succeeded
 static bool g_spawnInlineHooked = false;                 // PR90: true if Dobby inline hooks on posix_spawn/posix_spawnp succeeded
@@ -417,12 +418,17 @@ bool shouldHide(const char* key) {
     // SoC identifier (mt6769), and modem prefix (moly.) from property values.
     // PR73-Fix4: Added "miui" — hides ro.miui.*, ro.vendor.miui.* and any
     // MIUI-specific value when the target profile is not Xiaomi/MIUI.
-    return s.find("mediatek") != std::string::npos ||
-           s.find("lancelot") != std::string::npos ||
-           s.find("huaqin")   != std::string::npos ||
-           s.find("mt6769")   != std::string::npos ||
-           s.find("moly.")    != std::string::npos ||
-           s.find("miui")     != std::string::npos;
+    // PR91-fix: On real MIUI devices, don't suppress "miui" properties — the MIUI
+    // framework in every process depends on them for permissions, settings, etc.
+    bool hit = s.find("mediatek") != std::string::npos ||
+               s.find("lancelot") != std::string::npos ||
+               s.find("huaqin")   != std::string::npos ||
+               s.find("mt6769")   != std::string::npos ||
+               s.find("moly.")    != std::string::npos;
+    if (!hit && !g_realDeviceIsMiui) {
+        hit = s.find("miui") != std::string::npos;
+    }
+    return hit;
 }
 
 // -----------------------------------------------------------------------------
@@ -1583,9 +1589,10 @@ int my_system_property_get(const char *key, char *value) {
 
         // ── PR70c: Platform-specific prop suppression ────────────────────
         // Suppress MIUI props when NOT emulating Xiaomi
+        // PR91-fix: On real MIUI devices, preserve these — framework depends on them
         else if (k.find("ro.miui.") == 0 || k.find("ro.vendor.miui.") == 0) {
             std::string br = toLowerStr(fp.brand);
-            if (br != "redmi" && br != "xiaomi" && br != "poco") {
+            if (br != "redmi" && br != "xiaomi" && br != "poco" && !g_realDeviceIsMiui) {
                 value[0] = '\0'; return 0;
             }
         }
@@ -3882,7 +3889,9 @@ static void patchPropertyPages() {
         uintptr_t pi_addr = reinterpret_cast<uintptr_t>(e.pi);
         uintptr_t val_start = pi_addr + sizeof(uint32_t);
         uintptr_t val_end = val_start + PROP_VALUE_MAX - 1;
-        uintptr_t page_lo = val_start & ~((uintptr_t)ps - 1);
+        // PR91-fix: Start from pi_addr (not val_start) so the serial field's
+        // page is also remapped — needed to update the value length in serial.
+        uintptr_t page_lo = pi_addr & ~((uintptr_t)ps - 1);
         uintptr_t page_hi = val_end & ~((uintptr_t)ps - 1);
 
         for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
@@ -3912,6 +3921,17 @@ static void patchPropertyPages() {
                 munmap(tmp, ps);
                 remap_fail++;
             }
+        }
+
+        // PR91-fix: Update value length in serial field (Bionic uses serial >> 24).
+        // Without this, direct memory readers see truncated values when
+        // spoofed value is longer than original.
+        uintptr_t pi_page = pi_addr & ~((uintptr_t)ps - 1);
+        if (remapped.count(pi_page)) {
+            uint32_t* serial_ptr = reinterpret_cast<uint32_t*>(pi_addr);
+            uint32_t old_serial = *serial_ptr;
+            uint32_t new_len = (uint32_t)strlen(e.spoofed);
+            *serial_ptr = (new_len << 24) | (old_serial & 0x00FFFFFF);
         }
 
         // Write spoofed value at offset 4 (after atomic serial field)
@@ -4189,6 +4209,18 @@ public:
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         if (!env) return;
+
+        // PR91-fix: Detect real MIUI device BEFORE hooks alter property reads.
+        // The MIUI framework in every process depends on ro.miui.* properties for
+        // permissions, settings, etc. If we suppress them, the framework crashes.
+        {
+            char miui_ver[PROP_VALUE_MAX] = {};
+            __system_property_get("ro.miui.ui.version.code", miui_ver);
+            g_realDeviceIsMiui = (miui_ver[0] != '\0');
+            if (g_realDeviceIsMiui) {
+                LOGE("PR91-fix: Real device is MIUI — preserving MIUI framework properties");
+            }
+        }
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
