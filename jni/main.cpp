@@ -1236,8 +1236,11 @@ int my_system_property_get(const char *key, char *value) {
         // --- PR21: ODM + system_ext fingerprints (Widevine L1 cross-validation) ---
         // Widevine valida que estos fingerprints coincidan con ro.build.fingerprint.
         // Si devuelven el fingerprint real del Redmi 9, la discrepancia es detectable.
+        // PR82: ro.product.build.fingerprint añadido — no estaba en el hook chain y
+        // exponía el fingerprint real del dispositivo (Redmi/lancelot_global/lancelot:...).
         else if (k == "ro.odm.build.fingerprint"         ||
-                 k == "ro.system_ext.build.fingerprint")      dynamic_buffer = fp.fingerprint;
+                 k == "ro.system_ext.build.fingerprint"  ||
+                 k == "ro.product.build.fingerprint")         dynamic_buffer = fp.fingerprint;
         // --- PR21: ro.product.cpu.abi singular (Snapchat / Instagram / Firebase) ---
         // ro.product.cpu.abilist ya está hooked pero la forma singular no lo estaba.
         // Snapchat e Instagram leen la forma singular específicamente.
