@@ -243,6 +243,10 @@ static const char* (*orig_Sensor_getVendor)(void* sensor);
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
 static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jstring, jint);
 
+// Settings.Global
+static jstring (*orig_SettingsGlobal_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsGlobal_getStringForUser)(JNIEnv*, jstring, jint);
+
 // Helper
 inline std::string toLowerStr(const char* s) {
     if (!s) return "";
@@ -2544,6 +2548,28 @@ static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jin
     return my_SettingsSecure_getString(env, name);
 }
 
+// PR75b: Settings.Global hook — intercepts device_name which leaks "Redmi 9"
+static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
+    if (!name) return nullptr;
+    const char* key = env->GetStringUTFChars(name, nullptr);
+    if (!key) return nullptr;
+
+    jstring result = nullptr;
+    if (strcmp(key, "device_name") == 0) {
+        const DeviceFingerprint* fp = findProfile(g_currentProfileName);
+        if (fp) result = env->NewStringUTF(fp->model);
+    }
+    env->ReleaseStringUTFChars(name, key);
+
+    if (result) return result;
+    if (!orig_SettingsGlobal_getString) return nullptr;
+    return orig_SettingsGlobal_getString(env, name);
+}
+
+static jstring my_SettingsGlobal_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
+    return my_SettingsGlobal_getString(env, name);
+}
+
 void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
     if (!pi || !callback) return;
 
@@ -3862,6 +3888,21 @@ public:
         void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
         if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
 
+        // PR75b: Settings.Global (device_name leak)
+        static const char* GLOBAL_SYMBOLS[] = {
+            "_ZN7android14SettingsGlobal9getStringEP7_JNIEnvP8_jstring",
+            "_ZN7android8Settings6Global9getStringEP7_JNIEnvP8_jobjectP8_jstring",
+            nullptr
+        };
+        void* global_func = nullptr;
+        for (int gi = 0; GLOBAL_SYMBOLS[gi] && !global_func; ++gi) {
+            global_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_SYMBOLS[gi]);
+        }
+        if (global_func) DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+
+        void* global_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi");
+        if (global_user_func) DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+
         // JNI Telephony
         JNINativeMethod telephonyMethods[] = {
             {"getDeviceId", "(I)Ljava/lang/String;", (void*)my_getDeviceId},
@@ -4210,6 +4251,9 @@ static void writeProfileProps(const DeviceFingerprint& fp,
 
     // Settings.Global device_name — leaks real model name "Redmi 9"
     fprintf(f, "persist.sys.device_name=%s\n", fp.model);
+
+    // PR75b: Market name — leaks real "Redmi 9" in property trie
+    fprintf(f, "ro.product.marketname=%s\n", fp.model);
 
     fclose(f);
     chmod("/data/adb/.omni_data/.profile_props", 0644);
