@@ -230,6 +230,14 @@ static std::unordered_map<std::string, FakePropInfo*> g_fakePropMap;
 static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fake detection
 static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
+static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
+
+// PR86: dlsym hook — intercept dynamic symbol resolution for property functions.
+// When detection apps call dlsym(RTLD_DEFAULT, "__system_property_find") to get a raw
+// function pointer, they bypass both PLT hooks AND inline hooks (if the app's .so was
+// loaded after hooks were installed). This hook returns our spoofing functions instead.
+static void* (*orig_dlsym)(void* handle, const char* symbol) = nullptr;
+static thread_local bool g_inDlsym = false;  // recursion guard for dlsym hook
 
 // PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
 
@@ -2951,6 +2959,50 @@ const prop_info* my_system_property_find(const char* name) {
 }
 
 // -----------------------------------------------------------------------------
+// PR86: Hook dlsym — intercept dynamic symbol resolution for property functions
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: Detection apps (VDInfo, Snapchat) can call dlsym(RTLD_DEFAULT,
+// "__system_property_find") to obtain a raw function pointer to the real libc
+// implementation. They then call via this pointer, completely bypassing both
+// PLT hooks (which only patch GOT entries in pre-loaded ELFs) and even Dobby
+// inline hooks (if the app resolves the address before our hook is installed).
+// By hooking dlsym itself, we intercept the resolution and return our spoofed
+// function pointers for all property-related symbols.
+//
+// SAFETY: dlsym is used extensively throughout the process (by Dobby, by our
+// own code, by the linker). The thread_local g_inDlsym guard prevents infinite
+// recursion. This hook MUST be installed AFTER all our own dlsym() calls for
+// resolving orig_* pointers are complete.
+// -----------------------------------------------------------------------------
+static void* my_dlsym(void* handle, const char* symbol) {
+    // Recursion guard: pass through when called from our own hooks or Dobby internals
+    if (g_inDlsym || !symbol) {
+        return orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
+    }
+    g_inDlsym = true;
+
+    void* result = nullptr;
+    if (strcmp(symbol, "__system_property_find") == 0) {
+        result = (void*)my_system_property_find;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_find", symbol);
+    } else if (strcmp(symbol, "__system_property_read") == 0) {
+        result = (void*)my_system_property_read;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_read", symbol);
+    } else if (strcmp(symbol, "__system_property_get") == 0) {
+        result = (void*)my_system_property_get;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_get", symbol);
+    } else if (strcmp(symbol, "__system_property_read_callback") == 0) {
+        result = (void*)my_system_property_read_callback;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_read_callback", symbol);
+    } else {
+        result = orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
+    }
+
+    g_inDlsym = false;
+    return result;
+}
+
+// -----------------------------------------------------------------------------
 // PR71: Hook execve — intercept getprop commands in child processes
 // -----------------------------------------------------------------------------
 // ROOT CAUSE: VD-Infos and detection apps use Runtime.exec("getprop propname")
@@ -3830,11 +3882,14 @@ static bool installPltHooks() {
                                (void*)my_posix_spawnp, &d3);
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
                                (void*)my_system_property_read, &d4);
-        // PR84: PLT hook for __system_property_find — fallback when Dobby inline fails.
-        // VDInfo calls find() then reads prop_info->value directly from shared memory.
-        // Our fake prop_info ensures even raw memory reads see the spoofed value.
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
-                               (void*)my_system_property_find, &d5);
+        // PR84/PR86: PLT hook for __system_property_find — only if Dobby inline hook
+        // was not installed. Having both Dobby inline + PLT hook on the same function
+        // causes double-hook recursion (same as Fix10 crash: PLT calls my_* → my_*
+        // calls orig_* → orig_* was Dobby-patched → back to my_* → infinite loop).
+        if (!g_propFindInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
+                                   (void*)my_system_property_find, &d5);
+        }
     }
 
     bool ok = g_api->pltHookCommit();
@@ -3979,10 +4034,30 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
-        // PR85: DobbyHook of __system_property_find REMOVED.
-        // On aarch64 Bionic, __system_property_find is a thin wrapper (~4-8 instructions).
-        // Dobby's trampoline overwrites past the function boundary, corrupting adjacent code
-        // and causing SIGABRT. The PLT hook in installPltHooks() covers this function safely.
+        // PR86: Re-attempt Dobby inline hook on __system_property_find.
+        // PR85 removed this because DobbySymbolResolver("libc.so") may have returned
+        // a PLT thunk or wrong address, causing SIGABRT. Now using dlsym(RTLD_DEFAULT)
+        // for reliable resolution of the actual bionic function address.
+        // __system_property_find is NOT a thin syscall wrapper — it traverses the property
+        // trie in shared memory (~15-25 ARM64 instructions, 60-100 bytes), well above
+        // Dobby's 12-byte trampoline requirement.
+        // This inline hook intercepts ALL callers including late-loaded .so files
+        // (VDInfo's native lib, Snapchat's native lib) that aren't covered by PLT hooks.
+        {
+            void* find_func = dlsym(RTLD_DEFAULT, "__system_property_find");
+            if (find_func) {
+                int ret = DobbyHook(find_func, (void*)my_system_property_find,
+                                    (void**)&orig_system_property_find);
+                if (ret == 0) {
+                    LOGE("PR86: Dobby inline hook on __system_property_find SUCCESS at %p", find_func);
+                    g_propFindInlineHooked = true;
+                } else {
+                    LOGE("PR86: Dobby inline hook on __system_property_find FAILED (ret=%d) at %p, falling back to PLT only", ret, find_func);
+                }
+            } else {
+                LOGE("PR86: dlsym(RTLD_DEFAULT, __system_property_find) returned NULL");
+            }
+        }
 
         // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
         // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
@@ -4009,6 +4084,28 @@ public:
         // Los /apex/ ya se filtraron en enumerateLoadedElfs() (Fix10).
         // No se necesita fallback Dobby para estas funciones.
         installPltHooks();
+
+        // PR86: Hook dlsym for defense-in-depth against dynamic symbol resolution bypass.
+        // Detection apps can call dlsym(RTLD_DEFAULT, "__system_property_find") to get
+        // a raw function pointer, bypassing PLT hooks entirely. By hooking dlsym itself,
+        // we return our spoofed function pointers for all property-related symbols.
+        // dlsym in libdl.so is large enough (~30+ instructions) for Dobby's trampoline.
+        // CRITICAL: MUST be installed AFTER installPltHooks() because that function calls
+        // dlsym(RTLD_DEFAULT, "__system_property_read") to pre-resolve orig_* pointers.
+        // If our hook is active during that resolution, it returns my_system_property_read
+        // instead of the real address, corrupting orig_system_property_read → self-reference
+        // → infinite recursion.
+        {
+            void* dlsym_addr = DobbySymbolResolver("libdl.so", "dlsym");
+            if (!dlsym_addr) dlsym_addr = dlsym(RTLD_DEFAULT, "dlsym");
+            if (dlsym_addr) {
+                int ret = DobbyHook(dlsym_addr, (void*)my_dlsym, (void**)&orig_dlsym);
+                LOGE("PR86: dlsym hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", dlsym_addr, ret);
+            } else {
+                LOGE("PR86: Could not resolve dlsym address for hooking");
+            }
+        }
 
         // PR85: patchPropertyPages() DISABLED — redundant now that the PLT hook for
         // __system_property_find returns FakePropInfo structs with spoofed values.

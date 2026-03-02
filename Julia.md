@@ -1,13 +1,13 @@
 # Julia.md — OmniShield v12.9.58 Technical Reference
 
-**Version:** v12.9.61 (The Void)
-**Last updated:** 2026-03-01 (Fix9: memfd+orig_posix_spawn subprocess fix, dlsym orig pre-resolution, self-hook filter, os.version multi-field)
+**Version:** v12.9.62 (The Void)
+**Last updated:** 2026-03-02 (PR86: Dobby inline hook on __system_property_find, dlsym hook, modem resetprop loop)
 
 ---
 
 ## 1. Architecture Overview
 
-OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the native layer. It intercepts ~47 libc/JNI/HAL functions via Dobby inline hooks and Zygisk `hookJniNativeMethods`, projecting a complete fake device fingerprint to detection apps, Play Integrity, and DRM systems.
+OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the native layer. It intercepts ~49 libc/JNI/HAL functions via Dobby inline hooks and Zygisk `hookJniNativeMethods`, projecting a complete fake device fingerprint to detection apps, Play Integrity, and DRM systems.
 
 ### Spoofing Layers (bottom-up)
 
@@ -25,13 +25,13 @@ OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the 
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `jni/main.cpp` | ~3600 | Core module: all hooks, profile loading, companion process |
+| `jni/main.cpp` | ~3700 | Core module: all hooks, profile loading, companion process |
 | `jni/omni_engine.hpp` | ~405 | Identity generators: IMEI (Luhn), ICCID, IMSI, MAC, Serial, GPS, UUID |
 | `jni/omni_profiles.h` | ~726 | `DeviceFingerprint` struct (58 fields) + 40 device profiles |
 | `jni/include/zygisk.hpp` | - | Zygisk API v3 header (AppSpecializeArgs, REGISTER_ZYGISK_MODULE) |
 | `jni/include/dobby.h` | - | Dobby hooking framework header |
 | `proxy_manager.sh` | ~418 | Transparent SOCKS5 proxy via hev-socks5-tunnel + iptables |
-| `service.sh` | ~161 | Boot service: SSAID injection, permissions, proxy auto-start |
+| `service.sh` | ~184 | Boot service: SSAID injection, permissions, proxy auto-start, modem prop stabilizer |
 | `customize.sh` | ~23 | Magisk/KernelSU install script: chmod, dir creation |
 | `webroot/js/app.js` | ~1201 | WebUI: config management, proxy control, scope picker |
 | `webroot/index.html` | ~802 | WebUI HTML: tabs for Device, IDs, Telephony, Location, Proxy, Settings |
@@ -131,6 +131,10 @@ These rules are derived from past crashes and regressions. Violating any will ca
 
 7f. **Fix9: Intercepted subprocess commands use memfd + `orig_posix_spawn`** with the ORIGINAL `file_actions` and `attrp`. Direct `fork()` + `write(STDOUT_FILENO)` bypasses Java's pipe infrastructure (`posix_spawn_file_actions_t` with `dup2` for stdin/stdout/stderr). The memfd approach: generate spoofed content → write to `memfd_create("s", 0)` → call `orig_posix_spawn(pid, "/system/bin/cat", file_actions, attrp, ["cat", "/proc/self/fd/<N>"])` → Java's pipes work correctly.
 
+7g. **PR86: `__system_property_find` Dobby inline + PLT hook are MUTUALLY EXCLUSIVE.** If the Dobby inline hook succeeds (`g_propFindInlineHooked = true`), the PLT hook for `__system_property_find` MUST NOT be registered. Having both active causes the Fix10 crash pattern: PLT-hooked GOT → `my_system_property_find` → calls `orig_system_property_find` → Dobby-patched entry → back to `my_system_property_find` → infinite recursion → SIGSEGV.
+
+7h. **PR86: `dlsym` hook MUST be installed AFTER all `dlsym`/`DobbySymbolResolver` calls.** Our own code uses `dlsym(RTLD_DEFAULT, ...)` to pre-resolve `orig_*` pointers. If the `dlsym` hook is active during this resolution, `my_dlsym` would return our hook functions instead of the real ones, corrupting `orig_*` pointers. Install `dlsym` hook last, after all symbol resolution is complete. The `thread_local g_inDlsym` guard prevents recursion within the hook itself.
+
 ### Property Spoofing
 
 8. **`my_system_property_get` must NEVER early-return** before the spoofing logic. It's the central hub — `my_system_property_read_callback` and `my_SystemProperties_native_get` both depend on it. If `orig_system_property_get` is null, initialize `value[0] = '\0'` and continue to profile logic.
@@ -212,6 +216,8 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 | ENV variables (`BOOTCLASSPATH`, `DEX2OATBOOTCLASSPATH`) | Cannot fix | Set by Zygote pre-fork. Contain MediaTek/MIUI jars. Immutable post-init. |
 | GPU hardware (Mali vs Adreno) | Cannot fix | Physical hardware. `glGetString`/`eglQueryString` are hooked for string-level spoofing but hardware capabilities differ. |
 | Network info (WiFi IP, DNS, speed) | Not hooked | Requires `NetworkCapabilities` + `LinkProperties` hooks. Separate PR. |
+| `getNetworkCountryIso` Binder path | Partial (PR86) | `resetprop` loop fixes property-based reads. Binder IPC to system_server may still read from RIL `ServiceState` directly on some ROMs. Full fix requires Xposed/LSPosed. |
+| Network interfaces via Netlink | Not hooked | VDInfo may use `RTM_GETLINK` Netlink sockets instead of `ioctl`/`getifaddrs` to enumerate interfaces. Would require `sendmsg`/`recvmsg` hooks with Netlink message filtering. |
 
 ---
 
@@ -220,15 +226,16 @@ WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
 ### Zygisk PLT Hooks (Fix8+Fix9, primary for thin syscall wrappers)
 
 **libc (Process):** execve, posix_spawn, posix_spawnp
-**libc (Properties):** __system_property_read
+**libc (Properties):** __system_property_read, __system_property_find (fallback if Dobby inline fails)
 
-> These 4 functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. Dobby fallback retained if `pltHookCommit()` fails.
+> These functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. PR86: `__system_property_find` PLT hook only activates if the Dobby inline hook fails (mutual exclusion to prevent Fix10 recursion crash).
 
-### Dobby Native Hooks (~33, remaining)
+### Dobby Native Hooks (~35, remaining)
 
 **libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
 **libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
-**libc (Properties):** __system_property_get, __system_property_read_callback
+**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_find (PR86: via `dlsym(RTLD_DEFAULT)`)
+**Dynamic Linker:** dlsym (PR86: defense-in-depth against dynamic symbol resolution bypass)
 **Stealth:** dl_iterate_phdr
 **Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
 **Crypto:** SSL_CTX_set_ciphersuites, SSL_set1_tls13_ciphersuites, SSL_set_ciphersuites, SSL_set_cipher_list (libssl)
@@ -311,6 +318,7 @@ adb push dist/omnishield-v12.9.58-release.zip /sdcard/
 
 | PR | Version | Key Changes |
 |----|---------|-------------|
+| 86 | v12.9.62 | **VDInfo dual-read fix (3 layers)**: (1) Dobby inline hook on `__system_property_find` via `dlsym(RTLD_DEFAULT)` instead of `DobbySymbolResolver("libc.so")` — PR85 removal was likely caused by wrong address resolution, re-attempt with correct symbol lookup. Inline hook intercepts ALL callers including late-loaded .so files (VDInfo's native lib). (2) `dlsym` hook (defense-in-depth) — intercepts `dlsym("__system_property_find/read/get/read_callback")` and returns spoofed function pointers. Thread-local recursion guard. (3) `service.sh` modem property stabilizer — `resetprop -n` loop every 5s for `gsm.operator.iso-country`/`gsm.sim.operator.iso-country` to counteract RIL daemon overwrites (fixes `getNetworkCountryIso` returning real country). PLT hook for `__system_property_find` now conditional on Dobby inline failure (mutual exclusion prevents Fix10 recursion crash). |
 | 73b | v12.9.61 | Fix1–Fix8: see previous, **Fix9: subprocess regression fix** — Fix8 PLT hooks broke ALL subprocesses (`error=-634729984, Exec failed`). Root causes: (A) `orig_posix_spawn` corrupted by multi-ELF overwrite (PLT hooks across ~100 ELFs, last write could be lazy-binding stub), (B) `handleGetpropSpawn` fork() bypassed Java's `posix_spawn_file_actions_t` pipe infrastructure, (C) self-hooking (own module included in ELF scan). **Fixes**: `dlsym(RTLD_DEFAULT)` pre-resolves orig_* before PLT hooks (guaranteed correct), dummy vars for `pltHookRegister` oldFunc, `isHiddenPath()` filter in `enumerateLoadedElfs`, **memfd + orig_posix_spawn approach** replaces fork+write — generates spoofed content to memfd, calls real posix_spawn with `["cat", "/proc/self/fd/<N>"]` + ORIGINAL file_actions preserving Java pipes, `os.version` override tries multiple System field names (`props`/`systemProperties`/`theProperties`) + `Hashtable.put()` fallback |
 | 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
 | 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
