@@ -213,6 +213,11 @@ static int (*orig_fcntl)(int fd, int cmd, ...);
 // PR42: ioctl hook para blindaje de MAC frente a llamadas directas al kernel
 static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 
+// PR81: NetworkInterface hooks — file-scope originals (accessed by JNI hook callbacks
+// that may run on any thread; must be set BEFORE the hook is callable).
+static jobjectArray (*orig_NI_getAll)(JNIEnv*, jclass) = nullptr;
+static jobject (*orig_NI_getByName0)(JNIEnv*, jclass, jstring) = nullptr;
+
 // SSL Pointers
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
@@ -4233,13 +4238,20 @@ public:
         // PR81: NetworkInterface — hide wlan0/tun0 in LTE mode.
         // getAll() and getByName0() are REAL native methods (RegisterNatives in libcore),
         // unlike NetworkInfo methods which are pure Java (see comment below).
+        // PR83-FIX: orig_NI_* moved to file scope; originals saved IMMEDIATELY after
+        // each individual hook to close the race window where a framework thread could
+        // call getAll() before the original pointer was saved → nullptr → NPE → blackscreen.
         if (g_spoofMobileNetwork) {
-            static jobjectArray (*orig_NI_getAll)(JNIEnv*, jclass) = nullptr;
-            static jobject (*orig_NI_getByName0)(JNIEnv*, jclass, jstring) = nullptr;
-
             struct NIHook {
                 static jobjectArray getAll(JNIEnv* e, jclass cls) {
-                    if (!orig_NI_getAll) return nullptr;
+                    if (!orig_NI_getAll) {
+                        // Safety net: if original wasn't captured, return empty array
+                        // instead of nullptr (which would cause NPE in Java callers).
+                        jclass niClass = e->FindClass("java/net/NetworkInterface");
+                        if (e->ExceptionCheck()) e->ExceptionClear();
+                        if (niClass) return e->NewObjectArray(0, niClass, nullptr);
+                        return nullptr;
+                    }
                     jobjectArray arr = orig_NI_getAll(e, cls);
                     if (!arr) return arr;
 
@@ -4247,6 +4259,7 @@ public:
                     jclass niClass = e->FindClass("java/net/NetworkInterface");
                     jmethodID getName = niClass ? e->GetMethodID(niClass, "getName",
                         "()Ljava/lang/String;") : nullptr;
+                    if (e->ExceptionCheck()) e->ExceptionClear();
                     if (!getName) return arr;
 
                     std::vector<jobject> kept;
@@ -4285,23 +4298,25 @@ public:
                 }
             };
 
-            JNINativeMethod niMethods[] = {
-                {"getAll",     "()[Ljava/net/NetworkInterface;",
-                 (void*)NIHook::getAll},
-                {"getByName0", "(Ljava/lang/String;)Ljava/net/NetworkInterface;",
-                 (void*)NIHook::getByName0},
-            };
-
-            for (int i = 0; i < 2; i++) {
-                g_api->hookJniNativeMethods(env, "java/net/NetworkInterface",
-                                            &niMethods[i], 1);
+            // Hook getAll — save original IMMEDIATELY before hooking getByName0
+            {
+                JNINativeMethod m = {"getAll", "()[Ljava/net/NetworkInterface;",
+                                     (void*)NIHook::getAll};
+                g_api->hookJniNativeMethods(env, "java/net/NetworkInterface", &m, 1);
                 if (env->ExceptionCheck()) env->ExceptionClear();
+                if (m.fnPtr && m.fnPtr != (void*)NIHook::getAll)
+                    orig_NI_getAll = reinterpret_cast<decltype(orig_NI_getAll)>(m.fnPtr);
             }
-
-            if (niMethods[0].fnPtr && niMethods[0].fnPtr != (void*)NIHook::getAll)
-                orig_NI_getAll = reinterpret_cast<decltype(orig_NI_getAll)>(niMethods[0].fnPtr);
-            if (niMethods[1].fnPtr && niMethods[1].fnPtr != (void*)NIHook::getByName0)
-                orig_NI_getByName0 = reinterpret_cast<decltype(orig_NI_getByName0)>(niMethods[1].fnPtr);
+            // Hook getByName0 — save original IMMEDIATELY
+            {
+                JNINativeMethod m = {"getByName0",
+                                     "(Ljava/lang/String;)Ljava/net/NetworkInterface;",
+                                     (void*)NIHook::getByName0};
+                g_api->hookJniNativeMethods(env, "java/net/NetworkInterface", &m, 1);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (m.fnPtr && m.fnPtr != (void*)NIHook::getByName0)
+                    orig_NI_getByName0 = reinterpret_cast<decltype(orig_NI_getByName0)>(m.fnPtr);
+            }
         }
 
         // Hotfix: Eliminado intento de hookear WifiInfo via hookJniNativeMethods.
