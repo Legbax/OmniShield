@@ -5676,12 +5676,13 @@ static void writePifProps(const DeviceFingerprint& fp) {
 
 static void writeProfileProps(const DeviceFingerprint& fp,
                               const std::string& profileName, long masterSeed) {
-    // PR74: ONLY write runtime properties safe for global resetprop.
-    // Identity properties (ro.product.*, ro.build.*, ro.hardware.*, fingerprints)
-    // are NOT included — resetprop on those breaks MIUI/system UI because it's global.
-    // Identity spoofing is already handled by Zygisk JNI hooks in scoped apps.
-    // This file covers properties that system_server reads via Binder (gsm.*, vendor.*),
-    // plus serial/IMEI suppression and MediaTek vendor property suppression.
+    // PR74+PR95: Global resetprop for properties safe to modify system-wide.
+    // Identity properties (ro.product.model/brand/manufacturer/device/name,
+    // ro.build.fingerprint, ro.odm.build.fingerprint, ro.build.description)
+    // are NOT included — resetprop on those breaks MIUI/system UI (PR83).
+    // Hardware props (ro.hardware, ro.board.platform) are NOT included — breaks HAL loading.
+    // This file covers: telephony/gsm, build metadata (dates, IDs, incremental, host),
+    // security patches, marketnames, misc identifiers, and MediaTek suppression.
     FILE* f = fopen("/data/adb/.omni_data/.profile_props", "w");
     if (!f) return;
 
@@ -5739,6 +5740,87 @@ static void writeProfileProps(const DeviceFingerprint& fp,
 
     // PR75b: Market name — leaks real "Redmi 9" in property trie
     fprintf(f, "ro.product.marketname=%s\n", fp.model);
+
+    // ── PR95: Dual-elimination resetprop ─────────────────────────────
+    // VDInfos reads /dev/__properties__/* via direct syscalls, bypassing
+    // Dobby hooks and patchPropertyPages mremap patches.  Only resetprop
+    // (which modifies the GLOBAL property area) eliminates dual readings.
+    // These are all safe metadata props — NOT identity/fingerprint/hardware
+    // which would break MIUI.
+
+    // A) Build metadata base
+    fprintf(f, "ro.build.display.id=%s\n", fp.display);
+    fprintf(f, "ro.build.host=%s\n", fp.buildHost);
+    fprintf(f, "ro.build.user=%s\n", fp.buildUser);
+    fprintf(f, "ro.build.flavor=%s\n", fp.buildFlavor);
+    fprintf(f, "ro.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.build.version.security_patch=%s\n", fp.securityPatch);
+
+    // B) Build dates UTC — all partitions
+    fprintf(f, "ro.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.vendor.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.odm.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.product.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.system.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.system_ext.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.bootimage.build.date.utc=%s\n", fp.buildDateUtc);
+
+    // C) Build dates human-readable — all partitions
+    {
+        time_t t = 0;
+        try { t = std::stol(fp.buildDateUtc); } catch(...) {}
+        if (t > 0) {
+            struct tm tm_buf;
+            gmtime_r(&t, &tm_buf);
+            char date_str[64];
+            strftime(date_str, sizeof(date_str), "%a %b %e %H:%M:%S UTC %Y", &tm_buf);
+            fprintf(f, "ro.build.date=%s\n", date_str);
+            fprintf(f, "ro.vendor.build.date=%s\n", date_str);
+            fprintf(f, "ro.odm.build.date=%s\n", date_str);
+            fprintf(f, "ro.product.build.date=%s\n", date_str);
+            fprintf(f, "ro.system.build.date=%s\n", date_str);
+            fprintf(f, "ro.system_ext.build.date=%s\n", date_str);
+            fprintf(f, "ro.bootimage.build.date=%s\n", date_str);
+        }
+    }
+
+    // D) Build IDs — all partitions
+    fprintf(f, "ro.vendor.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.odm.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.product.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.system.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.system_ext.build.id=%s\n", fp.buildId);
+
+    // E) Incremental versions — all partitions
+    fprintf(f, "ro.vendor.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.odm.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.product.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.system.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.system_ext.build.version.incremental=%s\n", fp.incremental);
+
+    // F) Security patches — vendor/odm variants
+    fprintf(f, "ro.vendor.build.security_patch=%s\n", fp.securityPatch);
+    fprintf(f, "ro.vendor.build.version.security_patch=%s\n", fp.securityPatch);
+    fprintf(f, "ro.odm.build.security_patch=%s\n", fp.securityPatch);
+    fprintf(f, "ro.odm.build.version.security_patch=%s\n", fp.securityPatch);
+
+    // G) Misc identifiers
+    fprintf(f, "ro.fota.oem=%s\n", fp.manufacturer);
+    fprintf(f, "ro.product.cert=%s\n", fp.model);
+    fprintf(f, "ro.product.mod_device=%s\n", fp.product);
+    fprintf(f, "ro.build.product=%s\n", fp.product);
+    fprintf(f, "ro.boot.product.hardware.sku=%s\n", fp.device);
+    fprintf(f, "ro.boot.rsc=%s\n", fp.device);
+    fprintf(f, "ro.product.locale=en-US\n");
+    fprintf(f, "ro.baseband=%s\n", fp.radioVersion);
+
+    // H) Market name — partition variants (root already done above)
+    fprintf(f, "ro.product.odm.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.product.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.system.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.system_ext.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.vendor.marketname=%s\n", fp.model);
 
     // PIF Hijacking Properties (Prefixed with # so resetprop ignores them)
     fprintf(f, "#PIF_FINGERPRINT=%s\n", fp.fingerprint);
