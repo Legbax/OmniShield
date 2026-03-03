@@ -5625,6 +5625,21 @@ static void companion_handler(int client) {
                                            + fp_ptr->model + "' 2>/dev/null &";
                         system(dn_cmd.c_str());
                     }
+
+                    // MIUI crash fix: Force miui_optimization=0 in Settings.Secure.
+                    // MIUI's Activity.requestPermissions() reads this via Settings.Secure
+                    // (Java ContentProvider IPC) — unreachable from native Dobby/PLT hooks
+                    // because libandroid_runtime.so has no C++ symbols for Settings on this
+                    // ROM. When enabled, permissions route to com.lbe.security.miui which
+                    // may not exist → ActivityNotFoundException crash.
+                    // Same pattern as PR76 device_name: write directly via 'settings put'.
+                    {
+                        char miui_ver[PROP_VALUE_MAX] = {};
+                        __system_property_get("ro.miui.ui.version.code", miui_ver);
+                        if (miui_ver[0] != '\0') {
+                            system("settings put secure miui_optimization 0 2>/dev/null &");
+                        }
+                    }
                 }
             }
         }
