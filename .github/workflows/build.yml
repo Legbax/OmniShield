@@ -52,10 +52,10 @@ jobs:
         cp tun2socks dist/bin/tun2socks
         cp -r webroot dist/
         cd dist
-        zip -r omnishield-${{ steps.version.outputs.VERSION }}-release.zip .
+        zip -r OMNI-Shield-${{ steps.version.outputs.VERSION }}-release.zip .
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: omnishield-${{ steps.version.outputs.VERSION }}-release
-        path: dist/omnishield-${{ steps.version.outputs.VERSION }}-release.zip
+        name: OMNI-Shield-${{ steps.version.outputs.VERSION }}-release
+        path: dist/OMNI-Shield-${{ steps.version.outputs.VERSION }}-release.zip
