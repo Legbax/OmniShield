@@ -299,11 +299,13 @@ static const char* (*orig_Sensor_getVendor)(void* sensor);
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
 static jstring (*orig_SettingsSecure_getString3)(JNIEnv*, jobject, jstring);
 static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jstring, jint);
+static jstring (*orig_SettingsSecure_getStringForUser4)(JNIEnv*, jobject, jstring, jint);
 
 // Settings.Global
 static jstring (*orig_SettingsGlobal_getString)(JNIEnv*, jstring);
 static jstring (*orig_SettingsGlobal_getString3)(JNIEnv*, jobject, jstring);
 static jstring (*orig_SettingsGlobal_getStringForUser)(JNIEnv*, jstring, jint);
+static jstring (*orig_SettingsGlobal_getStringForUser4)(JNIEnv*, jobject, jstring, jint);
 
 // Helper
 inline std::string toLowerStr(const char* s) {
@@ -2759,6 +2761,11 @@ static jstring spoofSettingsSecure(JNIEnv* env, jstring name) {
         // Default "Android Bluedroid" leaks that device isn't using OEM BT stack.
         const DeviceFingerprint* fp = findProfile(g_currentProfileName);
         if (fp) result = env->NewStringUTF(fp->model);
+    } else if (g_realDeviceIsMiui && strcmp(key, "miui_optimization") == 0) {
+        // Force MIUI framework to use standard AOSP behavior for permissions,
+        // app management, etc. Without this, MIUI sends permission intents to
+        // com.lbe.security.miui which may be missing/disabled -> crash.
+        result = env->NewStringUTF("0");
     }
     env->ReleaseStringUTFChars(name, key);
     return result;
@@ -2787,6 +2794,15 @@ static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jin
     if (r) return r;
     if (!orig_SettingsSecure_getStringForUser) return nullptr;
     return orig_SettingsSecure_getStringForUser(env, name, userHandle);
+}
+
+// 4-param variant: (JNIEnv*, jobject contentResolver, jstring name, jint userHandle)
+// Some ROMs export getStringForUser with a ContentResolver parameter.
+static jstring my_SettingsSecure_getStringForUser4(JNIEnv* env, jobject cr, jstring name, jint userHandle) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
+    if (!orig_SettingsSecure_getStringForUser4) return nullptr;
+    return orig_SettingsSecure_getStringForUser4(env, cr, name, userHandle);
 }
 
 // -----------------------------------------------------------------------------
@@ -2835,6 +2851,14 @@ static jstring my_SettingsGlobal_getStringForUser(JNIEnv* env, jstring name, jin
     if (r) return r;
     if (!orig_SettingsGlobal_getStringForUser) return nullptr;
     return orig_SettingsGlobal_getStringForUser(env, name, userHandle);
+}
+
+// 4-param variant: (JNIEnv*, jobject contentResolver, jstring name, jint userHandle)
+static jstring my_SettingsGlobal_getStringForUser4(JNIEnv* env, jobject cr, jstring name, jint userHandle) {
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
+    if (!orig_SettingsGlobal_getStringForUser4) return nullptr;
+    return orig_SettingsGlobal_getStringForUser4(env, cr, name, userHandle);
 }
 
 void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
@@ -4946,8 +4970,28 @@ public:
         }
 
         // Settings.Secure (getStringForUser - API 30+)
-        void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
-        if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+        // Symbol index 0 = 3-param (JNIEnv*, jstring, int)
+        // Symbol index 1,2 = 4-param (JNIEnv*, jobject contentResolver, jstring, int)
+        static const char* SECURE_USER_SYMBOLS[] = {
+            "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi",                    // 3-param
+            "_ZN7android16SettingsProvider16getStringForUserEP7_JNIEnvP8_jobjectP8_jstringi",        // 4-param (SettingsProvider)
+            "_ZN7android8Settings6Secure16getStringForUserEP7_JNIEnvP8_jobjectP8_jstringi",          // 4-param (Settings::Secure)
+            nullptr
+        };
+        void* settings_user_func = nullptr;
+        int settings_user_variant = -1;
+        for (int si = 0; SECURE_USER_SYMBOLS[si] && !settings_user_func; ++si) {
+            settings_user_func = DobbySymbolResolver("libandroid_runtime.so", SECURE_USER_SYMBOLS[si]);
+            if (settings_user_func) settings_user_variant = si;
+        }
+        if (settings_user_func) {
+            if (settings_user_variant == 0) {
+                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+            } else {
+                LOGE("Settings.Secure.getStringForUser: using 4-param variant (index %d)", settings_user_variant);
+                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
+            }
+        }
 
         // PR75b: Settings.Global (device_name leak)
         static const char* GLOBAL_SYMBOLS[] = {
@@ -4970,8 +5014,26 @@ public:
             }
         }
 
-        void* global_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi");
-        if (global_user_func) DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+        // Settings.Global (getStringForUser - API 30+)
+        static const char* GLOBAL_USER_SYMBOLS[] = {
+            "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi",                    // 3-param
+            "_ZN7android8Settings6Global16getStringForUserEP7_JNIEnvP8_jobjectP8_jstringi",          // 4-param (Settings::Global)
+            nullptr
+        };
+        void* global_user_func = nullptr;
+        int global_user_variant = -1;
+        for (int gi = 0; GLOBAL_USER_SYMBOLS[gi] && !global_user_func; ++gi) {
+            global_user_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_USER_SYMBOLS[gi]);
+            if (global_user_func) global_user_variant = gi;
+        }
+        if (global_user_func) {
+            if (global_user_variant == 0) {
+                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+            } else {
+                LOGE("Settings.Global.getStringForUser: using 4-param variant (index %d)", global_user_variant);
+                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
+            }
+        }
 
         // JNI Telephony — PR76: one-by-one injection to prevent all-or-nothing failure.
         // RegisterNatives rejects the entire batch when any one signature is absent in
