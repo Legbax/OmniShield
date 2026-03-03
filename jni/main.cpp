@@ -1207,6 +1207,7 @@ int my_system_property_get(const char *key, char *value) {
         // exist → ActivityNotFoundException. Force "false" so MIUI uses standard AOSP
         // permission controller (com.android.permissioncontroller).
         else if (g_realDeviceIsMiui && k == "persist.sys.miui_optimization") dynamic_buffer = "false";
+        else if (g_realDeviceIsMiui && k == "ro.miui.build.region") dynamic_buffer = "global";
         else if (k == "ro.hardware.chipname") dynamic_buffer = fp.hardwareChipname;
         else if (k == "ro.product.board") dynamic_buffer = fp.board;
         else if (k == "ro.sf.lcd_density") {
@@ -4701,6 +4702,19 @@ public:
                     if (fid_serial) {
                         std::string serial = omni::engine::generateRandomSerial(bfp.brand, g_masterSeed, bfp.securityPatch);
                         env->SetStaticObjectField(build_class, fid_serial, env->NewStringUTF(serial.c_str()));
+                    }
+
+                    // MIUI fix: force IS_INTERNATIONAL_BUILD = true.
+                    // MIUI adds this field to android.os.Build. On CN builds it is false,
+                    // causing Activity.requestPermissions() to hardcode pkg=com.lbe.security.miui.
+                    // Setting it here in the main thread guarantees it's true before any Activity runs.
+                    if (g_realDeviceIsMiui) {
+                        jfieldID fid_intl = env->GetStaticFieldID(build_class, "IS_INTERNATIONAL_BUILD", "Z");
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        if (fid_intl) {
+                            env->SetStaticBooleanField(build_class, fid_intl, JNI_TRUE);
+                            LOGE("MIUI fix: forced Build.IS_INTERNATIONAL_BUILD = true");
+                        }
                     }
 
                     // Build.VERSION.SECURITY_PATCH — en clase anidada Build$VERSION
