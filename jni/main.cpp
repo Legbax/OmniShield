@@ -40,6 +40,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/mount.h>
 #include <set>              // Fix8: deduplicar ELFs en PLT hooks
 #include <unordered_map>   // PR84: fake prop_info map
 #include <sys/sysmacros.h>  // Fix8: makedev()
@@ -3287,7 +3288,7 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
         }
 
         if (is_getprop) {
-            if (argv[1] && argv[1][0] != '\0') {
+            if (argv[1] && argv[1][0] != '\0' && strcmp(argv[1], "-c") != 0) {
                 // Single property read: getprop <name> [default]
                 char value[92] = {0};
                 int len = my_system_property_get(argv[1], value);
@@ -4293,6 +4294,40 @@ public:
         if (g_api) {
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+
+                // MemFD bind mount: spoof /proc/cpuinfo at kernel level.
+                // VDInfos reads cpuinfo via raw syscalls that bypass openat/read hooks.
+                // By bind-mounting a memfd over /proc/cpuinfo before specialization
+                // (while we still have CAP_SYS_ADMIN from Zygote), all reads — including
+                // direct syscalls — see the spoofed content.
+                LOGE("MemFD: profile='%s', looking up...", g_currentProfileName.c_str());
+                const DeviceFingerprint* fp_cpu = findProfile(g_currentProfileName);
+                if (fp_cpu) {
+                    std::string fake_cpuinfo = generateMulticoreCpuInfo(*fp_cpu);
+                    LOGE("MemFD: profile found, hardware='%s', cpuinfo_size=%zu",
+                         fp_cpu->hardware, fake_cpuinfo.size());
+                    int mfd = syscall(__NR_memfd_create, "fake_cpuinfo", 0);
+                    if (mfd >= 0) {
+                        write(mfd, fake_cpuinfo.c_str(), fake_cpuinfo.size());
+                        lseek(mfd, 0, SEEK_SET);
+                        char fdpath[64];
+                        snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", mfd);
+                        if (mount(fdpath, "/proc/cpuinfo", nullptr, MS_BIND, nullptr) == 0) {
+                            LOGE("MemFD: bind-mounted spoofed /proc/cpuinfo (%zu bytes)",
+                                 fake_cpuinfo.size());
+                        } else {
+                            LOGE("MemFD: bind mount FAILED (errno=%d: %s), falling back to hooks",
+                                 errno, strerror(errno));
+                        }
+                        // Exempt fd from zygote's automatic fd cleanup during specialization
+                        if (g_api) g_api->exemptFd(mfd);
+                    } else {
+                        LOGE("MemFD: memfd_create failed (errno=%d: %s)", errno, strerror(errno));
+                    }
+                } else {
+                    LOGE("MemFD: findProfile('%s') returned NULL — no cpuinfo spoof",
+                         g_currentProfileName.c_str());
+                }
             }
             // PR85: DLCLOSE_MODULE_LIBRARY removed — thread_local g_inPropertyFind
             // triggers Bionic TLS cleanup abort() when the .so is dlclose'd on Android <14.
@@ -4302,6 +4337,24 @@ public:
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (!g_isTargetApp) return;
+
+        // MemFD postcheck: verify if /proc/cpuinfo bind mount survived
+        // FORCE_DENYLIST_UNMOUNT + specialization. Reads first line to confirm.
+        {
+            FILE* cpuf = fopen("/proc/cpuinfo", "r");
+            if (cpuf) {
+                char line[256] = {};
+                if (fgets(line, sizeof(line), cpuf)) {
+                    // Strip trailing newline
+                    size_t len = strlen(line);
+                    if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
+                    LOGE("MemFD postcheck: /proc/cpuinfo first line = '%s'", line);
+                }
+                fclose(cpuf);
+            } else {
+                LOGE("MemFD postcheck: failed to open /proc/cpuinfo (errno=%d)", errno);
+            }
+        }
 
         // PR56: obtener JNIEnv desde g_jvm (ya no viene como parámetro)
         JNIEnv *env = nullptr;
@@ -5556,14 +5609,80 @@ static bool applySusfsCmdline() {
                   "/data/adb/.omni_data/.cmdline 2>/dev/null") == 0;
 }
 
+// PIF Hijacking: Write OmniShield profile data directly to /data/adb/pif.prop.
+// Selectively updates only hardware/cosmetic keys — preserves user settings
+// (spoofBuild, DEBUG, etc.) that PIF uses for its own configuration.
+// This is the PRIMARY injection path; boot-completed.sh is a backup for 2nd+ boots.
+static void writePifProps(const DeviceFingerprint& fp) {
+    const char* pifPath = "/data/adb/pif.prop";
+
+    struct KV { const char* key; const char* val; };
+    KV pifKeys[] = {
+        {"FINGERPRINT",    fp.fingerprint},
+        {"MANUFACTURER",   fp.manufacturer},
+        {"MODEL",          fp.model},
+        {"BRAND",          fp.brand},
+        {"PRODUCT",        fp.product},
+        {"DEVICE",         fp.device},
+        {"RELEASE",        fp.release},
+        {"ID",             fp.buildId},
+        {"INCREMENTAL",    fp.incremental},
+        {"SECURITY_PATCH", fp.securityPatch},
+    };
+    constexpr int NUM_KEYS = 10;
+
+    // Read existing file content (preserve user settings)
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(pifPath);
+        std::string line;
+        while (std::getline(in, line)) {
+            lines.push_back(line);
+        }
+    }
+
+    // Update existing lines in-place, track which keys were updated
+    bool updated[NUM_KEYS] = {};
+    for (auto& line : lines) {
+        for (int i = 0; i < NUM_KEYS; i++) {
+            std::string prefix = std::string(pifKeys[i].key) + "=";
+            if (line.compare(0, prefix.size(), prefix) == 0) {
+                line = prefix + pifKeys[i].val;
+                updated[i] = true;
+                break;
+            }
+        }
+    }
+
+    // Append keys that didn't exist
+    for (int i = 0; i < NUM_KEYS; i++) {
+        if (!updated[i] && pifKeys[i].val[0] != '\0') {
+            lines.push_back(std::string(pifKeys[i].key) + "=" + pifKeys[i].val);
+        }
+    }
+
+    // Write back
+    FILE* f = fopen(pifPath, "w");
+    if (!f) {
+        LOGE("PIF: failed to open %s for writing (errno=%d)", pifPath, errno);
+        return;
+    }
+    for (auto& line : lines) {
+        fprintf(f, "%s\n", line.c_str());
+    }
+    fclose(f);
+    chmod(pifPath, 0644);
+}
+
 static void writeProfileProps(const DeviceFingerprint& fp,
                               const std::string& profileName, long masterSeed) {
-    // PR74: ONLY write runtime properties safe for global resetprop.
-    // Identity properties (ro.product.*, ro.build.*, ro.hardware.*, fingerprints)
-    // are NOT included — resetprop on those breaks MIUI/system UI because it's global.
-    // Identity spoofing is already handled by Zygisk JNI hooks in scoped apps.
-    // This file covers properties that system_server reads via Binder (gsm.*, vendor.*),
-    // plus serial/IMEI suppression and MediaTek vendor property suppression.
+    // PR74+PR95: Global resetprop for properties safe to modify system-wide.
+    // Identity properties (ro.product.model/brand/manufacturer/device/name,
+    // ro.build.fingerprint, ro.odm.build.fingerprint, ro.build.description)
+    // are NOT included — resetprop on those breaks MIUI/system UI (PR83).
+    // Hardware props (ro.hardware, ro.board.platform) are NOT included — breaks HAL loading.
+    // This file covers: telephony/gsm, build metadata (dates, IDs, incremental, host),
+    // security patches, marketnames, misc identifiers, and MediaTek suppression.
     FILE* f = fopen("/data/adb/.omni_data/.profile_props", "w");
     if (!f) return;
 
@@ -5621,6 +5740,93 @@ static void writeProfileProps(const DeviceFingerprint& fp,
 
     // PR75b: Market name — leaks real "Redmi 9" in property trie
     fprintf(f, "ro.product.marketname=%s\n", fp.model);
+
+    // ── PR95: Dual-elimination resetprop ─────────────────────────────
+    // VDInfos reads /dev/__properties__/* via direct syscalls, bypassing
+    // Dobby hooks and patchPropertyPages mremap patches.  Only resetprop
+    // (which modifies the GLOBAL property area) eliminates dual readings.
+    // These are all safe metadata props — NOT identity/fingerprint/hardware
+    // which would break MIUI.
+
+    // A) Build metadata base
+    fprintf(f, "ro.build.display.id=%s\n", fp.display);
+    fprintf(f, "ro.build.host=%s\n", fp.buildHost);
+    fprintf(f, "ro.build.user=%s\n", fp.buildUser);
+    fprintf(f, "ro.build.flavor=%s\n", fp.buildFlavor);
+    fprintf(f, "ro.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.build.version.security_patch=%s\n", fp.securityPatch);
+
+    // B) Build dates UTC — all partitions
+    fprintf(f, "ro.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.vendor.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.odm.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.product.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.system.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.system_ext.build.date.utc=%s\n", fp.buildDateUtc);
+    fprintf(f, "ro.bootimage.build.date.utc=%s\n", fp.buildDateUtc);
+
+    // C) Build dates human-readable — all partitions
+    {
+        time_t t = 0;
+        try { t = std::stol(fp.buildDateUtc); } catch(...) {}
+        if (t > 0) {
+            struct tm tm_buf;
+            gmtime_r(&t, &tm_buf);
+            char date_str[64];
+            strftime(date_str, sizeof(date_str), "%a %b %e %H:%M:%S UTC %Y", &tm_buf);
+            fprintf(f, "ro.build.date=%s\n", date_str);
+            fprintf(f, "ro.vendor.build.date=%s\n", date_str);
+            fprintf(f, "ro.odm.build.date=%s\n", date_str);
+            fprintf(f, "ro.product.build.date=%s\n", date_str);
+            fprintf(f, "ro.system.build.date=%s\n", date_str);
+            fprintf(f, "ro.system_ext.build.date=%s\n", date_str);
+            fprintf(f, "ro.bootimage.build.date=%s\n", date_str);
+        }
+    }
+
+    // D) Build IDs — all partitions
+    fprintf(f, "ro.vendor.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.odm.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.product.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.system.build.id=%s\n", fp.buildId);
+    fprintf(f, "ro.system_ext.build.id=%s\n", fp.buildId);
+
+    // E) Incremental versions — all partitions
+    fprintf(f, "ro.vendor.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.odm.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.product.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.system.build.version.incremental=%s\n", fp.incremental);
+    fprintf(f, "ro.system_ext.build.version.incremental=%s\n", fp.incremental);
+
+    // F) Security patches — vendor/odm variants
+    fprintf(f, "ro.vendor.build.security_patch=%s\n", fp.securityPatch);
+    fprintf(f, "ro.vendor.build.version.security_patch=%s\n", fp.securityPatch);
+    fprintf(f, "ro.odm.build.security_patch=%s\n", fp.securityPatch);
+    fprintf(f, "ro.odm.build.version.security_patch=%s\n", fp.securityPatch);
+
+    // G) Misc identifiers
+    fprintf(f, "ro.fota.oem=%s\n", fp.manufacturer);
+    fprintf(f, "ro.product.cert=%s\n", fp.model);
+    fprintf(f, "ro.product.mod_device=%s\n", fp.product);
+    fprintf(f, "ro.build.product=%s\n", fp.product);
+    fprintf(f, "ro.boot.product.hardware.sku=%s\n", fp.device);
+    fprintf(f, "ro.boot.rsc=%s\n", fp.device);
+    fprintf(f, "ro.product.locale=en-US\n");
+    fprintf(f, "ro.baseband=%s\n", fp.radioVersion);
+
+    // I) Timezone — eliminate dual reading (hook returns spoofed, property area has real)
+    {
+        std::string tz = omni::engine::getTimezoneForProfile(masterSeed);
+        fprintf(f, "persist.sys.timezone=%s\n", tz.c_str());
+    }
+
+    // H) Market name — partition variants (root already done above)
+    fprintf(f, "ro.product.odm.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.product.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.system.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.system_ext.marketname=%s\n", fp.model);
+    fprintf(f, "ro.product.vendor.marketname=%s\n", fp.model);
 
     // PIF Hijacking Properties (Prefixed with # so resetprop ignores them)
     fprintf(f, "#PIF_FINGERPRINT=%s\n", fp.fingerprint);
@@ -5738,7 +5944,16 @@ static void companion_handler(int client) {
 
                     writeProfileProps(*fp_ptr, profileName, masterSeed);
 
-                    // 3. Apply resetprop immediately (background) — fixes first-boot
+                    // 3. PIF Hijacking: inject profile into /data/adb/pif.prop
+                    // This is the primary injection path — boot-completed.sh is
+                    // only a backup for 2nd+ boots before any scoped app launches.
+                    writePifProps(*fp_ptr);
+                    // Kill GMS to force re-read of pif.prop
+                    system("killall com.google.android.gms.unstable 2>/dev/null &");
+                    LOGE("PIF: injected profile '%s' into /data/adb/pif.prop",
+                         profileName.c_str());
+
+                    // 4. Apply resetprop immediately (background) — fixes first-boot
                     // race condition where boot-completed.sh runs before .profile_props exists
                     system("sh -c '"
                         "RP=/data/adb/ksu/bin/resetprop; "

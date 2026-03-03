@@ -1,44 +1,48 @@
-# Julia.md — OmniShield v12.9.58 Technical Reference
+# Julia.md — OMNI-Shield v13.0 Technical Reference
 
-**Version:** v12.9.65 (The Void)
-**Last updated:** 2026-03-02 (PR89: Re-hook execve/posix_spawn in late-loaded libraries to intercept getprop subprocesses)
+**Version:** v13.0 (The Void)
+**Author:** Legba
+**Last updated:** 2026-03-03 (PR95: Dual property elimination via expanded resetprop + timezone fix)
 
 ---
 
 ## 1. Architecture Overview
 
-OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the native layer. It intercepts ~49 libc/JNI/HAL functions via Dobby inline hooks and Zygisk `hookJniNativeMethods`, projecting a complete fake device fingerprint to detection apps, Play Integrity, and DRM systems.
+OMNI-Shield is a Zygisk module (C++17, ARM64) that spoofs device identity at the native layer. It intercepts ~55 libc/JNI/HAL functions via Dobby inline hooks, ~6 via Zygisk PLT hooks, and ~40 Java methods via `hookJniNativeMethods`, projecting a complete fake device fingerprint to detection apps, Play Integrity, and DRM systems.
 
 ### Spoofing Layers (bottom-up)
 
 | Layer | What | How |
 |-------|------|-----|
-| 1. Properties | `__system_property_get`, `__system_property_read_callback`, `__system_property_read`, `SystemProperties.native_get` JNI | 168+ keys mapped to profile fields |
-| 2. VFS | `openat`, `read`, `fopen` (memfd for `/proc/cpuinfo`) | Fake `/proc/{cpuinfo,version,cmdline,status}`, `/sys/{cpu,battery,thermal,net}` |
-| 3. Subprocess | `execve`, `posix_spawn`, `posix_spawnp` | memfd + orig_posix_spawn for intercepted commands; direct write+_exit for execve |
-| 4. JNI Fields | `Build.*`, `Build.VERSION.*` static fields via `SetStaticObjectField` | 25+ fields overwritten in `postAppSpecialize` |
-| 5. JNI Methods | `hookJniNativeMethods` on Telephony, Location, Sensor, Network, Camera, MediaCodec | ~40 Java methods hooked |
-| 6. HAL/Driver | `eglQueryString`, `glGetString`, `vkGetPhysicalDeviceProperties`, `clGetDeviceInfo` | GPU identity, OpenGL ES version |
-| 7. Stealth | `dl_iterate_phdr` filter, `/proc/self/maps` filter, `remapModuleMemory()` (file-backed → anonymous) | Module invisible in memory maps |
+| 1. Properties | `__system_property_get`, `_read_callback`, `_read`, `_find`, `_foreach`, `SystemProperties.native_get` JNI | 200+ keys mapped to profile fields + `patchPropertyPages()` mremap |
+| 2. Global Properties | `writeProfileProps()` → resetprop ~75 keys globally | Eliminates dual readings for forensic tools (PR95) |
+| 3. VFS | `openat`, `read`, `fopen` (memfd for `/proc/cpuinfo`) | Fake `/proc/{cpuinfo,version,cmdline,status}`, `/sys/{cpu,battery,thermal,net}` |
+| 4. Subprocess | `execve`, `posix_spawn`, `posix_spawnp` | memfd + orig_posix_spawn for intercepted commands |
+| 5. JNI Fields | `Build.*`, `Build.VERSION.*` static fields via `SetStaticObjectField` | 25+ fields overwritten in `postAppSpecialize` |
+| 6. JNI Methods | `hookJniNativeMethods` on Telephony, Location, Sensor, Network, Camera, MediaCodec | ~40 Java methods hooked |
+| 7. HAL/Driver | `eglQueryString`, `glGetString`, `vkGetPhysicalDeviceProperties`, `clGetDeviceInfo` | GPU identity, OpenGL ES version |
+| 8. Stealth | `dl_iterate_phdr` filter, `/proc/self/maps` filter, `remapModuleMemory()` | Module invisible in memory maps |
+| 9. Kernel | SUSFS `set_uname` + `set_cmdline_or_bootconfig` | Kernel version + /proc/cmdline spoofing |
 
 ### Key Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `jni/main.cpp` | ~3700 | Core module: all hooks, profile loading, companion process |
-| `jni/omni_engine.hpp` | ~405 | Identity generators: IMEI (Luhn), ICCID, IMSI, MAC, Serial, GPS, UUID |
-| `jni/omni_profiles.h` | ~726 | `DeviceFingerprint` struct (58 fields) + 40 device profiles |
-| `jni/include/zygisk.hpp` | - | Zygisk API v3 header (AppSpecializeArgs, REGISTER_ZYGISK_MODULE) |
+| `jni/main.cpp` | ~5985 | Core module: all hooks, profile loading, companion, patchPropertyPages, writePifProps |
+| `jni/omni_engine.hpp` | ~410 | Identity generators: IMEI (Luhn), ICCID, IMSI, MAC, Serial, GPS, UUID, Timezone, Carrier |
+| `jni/omni_profiles.h` | ~726 | `DeviceFingerprint` struct (58 fields) + 40 device profiles (8 brands) |
+| `jni/include/zygisk.hpp` | - | Zygisk API v3 header |
 | `jni/include/dobby.h` | - | Dobby hooking framework header |
+| `sepolicy.rule` | 2 | SELinux rules for zygote mount on /proc/cpuinfo |
+| `service.sh` | ~187 | Boot service: SSAID injection, proxy auto-start, modem prop stabilizer |
+| `boot-completed.sh` | ~82 | 2nd+ boot resetprop application + PIF hijacking |
+| `post-fs-data.sh` | ~54 | Pre-Zygote SUSFS uname + cmdline forgery |
+| `customize.sh` | ~25 | Magisk/KernelSU install script |
 | `proxy_manager.sh` | ~418 | Transparent SOCKS5 proxy via hev-socks5-tunnel + iptables |
-| `service.sh` | ~184 | Boot service: SSAID injection, permissions, proxy auto-start, modem prop stabilizer |
-| `customize.sh` | ~23 | Magisk/KernelSU install script: chmod, dir creation |
 | `webroot/js/app.js` | ~1201 | WebUI: config management, proxy control, scope picker |
-| `webroot/index.html` | ~802 | WebUI HTML: tabs for Device, IDs, Telephony, Location, Proxy, Settings |
-| `webroot/css/style.css` | ~802 | Dark-themed WebUI styles |
-| `tests/simulate_proxy.sh` | ~375 | 57-test simulation suite for proxy lifecycle |
-| `CMakeLists.txt` | - | Build config: NDK r25c, arm64-v8a, android-30, c++_static |
-| `.github/workflows/build.yml` | - | CI: NDK build + tun2socks download + ZIP packaging |
+| `webroot/index.html` | ~802 | WebUI HTML |
+| `CMakeLists.txt` | - | Build config: C++17, links log + vulkan |
+| `.github/workflows/build.yml` | - | CI: NDK r25c build + tun2socks + ZIP packaging |
 
 ### Config Path
 
@@ -49,7 +53,7 @@ OmniShield is a Zygisk module (C++17, ARM64) that spoofs device identity at the 
 Key-value format, read by companion process (root daemon via Zygisk IPC) or direct fallback.
 
 ```properties
-profile=Samsung Galaxy A31
+profile=Samsung Galaxy A12
 master_seed=1234567890
 scoped_apps=com.snapchat.android,com.instagram.android
 jitter=true
@@ -69,99 +73,87 @@ proxy_dns=1.1.1.1
 
 ```
 Zygote boot
-  ├─ dlopen(omnishield.so) → onLoad(Api, JNIEnv)
-  │    └─ Save g_api, g_jvm globals. NO hooks here.
-  │
-  ├─ REGISTER_ZYGISK_COMPANION → companion_handler (root daemon)
-  │    └─ Reads .identity.cfg via socket IPC (bypasses SELinux)
-  │
-  ├─ Fork app process
-  │    ├─ preAppSpecialize(AppSpecializeArgs*)
-  │    │    ├─ readConfigViaCompanion() → fallback readConfig()
-  │    │    ├─ Parse scoped_apps, match nice_name
-  │    │    ├─ If NOT target → DLCLOSE_MODULE_LIBRARY (unload .so)
-  │    │    ├─ If target → FORCE_DENYLIST_UNMOUNT
-  │    │    └─ WebView spoof check (webview_spoof=true + process contains "webview")
-  │    │
-  │    └─ postAppSpecialize(const AppSpecializeArgs*)
-  │         ├─ Install ALL Dobby hooks (~37 native functions)
-  │         ├─ Install ALL JNI hooks (Telephony, Location, Sensor, Network, Camera)
-  │         ├─ Sync Build.* and Build.VERSION.* static fields via JNI
-  │         ├─ Override System.setProperty("http.agent", spoofedUA)
-  │         ├─ Override System.setProperty("os.version", spoofedKernel)
-  │         └─ remapModuleMemory() → anonymous mappings
-  │
-  └─ Fork system_server
-       └─ preServerSpecialize → DLCLOSE_MODULE_LIBRARY (no hooks in system_server)
+  |-- dlopen(omnishield.so) -> onLoad(Api, JNIEnv)
+  |    \-- Save g_api, g_jvm globals. NO hooks here.
+  |
+  |-- REGISTER_ZYGISK_COMPANION -> companion_handler (root daemon)
+  |    |-- Reads .identity.cfg via socket IPC
+  |    |-- writeProfileProps() -> ~75 resetprop entries to .profile_props
+  |    |-- writePifProps() -> inject profile into /data/adb/pif.prop
+  |    |-- system("resetprop -n ...") -> apply props globally
+  |    \-- system("killall com.google.android.gms.unstable")
+  |
+  |-- Fork app process
+  |    |-- preAppSpecialize(AppSpecializeArgs*)
+  |    |    |-- readConfigViaCompanion() -> fallback readConfig()
+  |    |    |-- Parse scoped_apps, match nice_name
+  |    |    |-- If NOT target -> DLCLOSE_MODULE_LIBRARY (unload .so)
+  |    |    |-- If target -> FORCE_DENYLIST_UNMOUNT
+  |    |    \-- MemFD bind mount /proc/cpuinfo (if profile found)
+  |    |
+  |    \-- postAppSpecialize(const AppSpecializeArgs*)
+  |         |-- Install ALL Dobby hooks (~55 native functions)
+  |         |-- Install ALL PLT hooks (6 functions across ~100 ELFs)
+  |         |-- patchPropertyPages() -> mremap atomic page replacement
+  |         |-- Install ALL JNI hooks (Telephony, Location, Sensor, Network, Camera)
+  |         |-- Sync Build.* and Build.VERSION.* static fields via JNI
+  |         |-- Override System.setProperty("http.agent", spoofedUA)
+  |         |-- Override System.setProperty("os.version", spoofedKernel)
+  |         \-- remapModuleMemory() -> anonymous mappings
+  |
+  \-- Fork system_server
+       \-- preServerSpecialize -> DLCLOSE_MODULE_LIBRARY (no hooks in system_server)
 ```
 
 ---
 
 ## 3. Critical Invariants
 
-These rules are derived from past crashes and regressions. Violating any will cause zygote crashes, spoofing failures, or detection.
-
 ### Zygisk ABI
 
-1. **No virtual destructor** in `Module` class (`zygisk.hpp`). Adding `virtual ~Module()` shifts the vtable and causes SIGSEGV in `forkSystemServer`. The 5 pure virtuals (`onLoad`, `preAppSpecialize`, `postAppSpecialize`, `preServerSpecialize`, `postServerSpecialize`) must be the only vtable entries.
+1. **No virtual destructor** in `Module` class. Adding `virtual ~Module()` shifts vtable -> SIGSEGV in `forkSystemServer`.
 
-2. **Never move Dobby hooks to `onLoad`**. `onLoad` runs in the Zygote parent process pre-fork. Hooks installed there affect ALL child processes (including system_server and non-target apps).
+2. **Never move Dobby hooks to `onLoad`**. Hooks there affect ALL child processes.
 
-3. **`REGISTER_ZYGISK_MODULE(OmniModule)`** — no manual entry points. No `registerModule()` (v2 API).
+3. **`REGISTER_ZYGISK_MODULE(OmniModule)`** -- no manual entry points.
 
 ### Dobby Hooks
 
-4. **Always use `DobbySymbolResolver("libc.so", "symbol")`** for libc hooks. Never `nullptr` (searches VDSO → mprotect on read-only memory → SIGSEGV). Never pass function pointers directly (PLT stubs → wrong address).
+4. **Always use `DobbySymbolResolver("libc.so", "symbol")`** for libc hooks. Never `nullptr`.
 
-5. **Every hook function must start with `if (!orig_XXX)`** null guard. If DobbyHook fails silently, `orig_XXX` stays null.
+5. **Every hook function must start with `if (!orig_XXX)`** null guard.
 
-6. **Critical libc hooks** (`openat`, `read`, `close`, `lseek`, `stat`, `fstatat`) must fall back to `syscall(__NR_xxx)` when `orig_XXX` is null. Return `-1` is fatal for boot.
+6. **Critical libc hooks** (`openat`, `read`, `close`, `lseek`, `stat`, `fstatat`) must fall back to `syscall(__NR_xxx)` when `orig_XXX` is null.
 
-7. **Never hook both `open` and `openat`**. Bionic's `open()` calls `openat()` internally → infinite recursion. Only hook `openat`. Use `orig_openat(AT_FDCWD, ...)` as terminal in `my_open`.
+7. **Never hook both `open` and `openat`**. Bionic's `open()` calls `openat()` internally.
 
-### PLT Hooks (Fix8+Fix9)
+### PLT Hooks
 
-7b. **`execve`, `posix_spawn`, `posix_spawnp`, `__system_property_read` use Zygisk PLT hooks**, not Dobby. On aarch64 Bionic these are thin syscall wrappers (~4-8 instructions) — too small for Dobby's 12-byte trampoline. DobbyHook returns `ret=0` but `orig=0x0` and handlers never trigger. PLT hooks modify GOT pointers (always 8 bytes) in calling libraries via `pltHookRegister`/`pltHookCommit`. Dobby is only used as fallback if PLT hooks are unavailable.
+7b. **`execve`, `posix_spawn`, `posix_spawnp`, `__system_property_read`** use Zygisk PLT hooks (GOT pointer patching). Too small for Dobby trampoline on aarch64.
 
-7c. **`my_system_property_read` has callback fallback**: when `orig_system_property_read` is NULL (Dobby trampoline failed), uses `orig_system_property_read_callback` to extract property name/value from `prop_info` pointer.
+7c. **`orig_*` pointers MUST be pre-resolved via `dlsym(RTLD_DEFAULT)`** before PLT hooks. PLT overwrites across ~100 ELFs can corrupt `oldFunc`.
 
-7d. **Fix9: `orig_*` pointers MUST be pre-resolved via `dlsym(RTLD_DEFAULT)`** before PLT hooks. `pltHookRegister` across ~100 ELFs overwrites `oldFunc` for each match — the last write may contain a lazy-binding stub (garbage). Use dummy variables for PLT hook `oldFunc` parameter.
+7d. **`__system_property_find` / `__system_property_foreach` Dobby inline + PLT hook are MUTUALLY EXCLUSIVE.** `g_propFindInlineHooked` / `g_propForeachInlineHooked` guards prevent infinite recursion.
 
-7e. **Fix9: `enumerateLoadedElfs` MUST filter own module** (`isHiddenPath`). Self-hooking causes GOT entries in our own .so to point back to our hook functions → potential infinite recursion.
+7e. **`dlsym` hook MUST be installed AFTER all `dlsym`/`DobbySymbolResolver` calls.**
 
-7f. **Fix9: Intercepted subprocess commands use memfd + `orig_posix_spawn`** with the ORIGINAL `file_actions` and `attrp`. Direct `fork()` + `write(STDOUT_FILENO)` bypasses Java's pipe infrastructure (`posix_spawn_file_actions_t` with `dup2` for stdin/stdout/stderr). The memfd approach: generate spoofed content → write to `memfd_create("s", 0)` → call `orig_posix_spawn(pid, "/system/bin/cat", file_actions, attrp, ["cat", "/proc/self/fd/<N>"])` → Java's pipes work correctly.
-
-7g. **PR86: `__system_property_find` Dobby inline + PLT hook are MUTUALLY EXCLUSIVE.** If the Dobby inline hook succeeds (`g_propFindInlineHooked = true`), the PLT hook for `__system_property_find` MUST NOT be registered. Having both active causes the Fix10 crash pattern: PLT-hooked GOT → `my_system_property_find` → calls `orig_system_property_find` → Dobby-patched entry → back to `my_system_property_find` → infinite recursion → SIGSEGV.
-
-7h. **PR86: `dlsym` hook MUST be installed AFTER all `dlsym`/`DobbySymbolResolver` calls.** Our own code uses `dlsym(RTLD_DEFAULT, ...)` to pre-resolve `orig_*` pointers. If the `dlsym` hook is active during this resolution, `my_dlsym` would return our hook functions instead of the real ones, corrupting `orig_*` pointers. Install `dlsym` hook last, after all symbol resolution is complete. The `thread_local g_inDlsym` guard prevents recursion within the hook itself.
-
-7i. **PR87/PR89: `android_dlopen_ext`/`dlopen` hooks re-apply PLT hooks to late-loaded libraries.** After a new .so is loaded, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find`, `__system_property_read`, `__system_property_foreach`, `execve`, `posix_spawn`, and `posix_spawnp` (PR89: added spawn functions to prevent late-loaded native libs from launching unintercepted getprop subprocesses). Uses `thread_local g_dlopenReapplyDepth` as recursion guard (nested dlopen for dependency loading) and `g_reapplyMutex` for thread safety. MUST be installed AFTER `installPltHooks()` and the `dlsym` hook. The `pltHookCommit()` call is idempotent — xhook_refresh skips already-patched GOT entries.
-
-7j. **PR88: `__system_property_foreach` Dobby inline + PLT hook are MUTUALLY EXCLUSIVE** (same pattern as invariant 7g). If the Dobby inline hook succeeds (`g_propForeachInlineHooked = true`), the PLT hook for `__system_property_foreach` MUST NOT be registered. The Dobby hook MUST be installed BEFORE `installPltHooks()` so the guard flag is set in time. The wrapper callback extracts the property name from each real `prop_info*`, calls `my_system_property_find(name)` to get the (possibly spoofed) `prop_info*`, and passes it to the user's original callback.
+7f. **`android_dlopen_ext`/`dlopen` hooks re-apply PLT hooks to late-loaded libraries** (PR87/PR89). `reapplyPltHooksForNewLibraries()` re-hooks `__system_property_find`, `_read`, `_foreach`, `execve`, `posix_spawn`, `posix_spawnp`.
 
 ### Property Spoofing
 
-8. **`my_system_property_get` must NEVER early-return** before the spoofing logic. It's the central hub — `my_system_property_read_callback` and `my_SystemProperties_native_get` both depend on it. If `orig_system_property_get` is null, initialize `value[0] = '\0'` and continue to profile logic.
+8. **`my_system_property_get` must NEVER early-return** before spoofing logic. It's the central hub for `_read_callback` and `native_get`.
 
-9. **Three subprocess vectors** are hooked: `execve`, `posix_spawn`, `posix_spawnp`. Android 10+ uses `posix_spawn` for `Runtime.exec()`. All three detect `getprop`, `cat`, `sh -c getprop`, `su -c getprop` patterns.
+9. **`patchPropertyPages()`** uses `mremap(MREMAP_FIXED)` for atomic page replacement. Updates serial field (len << 24) for correct value length reporting.
 
-10. **`shouldHide(key)` operates on VALUES**, not keys. Called at lines 889, 1329, 2449, 2520, 2632. Input is lowercased via `toLowerStr()`. Currently filters: `mediatek`, `lancelot`, `huaqin`, `mt6769`, `moly.`. Exception: allows these through when target profile is Xiaomi/MediaTek.
+10. **`shouldHide(key)` operates on VALUES**, not keys. Filters: `mediatek`, `lancelot`, `huaqin`, `mt6769`, `moly.`. Exception for Xiaomi/MediaTek target profiles.
 
 ### JNI Safety
 
-11. **Always call `env->ExceptionCheck() / ExceptionClear()`** after `hookJniNativeMethods` and after any `CallStaticObjectMethod`. Pending JNI exceptions cascade and silently corrupt all subsequent JNI operations.
+11. **Always `ExceptionCheck() / ExceptionClear()`** after `hookJniNativeMethods`.
 
-12. **Always null-check** before `NewStringUTF(ptr)`. Passing `nullptr` → fatal JNI error.
+12. **Always null-check** before `NewStringUTF(ptr)`.
 
-13. **Self-reference check** after `hookJniNativeMethods`: if `orig_XXX` still points to `my_XXX`, the hook failed and calling `orig_XXX` creates infinite recursion.
-
-### Config & Scope
-
-14. **Companion process** (`readConfigViaCompanion`) is primary config reader. Direct file read is fallback only. Never remove the fallback — it's the safety net.
-
-15. **`ksu_exec`** in app.js must use the global `ksu` object (injected by KernelSU via `@JavascriptInterface`), NOT `import('kernelsu')`. The import fails on some ROMs/KernelSU builds.
-
-16. **SSAID derivation** is per-package-name via `cksum` XOR `master_seed`. Position-independent — reordering scope doesn't rotate SSAIDs.
+13. **Self-reference check** after `hookJniNativeMethods`: if `orig_XXX` still points to `my_XXX`, the hook failed.
 
 ---
 
@@ -174,211 +166,260 @@ These rules are derived from past crashes and regressions. Violating any will ca
 - **13 floats:** accel/gyro/mag ranges+resolutions, sensor physical sizes, focal lengths, apertures (rear+front)
 - **3 bools:** hasHeartRateSensor, hasBarometerSensor, hasFingerprintWakeupSensor
 
-40 profiles in static POD array. Zero heap allocation. Thread-safe lazy init via Meyer's Singleton (`getDeviceProfiles()`).
+40 profiles in static POD array across 8 brands: Xiaomi (12), Samsung (10), OnePlus (4), Google Pixel (4), Motorola (4), Nokia (2), Realme (3), ASUS (1). Zero heap allocation.
 
 ---
 
-## 5. Transparent Proxy System (PR72)
+## 5. Engine Functions (`jni/omni_engine.hpp`)
 
-### Components
+23 inline functions for deterministic identity generation:
 
-```
-WebUI (app.js) ──ksu_exec──▶ proxy_manager.sh {start|stop|status}
-                                    │
-                              ┌─────▼──────┐
-                              │ tun2socks   │ (hev-socks5-tunnel, ARM64 static binary)
-                              │ TUN: tun0│ (172.19.0.1/30, MTU 8500)
-                              │ SOCKS5 proxy │
-                              └─────┬──────┘
-                                    │
-                           iptables rules:
-                           ├─ mangle OUTPUT: mark UID packets → 0x1337
-                           ├─ nat OUTPUT: DNAT DNS → proxy_dns:53
-                           └─ ip6tables: DROP all IPv6 (leak prevention)
-```
-
-### Shell Constraints (Android mksh)
-
-- No `flock`, no `exec N>file` (high FDs). Use `mkdir -p` atomic locking with PID-based stale detection.
-- No bash arrays, no `<<<`, no `read -ra`. Use `IFS=','` + positional params.
-- `toybox curl` can't follow HTTPS redirects. Binary bundled in CI instead.
-- `/dev/net/tun` may not exist. Create with `mknod /dev/net/tun c 10 200`.
-- SELinux blocks unsigned binaries. `chcon u:object_r:system_file:s0` on tun2socks.
-
-### Test Suite
-
-`tests/simulate_proxy.sh` — 57 tests across 9 categories: config parsing, YAML generation (with Python YAML validation), lock mechanism, mock daemon, iptables construction, key consistency (JS↔Shell), HTML/JS ID cross-reference, build workflow completeness.
+| Function | Purpose |
+|----------|---------|
+| `generateValidImei(profile, seed)` | IMEI with Luhn checksum + brand-specific TAC pool |
+| `generateValidIccid(profile, seed)` | ITU-T E.118 ICCID (19 digits) |
+| `generateValidImsi(profile, seed)` | USA carriers: T-Mobile, AT&T, Verizon, Sprint, US Cellular |
+| `generatePhoneNumber(profile, seed)` | NANP format (+1 NPA-NXX-XXXX) |
+| `generateRandomMac(brand, seed)` | Brand-specific OUI MAC address |
+| `generateRandomSerial(brand, seed, patch)` | Brand-specific serial number |
+| `generateWidevineId(seed)` | 16-byte hex Widevine device ID |
+| `generateLocationForRegion(profile, seed)` | GPS coords in 5 US cities |
+| `generateAltitudeForRegion(profile, seed)` | Altitude (meters ASL) |
+| `getTimezoneForProfile(seed)` | US timezone (New_York, Los_Angeles, Chicago, Phoenix) |
+| `getCarrierNameForImsi(profile, seed)` | Map MCC/MNC to carrier name |
+| `getRilVersionForProfile(profile)` | RIL version (MTK, Samsung Exynos, AOSP Qualcomm) |
+| `generateTls13CipherSuites(seed)` | Shuffled TLS 1.3 cipher suites |
+| `generateTls12CipherSuites(seed)` | Shuffled TLS 1.2 cipher suites |
+| `getGlVersionForProfile(fp)` | OpenGL ES version string |
+| `generateBatteryTemp/Voltage(seed)` | Realistic battery telemetry |
 
 ---
 
-## 6. Known Limitations
+## 6. Hooked Functions Catalog
 
-| Vector | Status | Reason |
-|--------|--------|--------|
-| WebView UA (`getUserAgentString`) | Partial | `Build.MODEL` is spoofed via `SetStaticObjectField`, but Chromium caches UA during Zygote init before hooks. Fix requires DEX injection (LSPosed/Pine). |
-| `Settings.Global.getString("device_name")` | Not hooked | Pure Java method via Binder IPC to ContentProvider. No native symbol in `libandroid_runtime.so` for Dobby. Property-level `device_name` IS hooked. |
-| ENV variables (`BOOTCLASSPATH`, `DEX2OATBOOTCLASSPATH`) | Cannot fix | Set by Zygote pre-fork. Contain MediaTek/MIUI jars. Immutable post-init. |
-| GPU hardware (Mali vs Adreno) | Cannot fix | Physical hardware. `glGetString`/`eglQueryString` are hooked for string-level spoofing but hardware capabilities differ. |
-| Network info (WiFi IP, DNS, speed) | Not hooked | Requires `NetworkCapabilities` + `LinkProperties` hooks. Separate PR. |
-| `getNetworkCountryIso` Binder path | Partial (PR86) | `resetprop` loop fixes property-based reads. Binder IPC to system_server may still read from RIL `ServiceState` directly on some ROMs. Full fix requires Xposed/LSPosed. |
-| Network interfaces via Netlink | Not hooked | VDInfo may use `RTM_GETLINK` Netlink sockets instead of `ioctl`/`getifaddrs` to enumerate interfaces. Would require `sendmsg`/`recvmsg` hooks with Netlink message filtering. |
+### Dobby Inline Hooks (~55)
 
----
+**libc (Properties):** `__system_property_get`, `__system_property_read_callback`, `__system_property_find`, `__system_property_foreach`
+**libc (File I/O):** `openat`, `read`, `close`, `lseek`, `lseek64`, `pread`, `pread64`, `fopen`, `readlinkat`, `readlink`, `readdir`
+**libc (Stat):** `stat`, `lstat`, `fstatat`, `statfs`, `statvfs`, `access`
+**libc (System):** `uname`, `clock_gettime`, `sysinfo`, `getauxval`, `getifaddrs`, `ioctl`, `fcntl`
+**libc (FD):** `dup`, `dup2`, `dup3`
+**libc (Process):** `posix_spawn`, `posix_spawnp`
+**Dynamic Linker:** `dlsym`, `android_dlopen_ext`, `dlopen`
+**Stealth:** `dl_iterate_phdr`
+**Graphics:** `eglQueryString` (libEGL), `glGetString` (libGLESv2), `vkGetPhysicalDeviceProperties` (libvulkan), `clGetDeviceInfo` (libOpenCL)
+**Crypto:** `SSL_CTX_set_ciphersuites`, `SSL_set1_tls13_ciphersuites`, `SSL_set_ciphersuites`, `SSL_set_cipher_list` (libssl)
+**Settings:** `SettingsSecure.getString` (4 overloads), `SettingsGlobal.getString` (4 overloads) (libandroid_runtime)
+**Sensor:** `Sensor.getName`, `Sensor.getVendor`
+**Camera:** `CameraMetadataNative.nativeReadValues`
+**Media:** `MediaCodec.native_setup`
 
-## 7. Hooked Functions Catalog
+### Zygisk PLT Hooks (6, fallback for thin syscall wrappers)
 
-### Zygisk PLT Hooks (Fix8+Fix9, primary for thin syscall wrappers)
+`execve`, `posix_spawn`, `posix_spawnp`, `__system_property_read`, `__system_property_find` (if Dobby inline fails), `__system_property_foreach` (if Dobby inline fails)
 
-**libc (Process):** execve, posix_spawn, posix_spawnp
-**libc (Properties):** __system_property_read, __system_property_find (fallback if Dobby inline fails), __system_property_foreach (PR88: fallback if Dobby inline fails)
-
-> These functions use PLT hooks (GOT pointer patching) because Dobby inline hooks fail on their thin aarch64 syscall wrappers. Fix9: originals pre-resolved via `dlsym`, own module excluded from ELF scan, intercepted commands use memfd+orig_posix_spawn to preserve Java pipe infrastructure. PR86: `__system_property_find` PLT hook only activates if the Dobby inline hook fails (mutual exclusion to prevent Fix10 recursion crash). PR88: `__system_property_foreach` PLT hook same pattern.
-
-### Dobby Native Hooks (~38, remaining)
-
-**libc (File I/O):** openat, read, close, lseek, lseek64, pread, pread64, fopen, readlinkat
-**libc (System):** uname, clock_gettime, access, stat, lstat, fstatat, sysinfo, readdir, getauxval, getifaddrs, ioctl, fcntl, dup, dup2, dup3
-**libc (Properties):** __system_property_get, __system_property_read_callback, __system_property_find (PR86: via `dlsym(RTLD_DEFAULT)`), __system_property_foreach (PR88: callback wrapper for property enumeration)
-**Dynamic Linker:** dlsym (PR86: defense-in-depth against dynamic symbol resolution bypass), android_dlopen_ext (PR87: re-apply PLT hooks to late-loaded .so), dlopen (PR87: same for native dlopen calls)
-**Stealth:** dl_iterate_phdr
-**Graphics:** eglQueryString (libEGL), glGetString (libGLESv2), vkGetPhysicalDeviceProperties (libvulkan), clGetDeviceInfo (libOpenCL)
-**Crypto:** SSL_CTX_set_ciphersuites, SSL_set1_tls13_ciphersuites, SSL_set_ciphersuites, SSL_set_cipher_list (libssl)
-**Hardware:** Sensor.getName, Sensor.getVendor (libsensorservice/libsensors)
-**Settings:** SettingsSecure.getString, SettingsSecure.getStringForUser (libandroid_runtime)
-**Camera:** CameraMetadataNative.nativeReadValues
-**Media:** MediaCodec.native_setup
-
-### JNI Method Hooks
+### JNI Method Hooks (~40)
 
 **Telephony (6):** getDeviceId, getSubscriberId, getSimSerialNumber, getLine1Number, getImei, getMeid
 **Location (9):** getLatitude, getLongitude, getAltitude, getAccuracy, getSpeed, getBearing, getTime, getElapsedRealtimeNanos, isFromMockProvider
-**Sensor (16):** getMaximumRange, getResolution, getPower, getMinDelay, getMaxDelay, getVersion, getFifoMaxEventCount, getFifoReservedEventCount, getName, getVendor, getStringType (×8 + custom sensor filter via getSensorList)
+**Sensor (16):** getMaximumRange, getResolution, getPower, getMinDelay, getMaxDelay, getVersion, getFifoMaxEventCount, getFifoReservedEventCount, getName, getVendor, getStringType + custom sensor filter via getSensorList
 **Network (8):** getType, getSubtype, getExtraInfo, isConnected, isAvailable, isRoaming, isWifiEnabled, startScan
 **SystemProperties (1):** native_get
-**Kernel (1):** uname (libcore/io/Linux — intercepts android.system.Os.uname())
+**Kernel (1):** uname (libcore/io/Linux)
 
 ---
 
-## 8. WebUI Architecture
+## 7. Property Spoofing Architecture
 
-KernelSU Manager hosts the WebUI in an Android WebView. The global `ksu` object provides root shell access via `ksu.exec(cmd, opts, callback)`.
+### Three-tier approach
 
-### Tabs
+| Tier | Mechanism | Scope | Bypass resistance |
+|------|-----------|-------|-------------------|
+| **Hooks** | `my_system_property_get` + `_read_callback` + `_find` + `_foreach` | Per-process (scoped apps only) | Standard API calls: 100%. Direct syscall reads: 0% |
+| **Page Patching** | `patchPropertyPages()` mremap(MREMAP_FIXED) | Per-process shared memory | In-process reads: 100%. Fresh mmap of /dev/__properties__/*: 0% |
+| **resetprop** | `writeProfileProps()` -> companion shell loop | System-wide global | All readers including forensic tools: 100% |
 
-| Tab | Key Element IDs | Function |
-|-----|-----------------|----------|
-| Device | `profile-select`, `apply-device` | Profile selection, Build.* preview |
-| IDs | `seed-input`, `apply-ids` | IMEI/ICCID/IMSI/MAC/Serial/AndroidID generation |
-| Telephony | `carrier-*`, `apply-telephony` | Carrier, IMSI pool, MCC/MNC |
-| Location | `lat-input`, `lng-input`, `apply-location` | GPS coordinates, city picker |
-| Proxy | `proxy-enabled`, `proxy-host`, `proxy-port`, `proxy-user`, `proxy-pass`, `proxy-dns`, `proxy-status-badge` | SOCKS5 transparent proxy |
-| Settings | `scoped-apps`, `webview-spoof`, `destroy-identity` | App scope, WebView toggle, identity wipe |
+### Properties in `my_system_property_get()` (~200+ keys)
 
-### State Management
+**Identity:** ro.product.{model,brand,manufacturer,device,name} + all partition variants (system, vendor, odm, product, system_ext) + for_attestation namespace
+**Fingerprints:** ro.build.fingerprint, ro.vendor.build.fingerprint, ro.odm.build.fingerprint, ro.system_ext.build.fingerprint, ro.product.build.fingerprint, ro.system.build.fingerprint
+**Build metadata:** display.id, host, user, flavor, id, tags, type, description, incremental, security_patch, release, codename, preview_sdk, date.utc, date (human-readable) -- all partition variants
+**Hardware:** ro.hardware, ro.board.platform, ro.boot.hardware, ro.hardware.chipname, ro.product.board, ro.soc.{manufacturer,model}, ro.boot.bootdevice
+**HAL:** ro.hardware.{gralloc,hwcomposer,memtrack,camera,keystore,audio,vulkan,egl}
+**Security:** ro.secure, ro.debuggable, ro.boot.verifiedbootstate, ro.boot.flash.locked, ro.boot.vbmeta.device_state, ro.secureboot.lockstate
+**Telephony:** gsm.{network.type,sim.state,version.baseband,version.ril-impl}, gsm.{sim.operator,operator}.{numeric,iso-country,alpha}, ro.telephony.default_network, ro.carrier
+**IMEI/Serial:** ro.serialno, ro.boot.serialno, ril.serialnumber, gsm.device.id, ro.ril.miui.imei{0,1}, ro.ril.oem.imei
+**DRM:** ro.mediadrm.device_id, drm.service.enabled
+**Display:** ro.sf.lcd_density, ro.product.display_resolution, ro.opengles.version
+**Locale:** ro.product.locale, persist.sys.locale, persist.sys.country, persist.sys.language, persist.sys.timezone
+**Network:** net.hostname, wifi.*, dhcp.wlan0.*, gsm.network.state
+**MediaTek suppression:** ro.mediatek.*, ro.vendor.mediatek.* (suppressed for non-MTK profiles)
+**MIUI suppression:** ro.miui.*, ro.vendor.miui.* (suppressed for non-Xiaomi profiles)
 
-All state lives in the `state` object in app.js. `saveConfig()` writes to `.identity.cfg` via `ksu_exec("printf '%s\\n' ... > file")`. `readConfig()` reads via `ksu_exec("cat file")`. Both verify via read-back.
+### Properties in `writeProfileProps()` (~75 resetprop'd globally)
 
-`smartApply(label)` saves config then `am force-stop` each scoped app for instant identity reload without reboot.
+**Telephony:** gsm.version.baseband, gsm.operator.*, gsm.sim.operator.*, gsm.version.ril-impl
+**IMEI:** ro.ril.oem.imei, ro.ril.miui.imei{0,1}
+**Hostname:** net.hostname
+**Vendor suppression:** vendor.gsm.serial, vendor.gsm.project.baseband, ro.vendor.mediatek.*, ro.mediatek.version.branch, ro.vendor.md_apps.load_verno
+**MIUI:** persist.sys.miui_optimization, persist.sys.device_name
+**Market names:** ro.product.marketname + 5 partition variants (odm, product, system, system_ext, vendor)
+**PR95 Build metadata:** ro.build.{display.id, host, user, flavor, id, version.incremental, version.security_patch}
+**PR95 Dates UTC (7 partitions):** ro.{build,vendor.build,odm.build,product.build,system.build,system_ext.build,bootimage.build}.date.utc
+**PR95 Dates human-readable (7 partitions):** ro.*.build.date (strftime from buildDateUtc)
+**PR95 Build IDs (5 partitions):** ro.{vendor,odm,product,system,system_ext}.build.id
+**PR95 Incrementals (5 partitions):** ro.*.build.version.incremental
+**PR95 Security patches (4):** ro.{vendor,odm}.build.{security_patch,version.security_patch}
+**PR95 Misc:** ro.fota.oem, ro.product.cert, ro.product.mod_device, ro.build.product, ro.boot.product.hardware.sku, ro.boot.rsc, ro.product.locale, ro.baseband, persist.sys.timezone
+
+### `patchPropertyPages()` (PR91)
+
+Atomic page replacement via `mremap(MREMAP_FIXED)`:
+1. Phase 1: Iterate ALL properties via `orig_system_property_foreach`. Compare `my_system_property_get(name)` vs real value.
+2. Phase 2: For each differing property, allocate temp page, memcpy, mremap atomically. Update serial field (len << 24) for value length.
+3. Phase 3: Restore PROT_READ on remapped pages.
+
+### `writePifProps()` (PR93)
+
+Direct C++ injection of PIF keys into `/data/adb/pif.prop`:
+- Keys: FINGERPRINT, MANUFACTURER, MODEL, BRAND, PRODUCT, DEVICE, RELEASE, ID, INCREMENTAL, SECURITY_PATCH
+- Preserves user settings (spoofBuild, DEBUG, etc.)
+- Called from companion_handler after writeProfileProps()
 
 ---
 
-## 9. Build & Deploy
+## 8. Dual Reading Analysis (Post-PR95)
+
+### Eliminated (48 properties now single-reading)
+
+All build dates (UTC + human-readable, 7 partitions each), build IDs (6), incrementals (6), security patches (4), host, display.id, fota.oem, cert, mod_device, build.product, boot.rsc, boot.product.hardware.sku, locale, baseband, all partition marketnames, timezone.
+
+### Accepted duals (cannot resetprop without breaking system)
+
+| Property | Values | Reason |
+|----------|--------|--------|
+| `ro.product.{model,brand,manufacturer,device,name}` (all partitions) | Real Xiaomi / Spoofed Samsung | MIUI framework depends on these |
+| `ro.odm.build.fingerprint` | Only real Redmi/lancelot... | PR83: crash MIUI Settings |
+| `ro.build.description` | lancelot-user / a12sqz-user | PR83: crash MIUI Settings |
+| `ro.hardware`, `ro.board.platform`, `ro.boot.hardware` | mt6768 / mt6765 | HAL loading |
+| `ro.hardware.egl` | mali / powervr | Graphics driver crash |
+| `gsm.version.baseband` | Modem dual | Runtime prop, modem overwrites |
+| `/proc/cpuinfo` | MT6769T | MemFD bind mount pending |
+| BOOTCLASSPATH | miuisdk@boot.jar, mediatek-*.jar | Env var inherited from Zygote |
+| GPU GL_RENDERER | Mali-G52 | Hardware driver |
+| `getNetworkCountryIso` | cl (Chile) | Modem/RIL reads real MCC |
+
+---
+
+## 9. Boot Scripts
+
+### `post-fs-data.sh` (pre-Zygote)
+- SUSFS `set_uname` with profile-specific kernel version (40 profiles mapped)
+- SUSFS `set_cmdline_or_bootconfig` from `.cmdline` file (generated by companion_handler)
+
+### `service.sh` (post-boot)
+1. **SSAID Injection** (PR37): Deterministic per-package android_id derived from master_seed + package hash. Python XorShift64* (64-bit) with sed fallback. Patches `/data/system/users/0/settings_ssaid.xml`.
+2. **Proxy Auto-start** (PR72): If `proxy_enabled=true`, waits for network then launches `proxy_manager.sh start`.
+3. **Modem Prop Stabilizer** (PR86): Loops every 5s resetting `gsm.operator.iso-country` and `gsm.sim.operator.iso-country` to "us" (modem overwrites periodically).
+
+### `boot-completed.sh` (KernelSU 2nd+ boot)
+1. Applies all resetprop from `.profile_props` (backup path; companion_handler is primary)
+2. Sets `Settings.Global device_name` via `settings put global`
+3. PIF Hijacking: Extracts `#PIF_*` comments from `.profile_props` -> writes to `/data/adb/pif.prop`
+
+### `customize.sh` (install)
+- Sets permissions on tun2socks, scripts
+- Creates `/data/adb/.omni_data`
+
+---
+
+## 10. Transparent Proxy System (PR72)
+
+```
+WebUI (app.js) --ksu_exec--> proxy_manager.sh {start|stop|status}
+                                    |
+                              tun2socks (hev-socks5-tunnel, ARM64 static)
+                              TUN: tun0 (172.19.0.1/30, MTU 8500)
+                              SOCKS5 proxy
+                                    |
+                           iptables rules:
+                           mangle OUTPUT: mark UID packets -> 0x1337
+                           nat OUTPUT: DNAT DNS -> proxy_dns:53
+                           ip6tables: DROP all IPv6 (leak prevention)
+```
+
+Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
+
+---
+
+## 11. Known Limitations
+
+| Vector | Status | Reason |
+|--------|--------|--------|
+| Identity property duals (model, brand, etc.) | Accepted | MIUI crashes if resetprop'd globally |
+| `ro.odm.build.fingerprint` dual | Accepted | PR83: MIUI Settings crash |
+| `/proc/cpuinfo` (MT6769T) | Pending | MemFD bind mount + sepolicy.rule added, awaiting test |
+| BOOTCLASSPATH / DEX2OATBOOTCLASSPATH | Cannot fix | Env vars set by Zygote pre-fork, contain miuisdk/mediatek jars |
+| GPU hardware (Mali vs PowerVR) | Cannot fix | Physical hardware. `glGetString`/`eglQueryString` hooked but GL runtime reveals real GPU |
+| `getNetworkCountryIso` | Partial | Modem/RIL reads real MCC from cell tower. `resetprop` loop in service.sh helps but Binder path may bypass |
+| `getTypeAllocationCode` | Cannot fix | TAC from real IMEI, modem-level |
+| `gsm.version.baseband` dual | Partial | Runtime prop, modem daemon overwrites after resetprop |
+| WebView UA | Partial | Chromium caches UA during Zygote init before hooks |
+| `Settings.Global.getString("device_name")` | Fixed | PR76: `settings put global device_name` in boot-completed.sh |
+
+---
+
+## 12. Build & Deploy
 
 ### CI Pipeline (`.github/workflows/build.yml`)
 
-1. Checkout → NDK r25c setup
+1. Checkout -> NDK r25c setup
 2. CMake build: `arm64-v8a`, `android-30`, `c++_static`
-3. Download `hev-socks5-tunnel-linux-arm64` from GitHub releases (ELF validation)
-4. Package ZIP: `zygisk/arm64-v8a.so`, `module.prop`, `customize.sh`, `service.sh`, `post-fs-data.sh`, `proxy_manager.sh`, `bin/tun2socks`, `webroot/`
-
-### Manual Deploy
-
-```bash
-# Build
-adb push dist/omnishield-v12.9.58-release.zip /sdcard/
-# Install via KernelSU/Magisk Manager
-# Reboot
-```
+3. Download `hev-socks5-tunnel-linux-arm64` (ELF validation)
+4. Package ZIP: `zygisk/arm64-v8a.so`, `module.prop`, scripts, `bin/tun2socks`, `webroot/`
+5. Output: `omnishield-v13.0-release.zip`
 
 ### Module Structure (installed)
 
 ```
 /data/adb/modules/omnishield/
-├── zygisk/
-│   └── arm64-v8a.so          ← Compiled Zygisk module
-├── bin/
-│   └── tun2socks              ← hev-socks5-tunnel ARM64 static binary
-├── webroot/                   ← WebUI served by KernelSU Manager
-├── module.prop
-├── service.sh
-├── post-fs-data.sh
-├── proxy_manager.sh
-└── customize.sh
+|-- zygisk/arm64-v8a.so
+|-- bin/tun2socks
+|-- webroot/
+|-- sepolicy.rule
+|-- module.prop
+|-- service.sh
+|-- post-fs-data.sh
+|-- boot-completed.sh
+|-- proxy_manager.sh
+\-- customize.sh
 ```
 
 ---
 
-## 10. PR Changelog (Condensed)
+## 13. Testing Device
 
-| PR | Version | Key Changes |
-|----|---------|-------------|
-| 89 | v12.9.65 | **Re-hook spawn functions in late-loaded libraries (Layer 6)**: Post-PR88 VDInfo report STILL showed identical dual reads despite ALL property hooks succeeding (`__system_property_foreach` hook SUCCESS confirmed in logcat). Root cause: `reapplyPltHooksForNewLibraries()` (PR87) only re-hooked property functions (`find`, `read`, `foreach`) but NOT subprocess spawn functions (`execve`, `posix_spawn`, `posix_spawnp`). When VDInfo calls `System.loadLibrary("vdinfo")`, the dynamic linker writes real libc addresses for spawn functions to its GOT. VDInfo's native code then launches real `getprop` subprocesses (confirmed by SELinux denials in logcat) that read property values directly from shared memory, bypassing all in-process hooks. **Fix**: Added `execve`, `posix_spawn`, and `posix_spawnp` to `reapplyPltHooksForNewLibraries()`. Now when a late-loaded .so's GOT is re-patched, spawn functions are also redirected to `my_execve`/`my_posix_spawn`/`my_posix_spawnp`, which intercept getprop and return spoofed values via the existing memfd+cat mechanism (Fix9). `pltHookCommit()` is idempotent — already-hooked ELFs are skipped. |
-| 88 | v12.9.64 | **Hook `__system_property_foreach` — eliminate dual reads (Layer 5)**: Post-PR87 logcat confirmed ALL hooks install successfully (Dobby inline on `__system_property_find` SUCCESS, dlsym hook SUCCESS, android_dlopen_ext/dlopen hooks SUCCESS). Yet VDInfo still showed identical dual reads. Root cause: VDInfo calls `__system_property_foreach(callback, cookie)` to iterate ALL properties. The callback receives real `prop_info*` pointers directly from the property trie, completely bypassing `__system_property_find` (which we hook to return `FakePropInfo`). **Fix**: Dobby inline hook on `__system_property_foreach` (libc.so, ~50+ ARM64 instructions — safe for Dobby). Wrapper callback extracts property name from real `prop_info*` via `orig_system_property_read`, calls `my_system_property_find(name)` to get the spoofed `FakePropInfo`, passes it to the user's original callback. PLT hook as fallback if Dobby inline fails. Also intercepted in `my_dlsym`. Installed BEFORE `installPltHooks()` (same pattern as `__system_property_find`) with `g_propForeachInlineHooked` mutual exclusion guard. |
-| 87 | v12.9.63 | **Late-loaded library PLT re-patching (Layer 4)**: Post-PR86 VDInfo report showed dual reads persist — Dobby inline hook on `__system_property_find` likely FAILED on Redmi 9/mt6768, and `dlsym` hook is irrelevant because the dynamic linker resolves symbols via internal routines, never calling the public `dlsym()`. Root cause: when `System.loadLibrary("vdinfo")` loads VDInfo's native .so, the linker writes real libc addresses to its GOT, bypassing all existing hooks. **Fix**: Dobby inline hooks on `android_dlopen_ext` (libdl.so, covers Java `System.loadLibrary`) and `dlopen` (covers native loads). After each library load, `reapplyPltHooksForNewLibraries()` re-enumerates all loaded ELFs from `/proc/self/maps` and calls `pltHookRegister`/`pltHookCommit` for `__system_property_find` and `__system_property_read` on the new .so. Thread-safe (`std::mutex`), recursion-guarded (`thread_local` depth counter for nested dependency loading). `pltHookCommit` is idempotent (xhook_refresh skips already-patched GOT entries). |
-| 86 | v12.9.62 | **VDInfo dual-read fix (3 layers)**: (1) Dobby inline hook on `__system_property_find` via `dlsym(RTLD_DEFAULT)` instead of `DobbySymbolResolver("libc.so")` — PR85 removal was likely caused by wrong address resolution, re-attempt with correct symbol lookup. Inline hook intercepts ALL callers including late-loaded .so files (VDInfo's native lib). (2) `dlsym` hook (defense-in-depth) — intercepts `dlsym("__system_property_find/read/get/read_callback")` and returns spoofed function pointers. Thread-local recursion guard. (3) `service.sh` modem property stabilizer — `resetprop -n` loop every 5s for `gsm.operator.iso-country`/`gsm.sim.operator.iso-country` to counteract RIL daemon overwrites (fixes `getNetworkCountryIso` returning real country). PLT hook for `__system_property_find` now conditional on Dobby inline failure (mutual exclusion prevents Fix10 recursion crash). |
-| 73b | v12.9.61 | Fix1–Fix8: see previous, **Fix9: subprocess regression fix** — Fix8 PLT hooks broke ALL subprocesses (`error=-634729984, Exec failed`). Root causes: (A) `orig_posix_spawn` corrupted by multi-ELF overwrite (PLT hooks across ~100 ELFs, last write could be lazy-binding stub), (B) `handleGetpropSpawn` fork() bypassed Java's `posix_spawn_file_actions_t` pipe infrastructure, (C) self-hooking (own module included in ELF scan). **Fixes**: `dlsym(RTLD_DEFAULT)` pre-resolves orig_* before PLT hooks (guaranteed correct), dummy vars for `pltHookRegister` oldFunc, `isHiddenPath()` filter in `enumerateLoadedElfs`, **memfd + orig_posix_spawn approach** replaces fork+write — generates spoofed content to memfd, calls real posix_spawn with `["cat", "/proc/self/fd/<N>"]` + ORIGINAL file_actions preserving Java pipes, `os.version` override tries multiple System field names (`props`/`systemProperties`/`theProperties`) + `Hashtable.put()` fallback |
-| 73 | v12.9.59 | VD Info fixes: toybox/toolbox bypass (Fix1), `uname` subprocess interception + `emulate_uname_output` helper (Fix2), `Os.uname()` JNI hook via `libcore/io/Linux` (Fix3), `shouldHide()` + `"miui"` filter (Fix4) |
-| 72-QA | v12.9.58 | VD Info fixes: shell bypass (`sh/su -c getprop`), `os.version` Java cache override, `shouldHide()` expanded (huaqin/mt6769/moly.), bluetooth_name hook, proxy system (tun2socks + iptables + 57 tests) |
-| 71h | v12.9.58 | Smart Apply: `am force-stop` scoped apps on config save |
-| 71g | v12.9.57 | WebView spoof toggle (separate from scope to avoid Destroy Identity crash) |
-| 71f | v12.9.56 | `/proc/cpuinfo` bypass: subprocess `cat` interception + memfd for `fread` |
-| 71e | v12.9.55 | **CRITICAL**: `my_system_property_get` early-return killed all 168+ property hooks |
-| 71d | v12.9.54 | `http.agent` sync via `System.setProperty` |
-| 71c | v12.9.53 | `posix_spawn`/`posix_spawnp` hooks (Android 10+ subprocess vector) |
-| 71b | v12.9.52 | `SystemProperties.native_get` JNI hook + full `getprop` dump emulation |
-| 71 | v12.9.51 | `execve` hook for `getprop` child processes, 40+ leaked props sealed |
-| 70c | v12.9.50 | Companion process (root config reader), `/proc/<pid>/maps` bypass, `dl_iterate_phdr` filter, `remapModuleMemory()`, DLCLOSE for non-target apps, custom scope picker UI |
-| 70 | v12.9.49 | `ksu_exec` rewrite (global `ksu` over `import('kernelsu')`), dynamic scope, SSAID per-package derivation |
-| 56 | v12.9.36 | Zygisk API v2→v3: `AppSpecializeArgs`, `REGISTER_ZYGISK_MODULE` |
-| 55 | v12.9.35 | Defensive: `onLoad` null guard, `g_jvm` global, `this->api` in `preServerSpecialize` |
-| 54b | v12.9.34 | **ROOT CAUSE**: VTable shift from `virtual ~Module()` → removed |
-| 54 | v12.9.33 | Syscall fallback in 7 critical hooks, DLCLOSE in `preServerSpecialize` |
-| 53 | v12.9.32 | Meyer's Singleton for profile map, `debug_mode` flag |
-| 51 | v12.9.31 | Fix `open`/`openat` infinite recursion, `readlinkat` null guard |
-| 50 | v12.9.30 | `DobbySymbolResolver("libc.so")` to avoid VDSO hooks, `stoll` try-catch, `NewStringUTF` null guards |
-| 49 | v12.9.29 | Replace PLT stub DobbyHook with `DobbySymbolResolver` for 9 hooks |
-| 48 | v12.9.28 | 23 null guards for all Dobby hooks |
-| 47 | v12.9.27 | Anti-crash: null guards for 12 JNI hooks, JNI exception cascade fix (8 sites), self-reference check |
-| 38+39 | v12.9.18 | Sensor metadata (8 methods), GPS location spoofing (9 methods), network type (8 methods), sensor list filter, seed version rotation |
-| 37 | v12.9.17 | Boot ID, cgroups, SSAID injection, LTE spoofing, `SUPPORTED_ABIS` fix |
-| 22 | v12.9 | Tracer nullification (`TracerPid:\t0`), boot integrity props, CPU topology, partition fingerprints |
-| 21 | v12.7 | Attestation fortress: `for_attestation` namespace, HAL gralloc/hwcomposer, DTB model, VFS hostname/ostype |
+**Real hardware:** Xiaomi Redmi 9 (lancelot), MT6769T (Helio G80), MIUI 12.5, Android 11, KernelSU
+**Default spoof target:** Samsung Galaxy A12 (SM-A125F), MT6765 (Helio P35), Android 11
 
 ---
 
-## 11. Testing Device
+## 14. Conventions
 
-**Real hardware:** Xiaomi Redmi 9 (lancelot), MT6769T, MIUI 12.5, Android 11, KernelSU
-**Default spoof target:** Samsung Galaxy A31 (SM-A315F), Exynos 9611, Android 11
-
----
-
-## 12. Conventions
-
-- **PR tags in comments:** `// PR72-QA Fix2:` — always reference PR number and fix number.
+- **PR tags in comments:** `// PR95:` -- always reference PR number.
 - **Log tag:** `AndroidSystem` (camouflaged as system log).
-- **Debug mode:** `g_debugMode` controlled by `debug_mode=true` in config. All `LOGD`/`LOGE` are no-ops in release.
-- **Tooling:** No `WebFetch` for gists — use `curl -sL` or `gh gist view`.
+- **Debug mode:** `g_debugMode` controlled by `debug_mode=true` in config.
+- **Tooling:** No `WebFetch` for gists -- use `curl -sL` or `gh gist view`.
 - **Shell scripts:** POSIX-compatible for Android mksh. No bashisms.
-- **Commit messages:** `fix(scope):`, `feat(proxy):`, `fix(zygisk):` prefixes.
 
 ---
 
-## 13. Update Protocol
+## 15. Update Protocol
 
 When modifying code, update this Julia.md:
-1. Add entry to PR Changelog table (Section 10)
+1. Add entry to this file if a major PR lands
 2. Update line counts if files changed significantly (Section 1)
-3. Update hooked function catalog if hooks added/removed (Section 7)
-4. Update known limitations if status changes (Section 6)
-5. Update critical invariants if new crash patterns discovered (Section 3)
+3. Update hooked function catalog if hooks added/removed (Section 6)
+4. Update property lists if properties added/removed (Section 7)
+5. Update known limitations if status changes (Section 11)
+6. Update critical invariants if new crash patterns discovered (Section 3)
