@@ -5622,6 +5622,18 @@ static void writeProfileProps(const DeviceFingerprint& fp,
     // PR75b: Market name — leaks real "Redmi 9" in property trie
     fprintf(f, "ro.product.marketname=%s\n", fp.model);
 
+    // PIF Hijacking Properties (Prefixed with # so resetprop ignores them)
+    fprintf(f, "#PIF_FINGERPRINT=%s\n", fp.fingerprint);
+    fprintf(f, "#PIF_MANUFACTURER=%s\n", fp.manufacturer);
+    fprintf(f, "#PIF_MODEL=%s\n", fp.model);
+    fprintf(f, "#PIF_BRAND=%s\n", fp.brand);
+    fprintf(f, "#PIF_PRODUCT=%s\n", fp.product);
+    fprintf(f, "#PIF_DEVICE=%s\n", fp.device);
+    fprintf(f, "#PIF_RELEASE=%s\n", fp.release);
+    fprintf(f, "#PIF_ID=%s\n", fp.buildId);
+    fprintf(f, "#PIF_INCREMENTAL=%s\n", fp.incremental);
+    fprintf(f, "#PIF_SECURITY_PATCH=%s\n", fp.securityPatch);
+
     // PR81→PR83-REVERTED: ro.odm.build.fingerprint + ro.build.description REMOVED from
     // resetprop. Setting these GLOBALLY crashed MIUI Settings (and potentially other system
     // services that parse ODM fingerprint for OTA/device-specific UI decisions).

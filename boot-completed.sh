@@ -21,3 +21,61 @@ done < "$PROPS_FILE"
 # Read model from persist.sys.device_name already written to .profile_props.
 _DN=$(grep "^persist.sys.device_name=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
 [ -n "$_DN" ] && settings put global device_name "$_DN" 2>/dev/null
+
+# ============================================================
+# PIF Hijacking: Inject OmniShield profile into Play Integrity Fix
+# ============================================================
+PIF_PROP_PATH="/data/adb/pif.prop"
+
+if [ ! -f "$PIF_PROP_PATH" ]; then
+    touch "$PIF_PROP_PATH"
+fi
+
+update_pif_prop() {
+    local key="$1"
+    local val="$2"
+
+    # Skip if value is empty
+    [ -z "$val" ] && return
+
+    # Escape special characters for sed (like slashes in fingerprint)
+    local escaped_val=$(echo "$val" | sed 's|/|\\/|g')
+
+    if grep -q "^${key}=" "$PIF_PROP_PATH"; then
+        # Replace existing line
+        sed -i "s|^${key}=.*|${key}=${escaped_val}|" "$PIF_PROP_PATH"
+    else
+        # Append if it doesn't exist
+        echo "${key}=${val}" >> "$PIF_PROP_PATH"
+    fi
+}
+
+# Extract PIF properties written as comments in .profile_props
+_PIF_FINGERPRINT=$(grep "^#PIF_FINGERPRINT=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_MANUFACTURER=$(grep "^#PIF_MANUFACTURER=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_MODEL=$(grep "^#PIF_MODEL=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_BRAND=$(grep "^#PIF_BRAND=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_PRODUCT=$(grep "^#PIF_PRODUCT=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_DEVICE=$(grep "^#PIF_DEVICE=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_RELEASE=$(grep "^#PIF_RELEASE=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_ID=$(grep "^#PIF_ID=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_INCREMENTAL=$(grep "^#PIF_INCREMENTAL=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+_PIF_SECURITY_PATCH=$(grep "^#PIF_SECURITY_PATCH=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+
+# Inject OmniShield profile data
+update_pif_prop "FINGERPRINT" "$_PIF_FINGERPRINT"
+update_pif_prop "MANUFACTURER" "$_PIF_MANUFACTURER"
+update_pif_prop "MODEL" "$_PIF_MODEL"
+update_pif_prop "BRAND" "$_PIF_BRAND"
+update_pif_prop "PRODUCT" "$_PIF_PRODUCT"
+update_pif_prop "DEVICE" "$_PIF_DEVICE"
+update_pif_prop "RELEASE" "$_PIF_RELEASE"
+update_pif_prop "ID" "$_PIF_ID"
+update_pif_prop "INCREMENTAL" "$_PIF_INCREMENTAL"
+update_pif_prop "SECURITY_PATCH" "$_PIF_SECURITY_PATCH"
+
+# Adjust permissions for security
+chmod 0644 "$PIF_PROP_PATH"
+
+# Immediate application
+killall com.google.android.gms.unstable 2>/dev/null || true
