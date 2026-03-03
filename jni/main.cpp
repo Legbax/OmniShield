@@ -40,6 +40,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/mount.h>
 #include <set>              // Fix8: deduplicar ELFs en PLT hooks
 #include <unordered_map>   // PR84: fake prop_info map
 #include <sys/sysmacros.h>  // Fix8: makedev()
@@ -3287,7 +3288,7 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
         }
 
         if (is_getprop) {
-            if (argv[1] && argv[1][0] != '\0') {
+            if (argv[1] && argv[1][0] != '\0' && strcmp(argv[1], "-c") != 0) {
                 // Single property read: getprop <name> [default]
                 char value[92] = {0};
                 int len = my_system_property_get(argv[1], value);
@@ -4293,6 +4294,28 @@ public:
         if (g_api) {
             if (g_isTargetApp) {
                 g_api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
+
+                // MemFD bind mount: spoof /proc/cpuinfo at kernel level.
+                // VDInfos reads cpuinfo via raw syscalls that bypass openat/read hooks.
+                // By bind-mounting a memfd over /proc/cpuinfo before specialization
+                // (while we still have CAP_SYS_ADMIN from Zygote), all reads — including
+                // direct syscalls — see the spoofed content.
+                const DeviceFingerprint* fp_cpu = findProfile(g_currentProfileName);
+                if (fp_cpu) {
+                    std::string fake_cpuinfo = generateMulticoreCpuInfo(*fp_cpu);
+                    int mfd = syscall(__NR_memfd_create, "fake_cpuinfo", 0);
+                    if (mfd >= 0) {
+                        write(mfd, fake_cpuinfo.c_str(), fake_cpuinfo.size());
+                        lseek(mfd, 0, SEEK_SET);
+                        char fdpath[64];
+                        snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", mfd);
+                        if (mount(fdpath, "/proc/cpuinfo", nullptr, MS_BIND, nullptr) == 0) {
+                            LOGE("MemFD: bind-mounted spoofed /proc/cpuinfo (%zu bytes)",
+                                 fake_cpuinfo.size());
+                        }
+                        // mfd stays open — the mount holds a reference to it
+                    }
+                }
             }
             // PR85: DLCLOSE_MODULE_LIBRARY removed — thread_local g_inPropertyFind
             // triggers Bionic TLS cleanup abort() when the .so is dlclose'd on Android <14.
