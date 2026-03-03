@@ -224,12 +224,43 @@ static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 struct FakePropInfo {
     uint32_t serial;                    // offset 0: atomic serial (matches bionic layout)
     char value[PROP_VALUE_MAX];         // offset 4: property value (92 bytes)
-    char name[PROP_NAME_MAX + 1];       // name storage (flexible array replacement)
+    char name[256];                     // name storage — large enough for MIUI long names
 };
 static std::unordered_map<std::string, FakePropInfo*> g_fakePropMap;
 static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fake detection
 static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
+static bool g_realDeviceIsMiui = false;                  // PR91-fix: true if real device runs MIUI (preserve framework props)
+static bool g_pagesPatched = false;                      // PR91: true after patchPropertyPages succeeds — skip FakePropInfo
+static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
+static bool g_propForeachInlineHooked = false;           // PR88: true if Dobby inline hook on __system_property_foreach succeeded
+static bool g_spawnInlineHooked = false;                 // PR90: true if Dobby inline hooks on posix_spawn/posix_spawnp succeeded
+
+// PR86: dlsym hook — intercept dynamic symbol resolution for property functions.
+// When detection apps call dlsym(RTLD_DEFAULT, "__system_property_find") to get a raw
+// function pointer, they bypass both PLT hooks AND inline hooks (if the app's .so was
+// loaded after hooks were installed). This hook returns our spoofing functions instead.
+static void* (*orig_dlsym)(void* handle, const char* symbol) = nullptr;
+static thread_local bool g_inDlsym = false;  // recursion guard for dlsym hook
+
+// PR87: android_dlopen_ext / dlopen hooks — re-apply PLT hooks to late-loaded libraries.
+// When apps call System.loadLibrary() or dlopen(), the dynamic linker loads the .so
+// and writes real function addresses to its GOT using internal routines (NOT dlsym).
+// Our initial PLT hooks only covered libraries loaded during postAppSpecialize.
+// By hooking the load event, we re-apply PLT hooks to newly loaded libraries.
+static void* (*orig_android_dlopen_ext)(const char*, int, const void*) = nullptr;
+static void* (*orig_dlopen_hook)(const char*, int) = nullptr;
+static thread_local int g_dlopenReapplyDepth = 0;  // recursion guard (nested dlopen for deps)
+static std::mutex g_reapplyMutex;                   // thread safety for pltHookRegister/Commit
+
+// PR88: __system_property_foreach hook — intercept property enumeration.
+// Detection apps call __system_property_foreach(callback, cookie) to iterate ALL properties
+// in the shared memory area. The callback receives real prop_info* pointers directly,
+// bypassing __system_property_find (which we hook). Our wrapper callback reads the property
+// name from each real prop_info, then passes a FakePropInfo (with spoofed value) to the
+// user's callback for properties that should be spoofed.
+static int (*orig_system_property_foreach)(
+    void (*propfn)(const prop_info* pi, void* cookie), void* cookie) = nullptr;
 
 // PR81: NetworkInterface hooks — DISABLED (PR83), see postAppSpecialize comment.
 
@@ -266,11 +297,15 @@ static const char* (*orig_Sensor_getVendor)(void* sensor);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsSecure_getString3)(JNIEnv*, jobject, jstring);
 static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jstring, jint);
+static jstring (*orig_SettingsSecure_getStringForUser4)(JNIEnv*, jobject, jstring, jint);
 
 // Settings.Global
 static jstring (*orig_SettingsGlobal_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsGlobal_getString3)(JNIEnv*, jobject, jstring);
 static jstring (*orig_SettingsGlobal_getStringForUser)(JNIEnv*, jstring, jint);
+static jstring (*orig_SettingsGlobal_getStringForUser4)(JNIEnv*, jobject, jstring, jint);
 
 // Helper
 inline std::string toLowerStr(const char* s) {
@@ -388,12 +423,17 @@ bool shouldHide(const char* key) {
     // SoC identifier (mt6769), and modem prefix (moly.) from property values.
     // PR73-Fix4: Added "miui" — hides ro.miui.*, ro.vendor.miui.* and any
     // MIUI-specific value when the target profile is not Xiaomi/MIUI.
-    return s.find("mediatek") != std::string::npos ||
-           s.find("lancelot") != std::string::npos ||
-           s.find("huaqin")   != std::string::npos ||
-           s.find("mt6769")   != std::string::npos ||
-           s.find("moly.")    != std::string::npos ||
-           s.find("miui")     != std::string::npos;
+    // PR91-fix: On real MIUI devices, don't suppress "miui" properties — the MIUI
+    // framework in every process depends on them for permissions, settings, etc.
+    bool hit = s.find("mediatek") != std::string::npos ||
+               s.find("lancelot") != std::string::npos ||
+               s.find("huaqin")   != std::string::npos ||
+               s.find("mt6769")   != std::string::npos ||
+               s.find("moly.")    != std::string::npos;
+    if (!hit && !g_realDeviceIsMiui) {
+        hit = s.find("miui") != std::string::npos;
+    }
+    return hit;
 }
 
 // -----------------------------------------------------------------------------
@@ -1161,6 +1201,12 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.secure" || k == "ro.build.selinux") dynamic_buffer = "1";
         else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") dynamic_buffer = "0";
+        // MIUI framework crash fix: AppOpsUtils.isXOptMode() reads this property
+        // via SystemProperties.getBoolean(). When enabled (default on non-debug builds),
+        // Activity.requestPermissions() routes to com.lbe.security.miui which may not
+        // exist → ActivityNotFoundException. Force "false" so MIUI uses standard AOSP
+        // permission controller (com.android.permissioncontroller).
+        else if (g_realDeviceIsMiui && k == "persist.sys.miui_optimization") dynamic_buffer = "false";
         else if (k == "ro.hardware.chipname") dynamic_buffer = fp.hardwareChipname;
         else if (k == "ro.product.board") dynamic_buffer = fp.board;
         else if (k == "ro.sf.lcd_density") {
@@ -1554,9 +1600,10 @@ int my_system_property_get(const char *key, char *value) {
 
         // ── PR70c: Platform-specific prop suppression ────────────────────
         // Suppress MIUI props when NOT emulating Xiaomi
+        // PR91-fix: On real MIUI devices, preserve these — framework depends on them
         else if (k.find("ro.miui.") == 0 || k.find("ro.vendor.miui.") == 0) {
             std::string br = toLowerStr(fp.brand);
-            if (br != "redmi" && br != "xiaomi" && br != "poco") {
+            if (br != "redmi" && br != "xiaomi" && br != "poco" && !g_realDeviceIsMiui) {
                 value[0] = '\0'; return 0;
             }
         }
@@ -1737,8 +1784,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
                     char dateBuf[128];
                     time_t t = (time_t)dateUtc;
-                    struct tm* tm_info = gmtime(&t);
-                    strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", tm_info);
+                    struct tm tm_buf = {};
+                    gmtime_r(&t, &tm_buf);
+                    strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", &tm_buf);
 
                     // PR42: Compiler y build user coherentes con la marca del perfil
                     std::string compilerStr;
@@ -2694,7 +2742,9 @@ unsigned long my_getauxval(unsigned long type) {
 // -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
-static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
+// Spoofing logic shared by all Settings.Secure wrappers (2-param, 3-param, ForUser).
+// Returns spoofed jstring if key is intercepted, nullptr for passthrough.
+static jstring spoofSettingsSecure(JNIEnv* env, jstring name) {
     if (!name) return nullptr;
     const char* key = env->GetStringUTFChars(name, nullptr);
     if (!key) return nullptr;
@@ -2717,20 +2767,55 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
         // Default "Android Bluedroid" leaks that device isn't using OEM BT stack.
         const DeviceFingerprint* fp = findProfile(g_currentProfileName);
         if (fp) result = env->NewStringUTF(fp->model);
+    } else if (g_realDeviceIsMiui && strcmp(key, "miui_optimization") == 0) {
+        // Force MIUI framework to use standard AOSP behavior for permissions,
+        // app management, etc. Without this, MIUI sends permission intents to
+        // com.lbe.security.miui which may be missing/disabled -> crash.
+        result = env->NewStringUTF("0");
     }
     env->ReleaseStringUTFChars(name, key);
+    return result;
+}
 
-    if (result) return result;
+static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
     if (!orig_SettingsSecure_getString) return nullptr;
     return orig_SettingsSecure_getString(env, name);
 }
 
-static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
-    return my_SettingsSecure_getString(env, name);
+// 3-param variant: (JNIEnv*, jobject contentResolver, jstring name)
+// Some ROMs export Settings.Secure.getString with a ContentResolver parameter.
+// Using the wrong wrapper causes `name` to receive the ContentResolver object,
+// making ALL Settings.Secure reads return null (including miui_optimization).
+static jstring my_SettingsSecure_getString3(JNIEnv* env, jobject contentResolver, jstring name) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
+    if (!orig_SettingsSecure_getString3) return nullptr;
+    return orig_SettingsSecure_getString3(env, contentResolver, name);
 }
 
-// PR75b: Settings.Global hook — intercepts device_name which leaks "Redmi 9"
-static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
+static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
+    if (!orig_SettingsSecure_getStringForUser) return nullptr;
+    return orig_SettingsSecure_getStringForUser(env, name, userHandle);
+}
+
+// 4-param variant: (JNIEnv*, jobject contentResolver, jstring name, jint userHandle)
+// Some ROMs export getStringForUser with a ContentResolver parameter.
+static jstring my_SettingsSecure_getStringForUser4(JNIEnv* env, jobject cr, jstring name, jint userHandle) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
+    if (!orig_SettingsSecure_getStringForUser4) return nullptr;
+    return orig_SettingsSecure_getStringForUser4(env, cr, name, userHandle);
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: Settings.Global (JNI Bridge)
+// -----------------------------------------------------------------------------
+// Spoofing logic shared by all Settings.Global wrappers.
+static jstring spoofSettingsGlobal(JNIEnv* env, jstring name) {
     if (!name) return nullptr;
     const char* key = env->GetStringUTFChars(name, nullptr);
     if (!key) return nullptr;
@@ -2748,14 +2833,38 @@ static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
         result = env->NewStringUTF("2");  // WIFI_SLEEP_POLICY_NEVER (irrelevante si off)
     }
     env->ReleaseStringUTFChars(name, key);
+    return result;
+}
 
-    if (result) return result;
+// PR75b: Settings.Global hook — intercepts device_name which leaks "Redmi 9"
+static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
     if (!orig_SettingsGlobal_getString) return nullptr;
     return orig_SettingsGlobal_getString(env, name);
 }
 
+// 3-param variant: (JNIEnv*, jobject contentResolver, jstring name)
+static jstring my_SettingsGlobal_getString3(JNIEnv* env, jobject contentResolver, jstring name) {
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
+    if (!orig_SettingsGlobal_getString3) return nullptr;
+    return orig_SettingsGlobal_getString3(env, contentResolver, name);
+}
+
 static jstring my_SettingsGlobal_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
-    return my_SettingsGlobal_getString(env, name);
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
+    if (!orig_SettingsGlobal_getStringForUser) return nullptr;
+    return orig_SettingsGlobal_getStringForUser(env, name, userHandle);
+}
+
+// 4-param variant: (JNIEnv*, jobject contentResolver, jstring name, jint userHandle)
+static jstring my_SettingsGlobal_getStringForUser4(JNIEnv* env, jobject cr, jstring name, jint userHandle) {
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
+    if (!orig_SettingsGlobal_getStringForUser4) return nullptr;
+    return orig_SettingsGlobal_getStringForUser4(env, cr, name, userHandle);
 }
 
 void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
@@ -2832,12 +2941,12 @@ int my_system_property_read(const prop_info *pi, char *name, char *value) {
         // Fix8: orig_system_property_read is NULL (Dobby trampoline failed on thin
         // syscall wrapper). Use the working __system_property_read_callback as fallback
         // to extract property name and value from the prop_info pointer.
-        struct ReadCtx { char n[PROP_NAME_MAX+1]; char v[PROP_VALUE_MAX]; uint32_t s; };
+        struct ReadCtx { char n[256]; char v[PROP_VALUE_MAX]; uint32_t s; };
         ReadCtx ctx = {};
         orig_system_property_read_callback(pi,
             [](void* cookie, const char* n, const char* v, uint32_t s) {
                 auto* c = static_cast<ReadCtx*>(cookie);
-                if (n) strncpy(c->n, n, PROP_NAME_MAX);
+                if (n) strncpy(c->n, n, sizeof(c->n) - 1);
                 if (v) strncpy(c->v, v, PROP_VALUE_MAX - 1);
                 c->s = s;
             }, &ctx);
@@ -2922,6 +3031,13 @@ const prop_info* my_system_property_find(const char* name) {
         return real_pi;
     }
 
+    // When PR91 patched pages, prefer real prop_info* (lives in property trie,
+    // safe for pointer arithmetic). FakePropInfo from heap causes SIGSEGV in
+    // apps that walk the trie and compute pointer distances.
+    if (g_pagesPatched && real_pi) {
+        return real_pi;
+    }
+
     // Property IS spoofed and differs from real → return fake prop_info
     std::lock_guard<std::mutex> lock(g_fakePropMutex);
     std::string key(name);
@@ -2931,7 +3047,7 @@ const prop_info* my_system_property_find(const char* name) {
         // Allocate new fake prop_info (lifetime = process)
         fake = new FakePropInfo();
         memset(fake, 0, sizeof(FakePropInfo));
-        strncpy(fake->name, name, PROP_NAME_MAX);
+        strncpy(fake->name, name, sizeof(fake->name) - 1);
         // Copy serial from real prop_info if available (consistency for atomic readers)
         if (real_pi) {
             fake->serial = reinterpret_cast<const uint32_t*>(real_pi)[0];
@@ -2948,6 +3064,130 @@ const prop_info* my_system_property_find(const char* name) {
     strncpy(fake->value, spoofed, PROP_VALUE_MAX - 1);
 
     return reinterpret_cast<const prop_info*>(fake);
+}
+
+// -----------------------------------------------------------------------------
+// PR88: Hook __system_property_foreach — intercept property enumeration
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: Detection apps call __system_property_foreach(callback, cookie) to
+// iterate ALL properties in the shared memory property area. The callback receives
+// real prop_info* pointers directly from the property trie, bypassing our hook on
+// __system_property_find (which returns FakePropInfo with spoofed values). This is
+// confirmed as the root cause of dual reads: VDInfo enumerates properties via foreach,
+// reads the real value from the raw prop_info*, then compares with Build.* Java fields.
+//
+// FIX: Wrap the user's callback. For each property, extract its name from the real
+// prop_info, then call my_system_property_find(name) which returns a FakePropInfo
+// (with the spoofed value) for spoofed properties, or the real prop_info for others.
+// The user's callback sees only spoofed values — no dual read.
+// -----------------------------------------------------------------------------
+struct ForeachWrapperCtx {
+    void (*userFn)(const prop_info*, void*);
+    void* userCookie;
+};
+
+static void foreachWrapperCallback(const prop_info* pi, void* cookie) {
+    auto* ctx = static_cast<ForeachWrapperCtx*>(cookie);
+    if (!pi || !ctx || !ctx->userFn) return;
+
+    // Extract property name from the real prop_info.
+    // Prefer read_callback (returns full name) over deprecated read (truncates
+    // names >= 31 chars and spams logcat with "property name length >= 31" warnings).
+    char name[256] = {};
+    char value[PROP_VALUE_MAX] = {};
+
+    if (orig_system_property_read_callback) {
+        struct ReadCtx { char n[256]; char v[PROP_VALUE_MAX]; };
+        ReadCtx rctx = {};
+        orig_system_property_read_callback(pi,
+            [](void* c, const char* n, const char* v, uint32_t) {
+                auto* rc = static_cast<ReadCtx*>(c);
+                if (n) strncpy(rc->n, n, sizeof(rc->n) - 1);
+                if (v) strncpy(rc->v, v, PROP_VALUE_MAX - 1);
+            }, &rctx);
+        strncpy(name, rctx.n, sizeof(name) - 1);
+    } else if (orig_system_property_read) {
+        orig_system_property_read(pi, name, value);
+    }
+
+    if (!name[0]) {
+        // Could not extract name — pass through real prop_info unchanged
+        ctx->userFn(pi, ctx->userCookie);
+        return;
+    }
+
+    // Filter hidden properties (mediatek, miui on non-MIUI, etc.)
+    if (shouldHide(name)) return;
+
+    if (g_pagesPatched) {
+        // PR91 already rewrote shared memory pages with spoofed values.
+        // Pass the real prop_info* directly — its memory contains the spoofed data
+        // and the pointer lives in the property trie (safe for pointer arithmetic).
+        // Using FakePropInfo (heap) would crash apps that do trie-walking.
+        ctx->userFn(pi, ctx->userCookie);
+    } else {
+        // Fallback: resolve through my_system_property_find which may return FakePropInfo
+        const prop_info* resolved = my_system_property_find(name);
+        ctx->userFn(resolved ? resolved : pi, ctx->userCookie);
+    }
+}
+
+static int my_system_property_foreach(
+    void (*propfn)(const prop_info* pi, void* cookie), void* cookie) {
+    if (!orig_system_property_foreach || !propfn) {
+        return orig_system_property_foreach ?
+            orig_system_property_foreach(propfn, cookie) : -1;
+    }
+
+    ForeachWrapperCtx ctx = { propfn, cookie };
+    return orig_system_property_foreach(foreachWrapperCallback, &ctx);
+}
+
+// -----------------------------------------------------------------------------
+// PR86: Hook dlsym — intercept dynamic symbol resolution for property functions
+// -----------------------------------------------------------------------------
+// ROOT CAUSE: Detection apps (VDInfo, Snapchat) can call dlsym(RTLD_DEFAULT,
+// "__system_property_find") to obtain a raw function pointer to the real libc
+// implementation. They then call via this pointer, completely bypassing both
+// PLT hooks (which only patch GOT entries in pre-loaded ELFs) and even Dobby
+// inline hooks (if the app resolves the address before our hook is installed).
+// By hooking dlsym itself, we intercept the resolution and return our spoofed
+// function pointers for all property-related symbols.
+//
+// SAFETY: dlsym is used extensively throughout the process (by Dobby, by our
+// own code, by the linker). The thread_local g_inDlsym guard prevents infinite
+// recursion. This hook MUST be installed AFTER all our own dlsym() calls for
+// resolving orig_* pointers are complete.
+// -----------------------------------------------------------------------------
+static void* my_dlsym(void* handle, const char* symbol) {
+    // Recursion guard: pass through when called from our own hooks or Dobby internals
+    if (g_inDlsym || !symbol) {
+        return orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
+    }
+    g_inDlsym = true;
+
+    void* result = nullptr;
+    if (strcmp(symbol, "__system_property_find") == 0) {
+        result = (void*)my_system_property_find;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_find", symbol);
+    } else if (strcmp(symbol, "__system_property_read") == 0) {
+        result = (void*)my_system_property_read;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_read", symbol);
+    } else if (strcmp(symbol, "__system_property_get") == 0) {
+        result = (void*)my_system_property_get;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_get", symbol);
+    } else if (strcmp(symbol, "__system_property_read_callback") == 0) {
+        result = (void*)my_system_property_read_callback;
+        LOGD("[scope] PR86: dlsym intercepted '%s' → my_system_property_read_callback", symbol);
+    } else if (strcmp(symbol, "__system_property_foreach") == 0) {
+        result = (void*)my_system_property_foreach;
+        LOGD("[scope] PR88: dlsym intercepted '%s' → my_system_property_foreach", symbol);
+    } else {
+        result = orig_dlsym ? orig_dlsym(handle, symbol) : nullptr;
+    }
+
+    g_inDlsym = false;
+    return result;
 }
 
 // -----------------------------------------------------------------------------
@@ -3064,11 +3304,11 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
             }
             // getprop with no args — emulate full property dump with spoofed values
             __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
-                struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
+                struct { char name[256]; } ctx = {};
                 __system_property_read_callback(pi,
                     [](void* c, const char* n, const char*, unsigned) {
                         auto* p = static_cast<decltype(&ctx)>(c);
-                        if (n) strncpy(p->name, n, PROP_NAME_MAX);
+                        if (n) strncpy(p->name, n, sizeof(p->name) - 1);
                     }, &ctx);
 
                 if (ctx.name[0] == '\0') return;
@@ -3233,10 +3473,10 @@ static std::string generateSpoofedContent(const char *resolved_path,
     std::string dump;
     __system_property_foreach([](const prop_info* pi, void* cookie) {
         auto* out = static_cast<std::string*>(cookie);
-        char name[PROP_NAME_MAX + 1] = {};
+        char name[256] = {};
         __system_property_read_callback(pi,
             [](void* c, const char* n, const char*, unsigned) {
-                if (n) strncpy(static_cast<char*>(c), n, PROP_NAME_MAX);
+                if (n) strncpy(static_cast<char*>(c), n, 255);
             }, name);
 
         if (name[0] == '\0') return;
@@ -3628,6 +3868,8 @@ static bool g_isTargetApp = false;    // PR56: guardia de proceso calculada en p
 // Fix8: Forward declarations for PLT hook targets (defined earlier in the file)
 int my_system_property_read(const prop_info *pi, char *name, char *value);
 const prop_info* my_system_property_find(const char* name);  // PR84
+static int my_system_property_foreach(                       // PR88
+    void (*propfn)(const prop_info* pi, void* cookie), void* cookie);
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
 static int my_posix_spawn(pid_t *pid, const char *path,
                           const void *file_actions, const void *attrp,
@@ -3648,16 +3890,18 @@ static int my_posix_spawnp(pid_t *pid, const char *file,
 //   offset 4:  char value[92]          (PROP_VALUE_MAX)
 //   offset 96: char name[0]            (flexible array)
 static void patchPropertyPages() {
-    typedef int (*foreach_fn_t)(void (*)(const prop_info*, void*), void*);
-    auto foreach_fn = reinterpret_cast<foreach_fn_t>(
-        dlsym(RTLD_DEFAULT, "__system_property_foreach"));
-
-    if (!foreach_fn) {
-        LOGE("PR84b: __system_property_foreach not found");
+    // PR91: Use orig_system_property_foreach (Dobby trampoline) instead of dlsym.
+    // Our my_dlsym hook (PR86) intercepts dlsym("__system_property_foreach") and
+    // returns my_system_property_foreach, which wraps the callback with FakePropInfo
+    // substitution. Phase 2 needs REAL prop_info* pointers into shared memory
+    // (not FakePropInfo* on the heap), so we must use the original function.
+    LOGE("PR91: patchPropertyPages() starting");
+    if (!orig_system_property_foreach) {
+        LOGE("PR91: orig_system_property_foreach not set, skip patchPropertyPages");
         return;
     }
     if (!orig_system_property_read_callback && !orig_system_property_read) {
-        LOGE("PR84b: no orig read function, skip");
+        LOGE("PR91: no orig read function, skip");
         return;
     }
 
@@ -3666,33 +3910,40 @@ static void patchPropertyPages() {
         const prop_info* pi;
         char spoofed[PROP_VALUE_MAX];
     };
+    struct IterCtx {
+        std::vector<PatchEntry>* patches;
+        int total;
+    };
     std::vector<PatchEntry> patches;
+    IterCtx ctx = { &patches, 0 };
 
-    foreach_fn([](const prop_info* pi, void* cookie) {
-        auto* out = static_cast<std::vector<PatchEntry>*>(cookie);
+    LOGE("PR91: Phase 1 — iterating all properties...");
+    orig_system_property_foreach([](const prop_info* pi, void* cookie) {
+        auto* c = static_cast<IterCtx*>(cookie);
+        c->total++;
 
         // Read real name + value via original (unhooked) function.
-        // Pack into a single buffer: [name \0 padding | value \0 padding]
-        char buf[PROP_NAME_MAX + 1 + PROP_VALUE_MAX];
+        // Use 256-byte name buffer to avoid truncating long property names
+        // (MIUI has names like "persist.sys.miui.adj_update_foreground_state.enable.delayMs").
+        static constexpr int NAME_BUF = 256;
+        char buf[NAME_BUF + PROP_VALUE_MAX];
         memset(buf, 0, sizeof(buf));
 
         if (orig_system_property_read_callback) {
-            // Preferred: handles long properties correctly via trampoline
             orig_system_property_read_callback(pi,
-                [](void* c, const char* n, const char* v, uint32_t) {
-                    char* b = static_cast<char*>(c);
-                    if (n) strncpy(b, n, PROP_NAME_MAX);
-                    if (v) strncpy(b + PROP_NAME_MAX + 1, v, PROP_VALUE_MAX - 1);
+                [](void* cb, const char* n, const char* v, uint32_t) {
+                    char* b = static_cast<char*>(cb);
+                    if (n) strncpy(b, n, 255);
+                    if (v) strncpy(b + 256, v, PROP_VALUE_MAX - 1);
                 }, buf);
         } else if (orig_system_property_read) {
-            // Fallback: reads pi->value directly (only short properties)
-            orig_system_property_read(pi, buf, buf + PROP_NAME_MAX + 1);
+            orig_system_property_read(pi, buf, buf + NAME_BUF);
         } else {
             return;
         }
 
         const char* name = buf;
-        const char* real_val = buf + PROP_NAME_MAX + 1;
+        const char* real_val = buf + NAME_BUF;
         if (name[0] == '\0') return;
 
         // Get what our spoofing logic returns for this property
@@ -3704,71 +3955,101 @@ static void patchPropertyPages() {
             e.pi = pi;
             memset(e.spoofed, 0, sizeof(e.spoofed));
             strncpy(e.spoofed, spoofed, PROP_VALUE_MAX - 1);
-            out->push_back(e);
+            c->patches->push_back(e);
         }
-    }, &patches);
+    }, &ctx);
+
+    LOGE("PR91: Phase 1 done — iterated %d properties, %zu need patching",
+         ctx.total, patches.size());
 
     if (patches.empty()) {
-        LOGD("PR84b: no properties need shadow patching");
+        LOGE("PR91: no properties need shadow patching, done");
+        g_pagesPatched = true;
         return;
     }
 
-    LOGE("PR84b: %zu properties to shadow-patch", patches.size());
-
-    // Phase 2: Remap affected pages as private anonymous and write spoofed values.
-    // mmap(MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS) replaces the shared mapping with
-    // a per-process private copy. Other processes still see the original shared data.
+    // Phase 2: Remap affected pages using mremap for ATOMIC replacement.
+    // The old approach (mmap MAP_FIXED then memcpy) has a brief window where the
+    // page is zero-filled. If ANY concurrent thread (GC, JIT, Binder) reads a
+    // property from that page during the window → SIGSEGV.
+    // mremap(MREMAP_FIXED) atomically replaces the old mapping: readers see either
+    // the old data or the new data, never zeros.  Same pattern used in hideLibraryMaps().
     const long ps = sysconf(_SC_PAGESIZE) > 0 ? sysconf(_SC_PAGESIZE) : 4096;
     std::set<uintptr_t> remapped;
     int patched = 0;
+    int remap_ok = 0, remap_fail = 0;
+
+    LOGE("PR91: Phase 2 — remapping property pages (pagesize=%ld)", ps);
 
     for (const auto& e : patches) {
         uintptr_t pi_addr = reinterpret_cast<uintptr_t>(e.pi);
-        // Value field spans [pi+4, pi+4+PROP_VALUE_MAX). Check if it crosses page boundary.
         uintptr_t val_start = pi_addr + sizeof(uint32_t);
         uintptr_t val_end = val_start + PROP_VALUE_MAX - 1;
-        uintptr_t page_lo = val_start & ~((uintptr_t)ps - 1);
+        // PR91-fix: Start from pi_addr (not val_start) so the serial field's
+        // page is also remapped — needed to update the value length in serial.
+        uintptr_t page_lo = pi_addr & ~((uintptr_t)ps - 1);
         uintptr_t page_hi = val_end & ~((uintptr_t)ps - 1);
 
-        // Remap all pages covering the value field
         for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
             if (remapped.count(pg)) continue;
 
-            // Save original page data before remapping
-            std::vector<char> saved(ps);
-            memcpy(saved.data(), reinterpret_cast<void*>(pg), ps);
-
-            // Replace shared mapping with private anonymous mapping
-            void* r = mmap(reinterpret_cast<void*>(pg), ps,
-                          PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
-            if (r == MAP_FAILED) {
-                LOGE("PR84b: mmap FAIL page=%p: %s", (void*)pg, strerror(errno));
+            // Step 1: Allocate a temporary private page at any address
+            void* tmp = mmap(nullptr, ps, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (tmp == MAP_FAILED) {
+                LOGE("PR91: temp mmap FAIL: %s", strerror(errno));
+                remap_fail++;
                 continue;
             }
 
-            // Restore original data into the private page
-            memcpy(reinterpret_cast<void*>(pg), saved.data(), ps);
-            remapped.insert(pg);
+            // Step 2: Copy current property page data into the temp page
+            memcpy(tmp, reinterpret_cast<void*>(pg), ps);
+
+            // Step 3: Atomically replace the shared property page with our copy
+            void* result = mremap(tmp, ps, ps,
+                                  MREMAP_MAYMOVE | MREMAP_FIXED,
+                                  reinterpret_cast<void*>(pg));
+            if (result != MAP_FAILED) {
+                remapped.insert(pg);
+                remap_ok++;
+            } else {
+                LOGE("PR91: mremap FAIL page=%p: %s", (void*)pg, strerror(errno));
+                munmap(tmp, ps);
+                remap_fail++;
+            }
+        }
+
+        // PR91-fix: Update value length in serial field (Bionic uses serial >> 24).
+        // Without this, direct memory readers see truncated values when
+        // spoofed value is longer than original.
+        uintptr_t pi_page = pi_addr & ~((uintptr_t)ps - 1);
+        if (remapped.count(pi_page)) {
+            uint32_t* serial_ptr = reinterpret_cast<uint32_t*>(pi_addr);
+            uint32_t old_serial = *serial_ptr;
+            uint32_t new_len = (uint32_t)strlen(e.spoofed);
+            *serial_ptr = (new_len << 24) | (old_serial & 0x00FFFFFF);
         }
 
         // Write spoofed value at offset 4 (after atomic serial field)
-        if (remapped.count(pi_addr & ~((uintptr_t)ps - 1))) {
-            char* val_ptr = reinterpret_cast<char*>(
-                const_cast<prop_info*>(e.pi)) + sizeof(uint32_t);
+        uintptr_t val_page = val_start & ~((uintptr_t)ps - 1);
+        if (remapped.count(val_page)) {
+            char* val_ptr = reinterpret_cast<char*>(val_start);
             memset(val_ptr, 0, PROP_VALUE_MAX);
             memcpy(val_ptr, e.spoofed, strlen(e.spoofed));
             patched++;
         }
     }
 
+    LOGE("PR91: Phase 2 done — remapped %d pages ok, %d failed", remap_ok, remap_fail);
+
     // Phase 3: Restore read-only permissions (matches original mapping)
     for (uintptr_t pg : remapped) {
         mprotect(reinterpret_cast<void*>(pg), ps, PROT_READ);
     }
 
-    LOGE("PR84b: shadow-patched %d/%zu props across %zu pages",
+    LOGE("PR91: shadow-patched %d/%zu props across %zu pages",
          patched, patches.size(), remapped.size());
+    g_pagesPatched = true;
 }
 
 // Fix9: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
@@ -3803,14 +4084,17 @@ static bool installPltHooks() {
     // PR84: Pre-resolve __system_property_find for PLT hook fallback
     if (!orig_system_property_find)
         orig_system_property_find = reinterpret_cast<decltype(orig_system_property_find)>(dlsym(RTLD_DEFAULT, "__system_property_find"));
+    // PR88: Pre-resolve __system_property_foreach
+    if (!orig_system_property_foreach)
+        orig_system_property_foreach = reinterpret_cast<decltype(orig_system_property_foreach)>(dlsym(RTLD_DEFAULT, "__system_property_foreach"));
 
-    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p",
+    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p prop_foreach=%p",
          orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read,
-         orig_system_property_find);
+         orig_system_property_find, orig_system_property_foreach);
 
     // Dummy vars for pltHookRegister oldFunc — we don't use these values.
     // The real originals were already set above via dlsym.
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
 
     // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
     // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
@@ -3820,27 +4104,130 @@ static bool installPltHooks() {
     // The Dobby hook (installed later after dlopen ensures the lib is loaded)
     // is the correct approach for glGetString.
 
-    LOGE("Fix11: Registering PLT hooks across %zu ELFs", elfs.size());
+    LOGE("Fix11: Registering PLT hooks across %zu ELFs (spawnInline=%d)", elfs.size(), g_spawnInlineHooked);
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "execve",
                                (void*)my_execve, &d1);
-        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
-                               (void*)my_posix_spawn, &d2);
-        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
-                               (void*)my_posix_spawnp, &d3);
+        // PR90: Only PLT-hook posix_spawn/posix_spawnp if Dobby inline hooks failed.
+        // When both are active, PLT calls my_posix_spawn → orig (= libc start addr,
+        // patched by Dobby) → my_posix_spawn → infinite recursion → crash.
+        if (!g_spawnInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                                   (void*)my_posix_spawn, &d2);
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                                   (void*)my_posix_spawnp, &d3);
+        }
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
                                (void*)my_system_property_read, &d4);
-        // PR84: PLT hook for __system_property_find — fallback when Dobby inline fails.
-        // VDInfo calls find() then reads prop_info->value directly from shared memory.
-        // Our fake prop_info ensures even raw memory reads see the spoofed value.
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
-                               (void*)my_system_property_find, &d5);
+        // PR84/PR86: PLT hook for __system_property_find — only if Dobby inline hook
+        // was not installed. Having both Dobby inline + PLT hook on the same function
+        // causes double-hook recursion (same as Fix10 crash: PLT calls my_* → my_*
+        // calls orig_* → orig_* was Dobby-patched → back to my_* → infinite loop).
+        if (!g_propFindInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
+                                   (void*)my_system_property_find, &d5);
+        }
+        // PR88: PLT hook for __system_property_foreach — only if Dobby inline hook
+        // was not installed (same double-hook recursion guard as __system_property_find).
+        if (!g_propForeachInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
+                                   (void*)my_system_property_foreach, &d6);
+        }
     }
 
     bool ok = g_api->pltHookCommit();
     LOGE("Fix9: pltHookCommit()=%s across %zu ELFs, orig_execve=%p orig_spawn=%p",
          ok ? "true" : "false", elfs.size(), orig_execve, orig_posix_spawn);
     return ok;
+}
+
+// PR87: Re-apply PLT hooks after a new library is loaded via dlopen/android_dlopen_ext.
+// enumerateLoadedElfs() re-scans /proc/self/maps to find ALL loaded .so files, including
+// the one just loaded. For already-hooked ELFs, pltHookCommit() is idempotent
+// (xhook_refresh skips entries whose GOT already points to our hook function).
+// For the newly loaded ELF, it patches the GOT entries for property functions.
+// PR89: Also re-applies execve/posix_spawn/posix_spawnp hooks. Without this,
+// late-loaded native libraries (e.g. VDInfo's .so via System.loadLibrary) retain
+// real libc addresses in their GOT for spawn functions, allowing them to launch
+// unintercepted getprop subprocesses that return real property values.
+static void reapplyPltHooksForNewLibraries() {
+    if (!g_api) return;
+
+    auto elfs = enumerateLoadedElfs();
+    if (elfs.empty()) return;
+
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr,
+         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
+
+    for (const auto& elf : elfs) {
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
+                               (void*)my_system_property_read, &d1);
+        if (!g_propFindInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
+                                   (void*)my_system_property_find, &d2);
+        }
+        if (!g_propForeachInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
+                                   (void*)my_system_property_foreach, &d3);
+        }
+        // PR89: Re-hook subprocess spawn functions for late-loaded libraries.
+        // PR90: posix_spawn/posix_spawnp only via PLT if Dobby inline failed.
+        g_api->pltHookRegister(elf.dev, elf.inode, "execve",
+                               (void*)my_execve, &d4);
+        if (!g_spawnInlineHooked) {
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
+                                   (void*)my_posix_spawn, &d5);
+            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
+                                   (void*)my_posix_spawnp, &d6);
+        }
+    }
+
+    bool ok = g_api->pltHookCommit();
+    LOGE("PR89: reapplyPltHooks (spawn+props) across %zu ELFs, commit=%s",
+         elfs.size(), ok ? "true" : "false");
+}
+
+// PR87: Intercept android_dlopen_ext — called by System.loadLibrary() via JNI.
+// After the linker loads the new .so and resolves its GOT with real libc addresses,
+// we re-apply PLT hooks so the new library's calls go through our spoofing functions.
+// Recursion guard: loading a .so can trigger loading dependencies (nested dlopen).
+// Mutex: dlopen can be called from any thread; pltHookRegister/Commit may not be thread-safe.
+static void* my_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
+    if (g_dlopenReapplyDepth > 0 || !orig_android_dlopen_ext) {
+        return orig_android_dlopen_ext ? orig_android_dlopen_ext(filename, flags, extinfo) : nullptr;
+    }
+    g_dlopenReapplyDepth++;
+
+    void* handle = orig_android_dlopen_ext(filename, flags, extinfo);
+
+    if (handle) {
+        std::lock_guard<std::mutex> lock(g_reapplyMutex);
+        reapplyPltHooksForNewLibraries();
+        LOGE("PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
+    }
+
+    g_dlopenReapplyDepth--;
+    return handle;
+}
+
+// PR87: Intercept dlopen — called by native code loading libraries directly.
+// Same logic as my_android_dlopen_ext but for the simpler dlopen(filename, flags) API.
+static void* my_dlopen_hook(const char* filename, int flags) {
+    if (g_dlopenReapplyDepth > 0 || !orig_dlopen_hook) {
+        return orig_dlopen_hook ? orig_dlopen_hook(filename, flags) : nullptr;
+    }
+    g_dlopenReapplyDepth++;
+
+    void* handle = orig_dlopen_hook(filename, flags);
+
+    if (handle) {
+        std::lock_guard<std::mutex> lock(g_reapplyMutex);
+        reapplyPltHooksForNewLibraries();
+        LOGE("PR87: Re-applied PLT hooks after dlopen(%s)", filename ? filename : "(null)");
+    }
+
+    g_dlopenReapplyDepth--;
+    return handle;
 }
 
 class OmniModule : public zygisk::ModuleBase {
@@ -3920,6 +4307,18 @@ public:
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         if (!env) return;
 
+        // PR91-fix: Detect real MIUI device BEFORE hooks alter property reads.
+        // The MIUI framework in every process depends on ro.miui.* properties for
+        // permissions, settings, etc. If we suppress them, the framework crashes.
+        {
+            char miui_ver[PROP_VALUE_MAX] = {};
+            __system_property_get("ro.miui.ui.version.code", miui_ver);
+            g_realDeviceIsMiui = (miui_ver[0] != '\0');
+            if (g_realDeviceIsMiui) {
+                LOGE("PR91-fix: Real device is MIUI — preserving MIUI framework properties");
+            }
+        }
+
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
         const DeviceFingerprint* sp_ptr = findProfile(g_currentProfileName);
@@ -3979,42 +4378,163 @@ public:
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
         if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
 
-        // PR85: DobbyHook of __system_property_find REMOVED.
-        // On aarch64 Bionic, __system_property_find is a thin wrapper (~4-8 instructions).
-        // Dobby's trampoline overwrites past the function boundary, corrupting adjacent code
-        // and causing SIGABRT. The PLT hook in installPltHooks() covers this function safely.
+        // PR86: Re-attempt Dobby inline hook on __system_property_find.
+        // PR85 removed this because DobbySymbolResolver("libc.so") may have returned
+        // a PLT thunk or wrong address, causing SIGABRT. Now using dlsym(RTLD_DEFAULT)
+        // for reliable resolution of the actual bionic function address.
+        // __system_property_find is NOT a thin syscall wrapper — it traverses the property
+        // trie in shared memory (~15-25 ARM64 instructions, 60-100 bytes), well above
+        // Dobby's 12-byte trampoline requirement.
+        // This inline hook intercepts ALL callers including late-loaded .so files
+        // (VDInfo's native lib, Snapchat's native lib) that aren't covered by PLT hooks.
+        {
+            void* find_func = dlsym(RTLD_DEFAULT, "__system_property_find");
+            if (find_func) {
+                int ret = DobbyHook(find_func, (void*)my_system_property_find,
+                                    (void**)&orig_system_property_find);
+                if (ret == 0) {
+                    LOGE("PR86: Dobby inline hook on __system_property_find SUCCESS at %p", find_func);
+                    g_propFindInlineHooked = true;
+                } else {
+                    LOGE("PR86: Dobby inline hook on __system_property_find FAILED (ret=%d) at %p, falling back to PLT only", ret, find_func);
+                }
+            } else {
+                LOGE("PR86: dlsym(RTLD_DEFAULT, __system_property_find) returned NULL");
+            }
+        }
 
-        // Fix10: PLT hooks para funciones donde Dobby inline hooks fallan.
-        // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
-        // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
-        // DobbyHook retorna ret=0 (éxito) pero orig=sym (sin trampoline real).
-        // PLT hooks modifican punteros GOT (siempre 8 bytes), no código de función.
-        //
-        // FIX10 — eliminado el fallback Dobby que causaba el crash de vdinfos:
-        //
-        // Secuencia del crash (logcat "beginning of crash", SIGSEGV SEGV_ACCERR):
-        //   1. pltHookCommit() devuelve false porque algunos ELFs de /apex/ no tienen
-        //      entradas PLT para posix_spawnp/__system_property_read — esto es NORMAL.
-        //      Sin embargo SÍ instala hooks en los ELFs que tienen las PLT entries
-        //      (libandroid_runtime.so, libjavacore.so, libs de la app…).
-        //   2. El código antiguo interpretaba false como "falló todo" y activaba el
-        //      fallback Dobby, que hookeaba posix_spawn/execve en libc directamente.
-        //   3. Resultado: doble hook. La PLT hookeada llama a my_posix_spawn;
-        //      my_posix_spawn llama a orig_posix_spawn (== dirección real de libc) que
-        //      ya fue parchada por Dobby y salta de vuelta a my_posix_spawn → recursión
-        //      infinita → stack overflow → corrupción del heap de jemalloc → crash.
-        //
-        // Solución: pltHookCommit() false = éxito parcial aceptable.
-        // Los ELFs relevantes (/system/lib64/, /data/) SÍ tienen sus hooks instalados.
-        // Los /apex/ ya se filtraron en enumerateLoadedElfs() (Fix10).
-        // No se necesita fallback Dobby para estas funciones.
+        // PR88: Hook __system_property_foreach — intercept property enumeration.
+        // Detection apps iterate ALL properties via foreach, receiving raw prop_info*
+        // pointers from the property trie. Our wrapper callback substitutes FakePropInfo
+        // (with spoofed values) for spoofed properties. __system_property_foreach in
+        // libc.so traverses the property trie (~50+ ARM64 instructions) — well above
+        // Dobby's 12-byte minimum. Also installed as PLT hook fallback in installPltHooks.
+        // MUST be installed BEFORE installPltHooks() so g_propForeachInlineHooked guard
+        // prevents double-hook recursion (same pattern as __system_property_find above).
+        {
+            void* foreach_addr = DobbySymbolResolver("libc.so", "__system_property_foreach");
+            if (!foreach_addr) foreach_addr = dlsym(RTLD_DEFAULT, "__system_property_foreach");
+            if (foreach_addr) {
+                int ret = DobbyHook(foreach_addr, (void*)my_system_property_foreach,
+                                    (void**)&orig_system_property_foreach);
+                if (ret == 0) {
+                    g_propForeachInlineHooked = true;
+                }
+                LOGE("PR88: __system_property_foreach hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", foreach_addr, ret);
+            } else {
+                LOGE("PR88: Could not resolve __system_property_foreach");
+            }
+        }
+
+        // PR90: Dobby inline hook posix_spawn/posix_spawnp in libc.
+        // These are NOT thin syscall wrappers — they are substantial userspace functions
+        // (fork + exec logic, 100+ ARM64 instructions) well above Dobby's 12-byte minimum.
+        // The Fix10 comment incorrectly claimed they were too small for Dobby.
+        // Inline hooks intercept ALL callers from ANY library (including late-loaded .so
+        // files from VDInfo), unlike PLT hooks which only cover ELFs present at hook time
+        // and depend on pltHookCommit() succeeding for each ELF.
+        // MUST be installed BEFORE installPltHooks() so g_spawnInlineHooked prevents
+        // double-hook registration (PLT + inline → infinite recursion, as documented in Fix10).
+        {
+            void* spawn_addr = dlsym(RTLD_DEFAULT, "posix_spawn");
+            void* spawnp_addr = dlsym(RTLD_DEFAULT, "posix_spawnp");
+            bool spawn_ok = false, spawnp_ok = false;
+            if (spawn_addr) {
+                int ret = DobbyHook(spawn_addr, (void*)my_posix_spawn,
+                                    (void**)&orig_posix_spawn);
+                spawn_ok = (ret == 0);
+                LOGE("PR90: posix_spawn Dobby hook %s at %p (ret=%d)",
+                     spawn_ok ? "SUCCESS" : "FAILED", spawn_addr, ret);
+            }
+            if (spawnp_addr) {
+                int ret = DobbyHook(spawnp_addr, (void*)my_posix_spawnp,
+                                    (void**)&orig_posix_spawnp);
+                spawnp_ok = (ret == 0);
+                LOGE("PR90: posix_spawnp Dobby hook %s at %p (ret=%d)",
+                     spawnp_ok ? "SUCCESS" : "FAILED", spawnp_addr, ret);
+            }
+            if (spawn_ok && spawnp_ok) {
+                g_spawnInlineHooked = true;
+                LOGE("PR90: Both spawn Dobby hooks active — PLT spawn hooks will be SKIPPED");
+            } else {
+                LOGE("PR90: Dobby spawn hooks incomplete — falling back to PLT hooks");
+            }
+        }
+
+        // Fix10: PLT hooks for functions where Dobby inline hooks fail or as fallback.
+        // execve is a thin syscall wrapper (~3 instructions, 12 bytes) — borderline for
+        // Dobby. __system_property_read may also be small on some ROMs. These remain
+        // PLT-only. posix_spawn/posix_spawnp are now Dobby inline hooked (PR90).
+        // pltHookCommit() returning false is normal — some /apex/ ELFs lack PLT entries
+        // for our target functions. The relevant ELFs (libandroid_runtime, libjavacore,
+        // app libs) DO get hooked.
         installPltHooks();
 
-        // PR85: patchPropertyPages() DISABLED — redundant now that the PLT hook for
-        // __system_property_find returns FakePropInfo structs with spoofed values.
-        // Direct memory reads are covered by the fake prop_info, so MAP_FIXED patching
-        // of shared property pages is no longer needed.
-        // patchPropertyPages();
+        // PR86: Hook dlsym for defense-in-depth against dynamic symbol resolution bypass.
+        // Detection apps can call dlsym(RTLD_DEFAULT, "__system_property_find") to get
+        // a raw function pointer, bypassing PLT hooks entirely. By hooking dlsym itself,
+        // we return our spoofed function pointers for all property-related symbols.
+        // dlsym in libdl.so is large enough (~30+ instructions) for Dobby's trampoline.
+        // CRITICAL: MUST be installed AFTER installPltHooks() because that function calls
+        // dlsym(RTLD_DEFAULT, "__system_property_read") to pre-resolve orig_* pointers.
+        // If our hook is active during that resolution, it returns my_system_property_read
+        // instead of the real address, corrupting orig_system_property_read → self-reference
+        // → infinite recursion.
+        {
+            void* dlsym_addr = DobbySymbolResolver("libdl.so", "dlsym");
+            if (!dlsym_addr) dlsym_addr = dlsym(RTLD_DEFAULT, "dlsym");
+            if (dlsym_addr) {
+                int ret = DobbyHook(dlsym_addr, (void*)my_dlsym, (void**)&orig_dlsym);
+                LOGE("PR86: dlsym hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", dlsym_addr, ret);
+            } else {
+                LOGE("PR86: Could not resolve dlsym address for hooking");
+            }
+        }
+
+        // PR87: Hook android_dlopen_ext and dlopen to re-apply PLT hooks to late-loaded libraries.
+        // When apps call System.loadLibrary() (Java→JNI→android_dlopen_ext) or native dlopen(),
+        // the dynamic linker loads the .so and resolves its GOT with real libc addresses using
+        // internal routines (NOT the public dlsym). Our PLT hooks from installPltHooks() only
+        // covered libraries already loaded at that point. By hooking the load event, we detect
+        // new libraries and re-apply PLT hooks before the app can read unhooked property values.
+        // On Android 8+, android_dlopen_ext in libdl.so is a wrapper (~6 ARM64 instructions,
+        // ~24 bytes) around __loader_android_dlopen_ext — sufficient for Dobby's 12-byte trampoline.
+        {
+            void* dlopen_ext_addr = DobbySymbolResolver("libdl.so", "android_dlopen_ext");
+            if (!dlopen_ext_addr) dlopen_ext_addr = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
+            if (dlopen_ext_addr) {
+                int ret = DobbyHook(dlopen_ext_addr, (void*)my_android_dlopen_ext,
+                                    (void**)&orig_android_dlopen_ext);
+                LOGE("PR87: android_dlopen_ext hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", dlopen_ext_addr, ret);
+            } else {
+                LOGE("PR87: Could not resolve android_dlopen_ext");
+            }
+
+            void* dlopen_addr = DobbySymbolResolver("libdl.so", "dlopen");
+            if (!dlopen_addr) dlopen_addr = dlsym(RTLD_DEFAULT, "dlopen");
+            if (dlopen_addr) {
+                int ret = DobbyHook(dlopen_addr, (void*)my_dlopen_hook,
+                                    (void**)&orig_dlopen_hook);
+                LOGE("PR87: dlopen hook %s at %p (ret=%d)",
+                     ret == 0 ? "SUCCESS" : "FAILED", dlopen_addr, ret);
+            } else {
+                LOGE("PR87: Could not resolve dlopen");
+            }
+        }
+
+        // PR91: Re-enable patchPropertyPages() — shadow-patch property memory.
+        // PR85 disabled this assuming FakePropInfo (from __system_property_find hook)
+        // covered all direct memory reads. But VDInfo parses the property trie
+        // directly from shared memory (/dev/__properties__/) WITHOUT calling any
+        // bionic API — no __system_property_find, no __system_property_get, no
+        // __system_property_foreach. It walks the trie data structure manually,
+        // reading prop_info->value bytes directly. No function hook can intercept this.
+        // The ONLY defense: replace the shared property memory pages with private
+        // copies containing spoofed values. This is what patchPropertyPages() does.
+        patchPropertyPages();
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
         // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
@@ -4433,7 +4953,16 @@ public:
         if (!sensor_vendor_func) sensor_vendor_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor9getVendorEv");
         if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
 
+        // Force-load libandroid_runtime — on some ROMs (MIUI, etc.) the Settings JNI
+        // bridge symbols are only available after explicit dlopen, similar to Fix11
+        // for GPU libraries.
+        dlopen("libandroid_runtime.so", RTLD_NOW);
+
         // Settings.Secure (Android ID)
+        // Symbol index 0 = 2-param (JNIEnv*, jstring)
+        // Symbol index 1,2 = 3-param (JNIEnv*, jobject contentResolver, jstring)
+        // Using the wrong wrapper causes ALL Settings reads to return null,
+        // breaking MIUI framework (miui_optimization) and causing crashes.
         static const char* SETTINGS_SYMBOLS[] = {
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
             "_ZN7android16SettingsProvider9getStringEP7_JNIEnvP8_jobjectP8_jstring",
@@ -4441,14 +4970,47 @@ public:
             nullptr
         };
         void* settings_func = nullptr;
+        int settings_variant = -1;
         for (int si = 0; SETTINGS_SYMBOLS[si] && !settings_func; ++si) {
             settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
+            if (settings_func) settings_variant = si;
         }
-        if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+        if (settings_func) {
+            if (settings_variant == 0) {
+                DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+            } else {
+                LOGE("Settings.Secure: using 3-param variant (index %d)", settings_variant);
+                DobbyHook(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
+            }
+        } else {
+            LOGE("Settings.Secure.getString: NO symbol found — hook NOT installed");
+        }
 
         // Settings.Secure (getStringForUser - API 30+)
-        void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
-        if (settings_user_func) DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+        // Symbol index 0 = 3-param (JNIEnv*, jstring, int)
+        // Symbol index 1,2 = 4-param (JNIEnv*, jobject contentResolver, jstring, int)
+        static const char* SECURE_USER_SYMBOLS[] = {
+            "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi",                    // 3-param
+            "_ZN7android16SettingsProvider16getStringForUserEP7_JNIEnvP8_jobjectP8_jstringi",        // 4-param (SettingsProvider)
+            "_ZN7android8Settings6Secure16getStringForUserEP7_JNIEnvP8_jobjectP8_jstringi",          // 4-param (Settings::Secure)
+            nullptr
+        };
+        void* settings_user_func = nullptr;
+        int settings_user_variant = -1;
+        for (int si = 0; SECURE_USER_SYMBOLS[si] && !settings_user_func; ++si) {
+            settings_user_func = DobbySymbolResolver("libandroid_runtime.so", SECURE_USER_SYMBOLS[si]);
+            if (settings_user_func) settings_user_variant = si;
+        }
+        if (settings_user_func) {
+            if (settings_user_variant == 0) {
+                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+            } else {
+                LOGE("Settings.Secure.getStringForUser: using 4-param variant (index %d)", settings_user_variant);
+                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
+            }
+        } else {
+            LOGE("Settings.Secure.getStringForUser: NO symbol found — hook NOT installed");
+        }
 
         // PR75b: Settings.Global (device_name leak)
         static const char* GLOBAL_SYMBOLS[] = {
@@ -4457,13 +5019,44 @@ public:
             nullptr
         };
         void* global_func = nullptr;
+        int global_variant = -1;
         for (int gi = 0; GLOBAL_SYMBOLS[gi] && !global_func; ++gi) {
             global_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_SYMBOLS[gi]);
+            if (global_func) global_variant = gi;
         }
-        if (global_func) DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+        if (global_func) {
+            if (global_variant == 0) {
+                DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+            } else {
+                LOGE("Settings.Global: using 3-param variant (index %d)", global_variant);
+                DobbyHook(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
+            }
+        } else {
+            LOGE("Settings.Global.getString: NO symbol found — hook NOT installed");
+        }
 
-        void* global_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi");
-        if (global_user_func) DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+        // Settings.Global (getStringForUser - API 30+)
+        static const char* GLOBAL_USER_SYMBOLS[] = {
+            "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi",                    // 3-param
+            "_ZN7android8Settings6Global16getStringForUserEP7_JNIEnvP8_jobjectP8_jstringi",          // 4-param (Settings::Global)
+            nullptr
+        };
+        void* global_user_func = nullptr;
+        int global_user_variant = -1;
+        for (int gi = 0; GLOBAL_USER_SYMBOLS[gi] && !global_user_func; ++gi) {
+            global_user_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_USER_SYMBOLS[gi]);
+            if (global_user_func) global_user_variant = gi;
+        }
+        if (global_user_func) {
+            if (global_user_variant == 0) {
+                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+            } else {
+                LOGE("Settings.Global.getStringForUser: using 4-param variant (index %d)", global_user_variant);
+                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
+            }
+        } else {
+            LOGE("Settings.Global.getStringForUser: NO symbol found — hook NOT installed");
+        }
 
         // JNI Telephony — PR76: one-by-one injection to prevent all-or-nothing failure.
         // RegisterNatives rejects the entire batch when any one signature is absent in
@@ -4798,6 +5391,60 @@ public:
             }
         }
 
+        // MIUI fix: Override permission controller package name in app process.
+        // On MIUI, getPermissionControllerPackageName() IPC to system_server returns
+        // "com.lbe.security.miui" which may be a stub without the REQUEST_PERMISSIONS
+        // Activity → ActivityNotFoundException crash. The result is cached in
+        // ApplicationPackageManager.mPermissionsControllerPackageName. We pre-populate
+        // this cache with the AOSP controller BEFORE any Activity calls requestPermissions().
+        // Must run in a background thread because the Application doesn't exist yet
+        // during postAppSpecialize — it's created later by handleBindApplication().
+        if (g_realDeviceIsMiui) {
+            std::thread([]() {
+                JNIEnv* env2 = nullptr;
+                if (!g_jvm) return;
+                if (g_jvm->AttachCurrentThread(&env2, nullptr) != JNI_OK || !env2) return;
+
+                jclass atClass = env2->FindClass("android/app/ActivityThread");
+                jmethodID currentApp = atClass ?
+                    env2->GetStaticMethodID(atClass, "currentApplication",
+                        "()Landroid/app/Application;") : nullptr;
+                if (env2->ExceptionCheck()) env2->ExceptionClear();
+
+                if (!currentApp) { g_jvm->DetachCurrentThread(); return; }
+
+                // Poll until Application is created (before any Activity.onCreate)
+                for (int i = 0; i < 5000; i++) {
+                    jobject app = env2->CallStaticObjectMethod(atClass, currentApp);
+                    if (env2->ExceptionCheck()) { env2->ExceptionClear(); app = nullptr; }
+                    if (app) {
+                        jclass ctxClass = env2->FindClass("android/content/Context");
+                        jmethodID getPM = env2->GetMethodID(ctxClass, "getPackageManager",
+                            "()Landroid/content/pm/PackageManager;");
+                        jobject pm = env2->CallObjectMethod(app, getPM);
+                        if (env2->ExceptionCheck()) { env2->ExceptionClear(); pm = nullptr; }
+                        if (pm) {
+                            jclass pmClass = env2->GetObjectClass(pm);
+                            jfieldID field = env2->GetFieldID(pmClass,
+                                "mPermissionsControllerPackageName", "Ljava/lang/String;");
+                            if (env2->ExceptionCheck()) env2->ExceptionClear();
+                            if (field) {
+                                jstring aosp = env2->NewStringUTF("com.android.permissioncontroller");
+                                env2->SetObjectField(pm, field, aosp);
+                                LOGE("MIUI fix: forced mPermissionsControllerPackageName -> "
+                                     "com.android.permissioncontroller");
+                            }
+                            env2->DeleteLocalRef(pm);
+                        }
+                        env2->DeleteLocalRef(app);
+                        break;
+                    }
+                    usleep(1000); // 1ms
+                }
+                g_jvm->DetachCurrentThread();
+            }).detach();
+        }
+
         // PR70: Remap module .so from file-backed to anonymous memory.
         // All hooks are installed above — now make the .so invisible in maps.
         remapModuleMemory();
@@ -4934,6 +5581,11 @@ static void writeProfileProps(const DeviceFingerprint& fp,
     fprintf(f, "ro.ril.miui.imei0=%s\n", imei0.c_str());
     fprintf(f, "ro.ril.miui.imei1=%s\n", imei1.c_str());
 
+    // MIUI optimization — force off so requestPermissions() uses AOSP
+    // controller (com.android.permissioncontroller) instead of
+    // com.lbe.security.miui which may not exist on global/debloated ROMs
+    fprintf(f, "persist.sys.miui_optimization=false\n");
+
     // Settings.Global device_name — leaks real model name "Redmi 9"
     fprintf(f, "persist.sys.device_name=%s\n", fp.model);
 
@@ -4952,6 +5604,36 @@ static void writeProfileProps(const DeviceFingerprint& fp,
 }
 
 static void companion_handler(int client) {
+    // MIUI crash fix: Force miui_optimization=0 in Settings.Secure BEFORE sending
+    // config to the app. MIUI's Activity.requestPermissions() reads this via
+    // Settings.Secure (Java ContentProvider IPC) — unreachable from native
+    // Dobby/PLT hooks because libandroid_runtime.so has no C++ symbols for
+    // Settings on this ROM. When enabled, permissions route to
+    // com.lbe.security.miui which may not exist → ActivityNotFoundException.
+    // Must run SYNCHRONOUSLY and BEFORE write(client,...) so the setting is
+    // applied before the app process proceeds.
+    {
+        static bool s_miuiOptFixed = false;
+        if (!s_miuiOptFixed) {
+            char miui_ver[PROP_VALUE_MAX] = {};
+            __system_property_get("ro.miui.ui.version.code", miui_ver);
+            if (miui_ver[0] != '\0') {
+                // 1. Change ACTUAL system property via resetprop — visible to ALL
+                // processes including system_server.  The property hook in scoped apps
+                // only affects the app process, but getPermissionControllerPackageName()
+                // is resolved in system_server via Binder IPC.
+                system("RP=$(command -v resetprop 2>/dev/null); "
+                       "[ -z \"$RP\" ] && [ -x /data/adb/magisk/resetprop ] && RP=/data/adb/magisk/resetprop; "
+                       "[ -z \"$RP\" ] && [ -x /data/adb/ksu/bin/resetprop ] && RP=/data/adb/ksu/bin/resetprop; "
+                       "[ -n \"$RP\" ] && \"$RP\" -n persist.sys.miui_optimization false 2>/dev/null");
+                // 2. Also change Settings.Secure for ContentProvider-based reads
+                system("settings put secure miui_optimization 0 2>/dev/null");
+                LOGE("MIUI fix: resetprop + settings put miui_optimization (sync, before app config)");
+            }
+            s_miuiOptFixed = true;
+        }
+    }
+
     std::ifstream file("/data/adb/.omni_data/.identity.cfg");
     std::string content;
     if (file.is_open()) {
@@ -5036,6 +5718,7 @@ static void companion_handler(int client) {
                                            + fp_ptr->model + "' 2>/dev/null &";
                         system(dn_cmd.c_str());
                     }
+
                 }
             }
         }

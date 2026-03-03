@@ -159,3 +159,28 @@ fi
 # ============================================================
 # FIN PR72
 # ============================================================
+
+# ============================================================
+# PR86: Modem property stabilizer
+# ============================================================
+# The modem daemon (RIL) periodically overwrites gsm.operator.*
+# properties with real SIM/network values (e.g. country code from
+# the physical SIM: "cl" for Chile). Zygisk hooks only run inside
+# scoped app processes, but TelephonyManager.getNetworkCountryIso()
+# reads from system_server (which is NOT hooked). resetprop -n
+# writes directly to the shared property area, affecting all readers
+# including system_server's Binder responses.
+# The modem re-writes these props periodically, so we loop every 5s.
+if [ -f "$OMNI_CONFIG" ]; then
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        sleep 2
+    done
+    while true; do
+        resetprop -n gsm.operator.iso-country us
+        resetprop -n gsm.sim.operator.iso-country us
+        sleep 5
+    done &
+fi
+# ============================================================
+# FIN PR86
+# ============================================================
