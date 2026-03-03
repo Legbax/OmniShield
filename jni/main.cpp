@@ -231,6 +231,7 @@ static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fa
 static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
 static bool g_realDeviceIsMiui = false;                  // PR91-fix: true if real device runs MIUI (preserve framework props)
+static bool g_pagesPatched = false;                      // PR91: true after patchPropertyPages succeeds — skip FakePropInfo
 static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
 static bool g_propForeachInlineHooked = false;           // PR88: true if Dobby inline hook on __system_property_foreach succeeded
 static bool g_spawnInlineHooked = false;                 // PR90: true if Dobby inline hooks on posix_spawn/posix_spawnp succeeded
@@ -296,10 +297,12 @@ static const char* (*orig_Sensor_getVendor)(void* sensor);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsSecure_getString3)(JNIEnv*, jobject, jstring);
 static jstring (*orig_SettingsSecure_getStringForUser)(JNIEnv*, jstring, jint);
 
 // Settings.Global
 static jstring (*orig_SettingsGlobal_getString)(JNIEnv*, jstring);
+static jstring (*orig_SettingsGlobal_getString3)(JNIEnv*, jobject, jstring);
 static jstring (*orig_SettingsGlobal_getStringForUser)(JNIEnv*, jstring, jint);
 
 // Helper
@@ -1773,8 +1776,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     try { dateUtc = std::stol(fp.buildDateUtc); } catch(...) {}
                     char dateBuf[128];
                     time_t t = (time_t)dateUtc;
-                    struct tm* tm_info = gmtime(&t);
-                    strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", tm_info);
+                    struct tm tm_buf = {};
+                    gmtime_r(&t, &tm_buf);
+                    strftime(dateBuf, sizeof(dateBuf), "%a %b %d %H:%M:%S UTC %Y", &tm_buf);
 
                     // PR42: Compiler y build user coherentes con la marca del perfil
                     std::string compilerStr;
@@ -2730,7 +2734,9 @@ unsigned long my_getauxval(unsigned long type) {
 // -----------------------------------------------------------------------------
 // Hooks: Settings.Secure (JNI Bridge)
 // -----------------------------------------------------------------------------
-static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
+// Spoofing logic shared by all Settings.Secure wrappers (2-param, 3-param, ForUser).
+// Returns spoofed jstring if key is intercepted, nullptr for passthrough.
+static jstring spoofSettingsSecure(JNIEnv* env, jstring name) {
     if (!name) return nullptr;
     const char* key = env->GetStringUTFChars(name, nullptr);
     if (!key) return nullptr;
@@ -2755,18 +2761,39 @@ static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
         if (fp) result = env->NewStringUTF(fp->model);
     }
     env->ReleaseStringUTFChars(name, key);
+    return result;
+}
 
-    if (result) return result;
+static jstring my_SettingsSecure_getString(JNIEnv* env, jstring name) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
     if (!orig_SettingsSecure_getString) return nullptr;
     return orig_SettingsSecure_getString(env, name);
 }
 
-static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
-    return my_SettingsSecure_getString(env, name);
+// 3-param variant: (JNIEnv*, jobject contentResolver, jstring name)
+// Some ROMs export Settings.Secure.getString with a ContentResolver parameter.
+// Using the wrong wrapper causes `name` to receive the ContentResolver object,
+// making ALL Settings.Secure reads return null (including miui_optimization).
+static jstring my_SettingsSecure_getString3(JNIEnv* env, jobject contentResolver, jstring name) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
+    if (!orig_SettingsSecure_getString3) return nullptr;
+    return orig_SettingsSecure_getString3(env, contentResolver, name);
 }
 
-// PR75b: Settings.Global hook — intercepts device_name which leaks "Redmi 9"
-static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
+static jstring my_SettingsSecure_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
+    jstring r = spoofSettingsSecure(env, name);
+    if (r) return r;
+    if (!orig_SettingsSecure_getStringForUser) return nullptr;
+    return orig_SettingsSecure_getStringForUser(env, name, userHandle);
+}
+
+// -----------------------------------------------------------------------------
+// Hooks: Settings.Global (JNI Bridge)
+// -----------------------------------------------------------------------------
+// Spoofing logic shared by all Settings.Global wrappers.
+static jstring spoofSettingsGlobal(JNIEnv* env, jstring name) {
     if (!name) return nullptr;
     const char* key = env->GetStringUTFChars(name, nullptr);
     if (!key) return nullptr;
@@ -2784,14 +2811,30 @@ static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
         result = env->NewStringUTF("2");  // WIFI_SLEEP_POLICY_NEVER (irrelevante si off)
     }
     env->ReleaseStringUTFChars(name, key);
+    return result;
+}
 
-    if (result) return result;
+// PR75b: Settings.Global hook — intercepts device_name which leaks "Redmi 9"
+static jstring my_SettingsGlobal_getString(JNIEnv* env, jstring name) {
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
     if (!orig_SettingsGlobal_getString) return nullptr;
     return orig_SettingsGlobal_getString(env, name);
 }
 
+// 3-param variant: (JNIEnv*, jobject contentResolver, jstring name)
+static jstring my_SettingsGlobal_getString3(JNIEnv* env, jobject contentResolver, jstring name) {
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
+    if (!orig_SettingsGlobal_getString3) return nullptr;
+    return orig_SettingsGlobal_getString3(env, contentResolver, name);
+}
+
 static jstring my_SettingsGlobal_getStringForUser(JNIEnv* env, jstring name, jint userHandle) {
-    return my_SettingsGlobal_getString(env, name);
+    jstring r = spoofSettingsGlobal(env, name);
+    if (r) return r;
+    if (!orig_SettingsGlobal_getStringForUser) return nullptr;
+    return orig_SettingsGlobal_getStringForUser(env, name, userHandle);
 }
 
 void my_system_property_read_callback(const prop_info *pi, void (*callback)(void *cookie, const char *name, const char *value, uint32_t serial), void *cookie) {
@@ -2958,6 +3001,13 @@ const prop_info* my_system_property_find(const char* name) {
         return real_pi;
     }
 
+    // When PR91 patched pages, prefer real prop_info* (lives in property trie,
+    // safe for pointer arithmetic). FakePropInfo from heap causes SIGSEGV in
+    // apps that walk the trie and compute pointer distances.
+    if (g_pagesPatched && real_pi) {
+        return real_pi;
+    }
+
     // Property IS spoofed and differs from real → return fake prop_info
     std::lock_guard<std::mutex> lock(g_fakePropMutex);
     std::string key(name);
@@ -3035,9 +3085,20 @@ static void foreachWrapperCallback(const prop_info* pi, void* cookie) {
         return;
     }
 
-    // Get (possibly spoofed) prop_info via my_system_property_find
-    const prop_info* resolved = my_system_property_find(name);
-    ctx->userFn(resolved ? resolved : pi, ctx->userCookie);
+    // Filter hidden properties (mediatek, miui on non-MIUI, etc.)
+    if (shouldHide(name)) return;
+
+    if (g_pagesPatched) {
+        // PR91 already rewrote shared memory pages with spoofed values.
+        // Pass the real prop_info* directly — its memory contains the spoofed data
+        // and the pointer lives in the property trie (safe for pointer arithmetic).
+        // Using FakePropInfo (heap) would crash apps that do trie-walking.
+        ctx->userFn(pi, ctx->userCookie);
+    } else {
+        // Fallback: resolve through my_system_property_find which may return FakePropInfo
+        const prop_info* resolved = my_system_property_find(name);
+        ctx->userFn(resolved ? resolved : pi, ctx->userCookie);
+    }
 }
 
 static int my_system_property_foreach(
@@ -3869,6 +3930,7 @@ static void patchPropertyPages() {
 
     if (patches.empty()) {
         LOGE("PR91: no properties need shadow patching, done");
+        g_pagesPatched = true;
         return;
     }
 
@@ -3953,6 +4015,7 @@ static void patchPropertyPages() {
 
     LOGE("PR91: shadow-patched %d/%zu props across %zu pages",
          patched, patches.size(), remapped.size());
+    g_pagesPatched = true;
 }
 
 // Fix9: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
@@ -4857,6 +4920,10 @@ public:
         if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
 
         // Settings.Secure (Android ID)
+        // Symbol index 0 = 2-param (JNIEnv*, jstring)
+        // Symbol index 1,2 = 3-param (JNIEnv*, jobject contentResolver, jstring)
+        // Using the wrong wrapper causes ALL Settings reads to return null,
+        // breaking MIUI framework (miui_optimization) and causing crashes.
         static const char* SETTINGS_SYMBOLS[] = {
             "_ZN7android14SettingsSecure9getStringEP7_JNIEnvP8_jstring",
             "_ZN7android16SettingsProvider9getStringEP7_JNIEnvP8_jobjectP8_jstring",
@@ -4864,10 +4931,19 @@ public:
             nullptr
         };
         void* settings_func = nullptr;
+        int settings_variant = -1;
         for (int si = 0; SETTINGS_SYMBOLS[si] && !settings_func; ++si) {
             settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
+            if (settings_func) settings_variant = si;
         }
-        if (settings_func) DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+        if (settings_func) {
+            if (settings_variant == 0) {
+                DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+            } else {
+                LOGE("Settings.Secure: using 3-param variant (index %d)", settings_variant);
+                DobbyHook(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
+            }
+        }
 
         // Settings.Secure (getStringForUser - API 30+)
         void* settings_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsSecure16getStringForUserEP7_JNIEnvP8_jstringi");
@@ -4880,10 +4956,19 @@ public:
             nullptr
         };
         void* global_func = nullptr;
+        int global_variant = -1;
         for (int gi = 0; GLOBAL_SYMBOLS[gi] && !global_func; ++gi) {
             global_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_SYMBOLS[gi]);
+            if (global_func) global_variant = gi;
         }
-        if (global_func) DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+        if (global_func) {
+            if (global_variant == 0) {
+                DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+            } else {
+                LOGE("Settings.Global: using 3-param variant (index %d)", global_variant);
+                DobbyHook(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
+            }
+        }
 
         void* global_user_func = DobbySymbolResolver("libandroid_runtime.so", "_ZN7android14SettingsGlobal16getStringForUserEP7_JNIEnvP8_jstringi");
         if (global_user_func) DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
