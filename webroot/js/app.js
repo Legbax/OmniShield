@@ -1124,18 +1124,27 @@ window.wipeGoogleTraces = async function() {
 
   // Detect the active WebView provider package, then background the
   // destructive commands with nohup so they survive WebView process death.
+  // PR97: Always explicitly target com.android.webview (AOSP built-in) AND the
+  // dynamically resolved active provider ($WV). Previously only $WV was targeted,
+  // leaving com.android.webview data untouched on devices where the active
+  // provider differs (e.g. Chrome as WebView, or Google WebView active while
+  // AOSP WebView still holds cached data from previous sessions).
   await ksu_exec(
     `nohup sh -c "` +
     `sleep 2; ` +
-    `WV=$(cmd webviewupdate current-webview-package 2>/dev/null || echo com.google.android.webview); ` +
+    `WV=$(cmd webviewupdate current-webview-package 2>/dev/null | tr -d '\\n' || echo com.google.android.webview); ` +
+    `[ -z "\\$WV" ] && WV=com.google.android.webview; ` +
     `am force-stop com.android.vending 2>/dev/null; ` +
     `am force-stop com.google.android.gms 2>/dev/null; ` +
     `am force-stop com.google.android.gsf 2>/dev/null; ` +
+    `am force-stop com.android.webview 2>/dev/null; ` +
     `am force-stop \\$WV 2>/dev/null; ` +
     `pm clear --user 0 com.google.android.gsf 2>/dev/null; ` +
     `pm clear --user 0 com.google.android.gms 2>/dev/null; ` +
     `pm clear --user 0 com.android.vending 2>/dev/null; ` +
+    `pm clear --user 0 com.android.webview 2>/dev/null; ` +
     `pm clear --user 0 \\$WV 2>/dev/null; ` +
+    `rm -rf /data/user/0/com.android.webview/ /data/data/com.android.webview/ /data/user_de/0/com.android.webview/ 2>/dev/null; ` +
     `rm -rf /data/user/0/\\$WV/ /data/data/\\$WV/ /data/user_de/0/\\$WV/ 2>/dev/null` +
     `" >/dev/null 2>&1 &`
   );

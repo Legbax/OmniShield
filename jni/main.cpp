@@ -347,6 +347,20 @@ static void parseConfigString(const std::string& content) {
             g_seedVersion    = newSeedVersion;
         }
     }
+    // PR96: Load user-pinned location from config (set via UI Location selector).
+    // initLocationCache() uses generateLocationForRegion() which ignores these fields.
+    // By setting g_cachedLat/Lon here and marking g_locationCached=true we prevent
+    // initLocationCache() from overwriting with the profile-generated coordinates.
+    if (g_config.count("location_lat") && g_config.count("location_lon")) {
+        try {
+            g_cachedLat      = std::stod(g_config["location_lat"]);
+            g_cachedLon      = std::stod(g_config["location_lon"]);
+            g_locationCached = true;
+            if (g_config.count("location_alt")) {
+                try { g_cachedAlt = std::stod(g_config["location_alt"]); } catch(...) {}
+            }
+        } catch(...) {}
+    }
 }
 
 // Direct file read — fallback when companion is unavailable

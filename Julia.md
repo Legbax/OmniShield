@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-03 (PR95: Dual property elimination via expanded resetprop + timezone fix)
+**Last updated:** 2026-03-03 (PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -414,7 +414,23 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 
 ---
 
-## 15. Update Protocol
+## 15. PR96 / PR97 — Location Selector & Wipe Google Traces (2026-03-03)
+
+### PR96: Location selector now propagates to native GPS hooks
+
+**Bug:** `parseConfigString()` read `profile`, `master_seed`, `seed_version` etc. but silently ignored `location_lat`, `location_lon`, `location_alt`. `initLocationCache()` always called `generateLocationForRegion()` from seed, making the UI Location selector cosmetic-only.
+
+**Fix (`jni/main.cpp`):** Added block at the end of `parseConfigString()` that reads `location_lat`/`location_lon`/`location_alt` from config and sets `g_cachedLat`/`g_cachedLon`/`g_cachedAlt` + `g_locationCached = true`. Since this runs AFTER the `seed_version` reset of `g_locationCached`, user-pinned coordinates always win over the generated fallback.
+
+### PR97: Wipe Google Traces — com.android.webview always targeted
+
+**Bug:** `wipeGoogleTraces()` only wiped the dynamically detected `$WV` package (resolved via `cmd webviewupdate current-webview-package`). On devices where the active WebView is `com.google.android.webview` or Chrome, `com.android.webview` (AOSP built-in) kept residual session data. Additionally, if `cmd webviewupdate` returned unexpected multi-line output, `$WV` could be invalid and `pm clear` silently failed for the wrong package.
+
+**Fix (`webroot/js/app.js`):** Added `| tr -d '\n'` to sanitise `$WV`, added `[ -z "$WV" ] && WV=com.google.android.webview` null-guard, and explicitly added `com.android.webview` to all three operations (`am force-stop`, `pm clear`, `rm -rf`) independently of `$WV`.
+
+---
+
+## 16. Update Protocol
 
 When modifying code, update this Julia.md:
 1. Add entry to this file if a major PR lands
