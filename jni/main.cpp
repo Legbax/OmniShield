@@ -5556,7 +5556,7 @@ static void companion_handler(int client) {
             __system_property_get("ro.miui.ui.version.code", miui_ver);
             if (miui_ver[0] != '\0') {
                 system("settings put secure miui_optimization 0 2>/dev/null");
-                LOGI("MIUI fix: settings put secure miui_optimization 0 (sync, before app config)");
+                LOGE("MIUI fix: settings put secure miui_optimization 0 (sync, before app config)");
             }
             s_miuiOptFixed = true;
         }
