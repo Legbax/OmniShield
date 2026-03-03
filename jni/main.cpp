@@ -1207,6 +1207,7 @@ int my_system_property_get(const char *key, char *value) {
         // exist → ActivityNotFoundException. Force "false" so MIUI uses standard AOSP
         // permission controller (com.android.permissioncontroller).
         else if (g_realDeviceIsMiui && k == "persist.sys.miui_optimization") dynamic_buffer = "false";
+        else if (g_realDeviceIsMiui && k == "ro.miui.build.region") dynamic_buffer = "global";
         else if (k == "ro.hardware.chipname") dynamic_buffer = fp.hardwareChipname;
         else if (k == "ro.product.board") dynamic_buffer = fp.board;
         else if (k == "ro.sf.lcd_density") {
@@ -4703,6 +4704,35 @@ public:
                         env->SetStaticObjectField(build_class, fid_serial, env->NewStringUTF(serial.c_str()));
                     }
 
+                    // --- NEW FIX 1: Spoof MIUI Proprietary Flags ---
+                    // Xiaomi stores these flags in miui.os.Build, NOT in android.os.Build.
+                    if (g_realDeviceIsMiui) {
+                        jclass miui_build_class = env->FindClass("miui/os/Build");
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+
+                        if (miui_build_class) {
+                            // Force International Build
+                            jfieldID fid_intl = env->GetStaticFieldID(miui_build_class, "IS_INTERNATIONAL_BUILD", "Z");
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (fid_intl) {
+                                env->SetStaticBooleanField(miui_build_class, fid_intl, JNI_TRUE);
+                                LOGE("MIUI fix: forced miui.os.Build.IS_INTERNATIONAL_BUILD = true");
+                            }
+
+                            // Force Global Build (Redundancy)
+                            jfieldID fid_global = env->GetStaticFieldID(miui_build_class, "IS_GLOBAL_BUILD", "Z");
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (fid_global) {
+                                env->SetStaticBooleanField(miui_build_class, fid_global, JNI_TRUE);
+                                LOGE("MIUI fix: forced miui.os.Build.IS_GLOBAL_BUILD = true");
+                            }
+                            env->DeleteLocalRef(miui_build_class);
+                        } else {
+                            LOGE("MIUI fix: miui/os/Build class not found!");
+                        }
+                    }
+                    // ----------------------------------------------------------
+
                     // Build.VERSION.SECURITY_PATCH — en clase anidada Build$VERSION
                     jclass build_version_class = env->FindClass("android/os/Build$VERSION");
                     if (build_version_class) {
@@ -5429,10 +5459,10 @@ public:
                                 "mPermissionsControllerPackageName", "Ljava/lang/String;");
                             if (env2->ExceptionCheck()) env2->ExceptionClear();
                             if (field) {
-                                jstring aosp = env2->NewStringUTF("com.android.permissioncontroller");
+                                jstring aosp = env2->NewStringUTF("com.google.android.permissioncontroller");
                                 env2->SetObjectField(pm, field, aosp);
                                 LOGE("MIUI fix: forced mPermissionsControllerPackageName -> "
-                                     "com.android.permissioncontroller");
+                                     "com.google.android.permissioncontroller");
                             }
                             env2->DeleteLocalRef(pm);
                         }
