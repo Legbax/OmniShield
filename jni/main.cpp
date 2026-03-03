@@ -5541,6 +5541,27 @@ static void writeProfileProps(const DeviceFingerprint& fp,
 }
 
 static void companion_handler(int client) {
+    // MIUI crash fix: Force miui_optimization=0 in Settings.Secure BEFORE sending
+    // config to the app. MIUI's Activity.requestPermissions() reads this via
+    // Settings.Secure (Java ContentProvider IPC) — unreachable from native
+    // Dobby/PLT hooks because libandroid_runtime.so has no C++ symbols for
+    // Settings on this ROM. When enabled, permissions route to
+    // com.lbe.security.miui which may not exist → ActivityNotFoundException.
+    // Must run SYNCHRONOUSLY and BEFORE write(client,...) so the setting is
+    // applied before the app process proceeds.
+    {
+        static bool s_miuiOptFixed = false;
+        if (!s_miuiOptFixed) {
+            char miui_ver[PROP_VALUE_MAX] = {};
+            __system_property_get("ro.miui.ui.version.code", miui_ver);
+            if (miui_ver[0] != '\0') {
+                system("settings put secure miui_optimization 0 2>/dev/null");
+                LOGI("MIUI fix: settings put secure miui_optimization 0 (sync, before app config)");
+            }
+            s_miuiOptFixed = true;
+        }
+    }
+
     std::ifstream file("/data/adb/.omni_data/.identity.cfg");
     std::string content;
     if (file.is_open()) {
@@ -5626,20 +5647,6 @@ static void companion_handler(int client) {
                         system(dn_cmd.c_str());
                     }
 
-                    // MIUI crash fix: Force miui_optimization=0 in Settings.Secure.
-                    // MIUI's Activity.requestPermissions() reads this via Settings.Secure
-                    // (Java ContentProvider IPC) — unreachable from native Dobby/PLT hooks
-                    // because libandroid_runtime.so has no C++ symbols for Settings on this
-                    // ROM. When enabled, permissions route to com.lbe.security.miui which
-                    // may not exist → ActivityNotFoundException crash.
-                    // Same pattern as PR76 device_name: write directly via 'settings put'.
-                    {
-                        char miui_ver[PROP_VALUE_MAX] = {};
-                        __system_property_get("ro.miui.ui.version.code", miui_ver);
-                        if (miui_ver[0] != '\0') {
-                            system("settings put secure miui_optimization 0 2>/dev/null &");
-                        }
-                    }
                 }
             }
         }
