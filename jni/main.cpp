@@ -4312,8 +4312,12 @@ public:
                         if (mount(fdpath, "/proc/cpuinfo", nullptr, MS_BIND, nullptr) == 0) {
                             LOGE("MemFD: bind-mounted spoofed /proc/cpuinfo (%zu bytes)",
                                  fake_cpuinfo.size());
+                        } else {
+                            LOGE("MemFD: bind mount failed (errno=%d), falling back to hooks",
+                                 errno);
                         }
-                        // mfd stays open — the mount holds a reference to it
+                        // Exempt fd from zygote's automatic fd cleanup during specialization
+                        if (g_api) g_api->exemptFd(mfd);
                     }
                 }
             }
