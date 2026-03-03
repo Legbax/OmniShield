@@ -175,9 +175,41 @@ if [ -f "$OMNI_CONFIG" ]; then
     until [ "$(getprop sys.boot_completed)" = "1" ]; do
         sleep 2
     done
+
+    # Lectura de propiedades cosméticas seguras (evita bootloop por falta de drivers HAL)
+    # Se leen del archivo inyectado (ej. desde la UI o script externo)
+    COSMETIC_FILE="/data/local/tmp/omnishield_profile"
+
     while true; do
         resetprop -n gsm.operator.iso-country us
         resetprop -n gsm.sim.operator.iso-country us
+        resetprop -n persist.sys.miui_optimization false
+
+        # Aplicar propiedades cosméticas permitidas de forma segura
+        if [ -f "$COSMETIC_FILE" ]; then
+            while IFS='=' read -r key value; do
+                [ -z "$key" ] && continue
+                # Filtro estricto: solo permite propiedades cosméticas terminadas en sufijos seguros
+                # o propiedades específicas de fingerprint/description.
+                case "$key" in
+                    *.model|*.brand|*.name|*.device|*.manufacturer|ro.build.fingerprint|ro.*.build.fingerprint|ro.build.description|ro.*.build.description)
+                        resetprop -n "$key" "$value" 2>/dev/null
+                        ;;
+                    *)
+                        # Bloquea explícitamente propiedades letales
+                        ;;
+                esac
+            done < "$COSMETIC_FILE"
+        fi
+
+        # Fijar tags globalmente
+        resetprop -n ro.build.tags "release-keys"
+        resetprop -n ro.vendor.build.tags "release-keys"
+        resetprop -n ro.odm.build.tags "release-keys"
+        resetprop -n ro.product.build.tags "release-keys"
+        resetprop -n ro.system.build.tags "release-keys"
+        resetprop -n ro.system_ext.build.tags "release-keys"
+
         sleep 5
     done &
 fi

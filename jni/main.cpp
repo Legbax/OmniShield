@@ -5459,10 +5459,10 @@ public:
                                 "mPermissionsControllerPackageName", "Ljava/lang/String;");
                             if (env2->ExceptionCheck()) env2->ExceptionClear();
                             if (field) {
-                                jstring aosp = env2->NewStringUTF("com.google.android.permissioncontroller");
+                                jstring aosp = env2->NewStringUTF("com.android.permissioncontroller");
                                 env2->SetObjectField(pm, field, aosp);
                                 LOGE("MIUI fix: forced mPermissionsControllerPackageName -> "
-                                     "com.google.android.permissioncontroller");
+                                     "com.android.permissioncontroller");
                             }
                             env2->DeleteLocalRef(pm);
                         }
