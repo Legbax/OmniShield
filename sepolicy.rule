@@ -1,0 +1,2 @@
+allow zygote proc_cpuinfo:file mounton
+allow zygote tmpfs:file { read write }

@@ -4300,9 +4300,12 @@ public:
                 // By bind-mounting a memfd over /proc/cpuinfo before specialization
                 // (while we still have CAP_SYS_ADMIN from Zygote), all reads — including
                 // direct syscalls — see the spoofed content.
+                LOGE("MemFD: profile='%s', looking up...", g_currentProfileName.c_str());
                 const DeviceFingerprint* fp_cpu = findProfile(g_currentProfileName);
                 if (fp_cpu) {
                     std::string fake_cpuinfo = generateMulticoreCpuInfo(*fp_cpu);
+                    LOGE("MemFD: profile found, hardware='%s', cpuinfo_size=%zu",
+                         fp_cpu->hardware, fake_cpuinfo.size());
                     int mfd = syscall(__NR_memfd_create, "fake_cpuinfo", 0);
                     if (mfd >= 0) {
                         write(mfd, fake_cpuinfo.c_str(), fake_cpuinfo.size());
@@ -4313,12 +4316,17 @@ public:
                             LOGE("MemFD: bind-mounted spoofed /proc/cpuinfo (%zu bytes)",
                                  fake_cpuinfo.size());
                         } else {
-                            LOGE("MemFD: bind mount failed (errno=%d), falling back to hooks",
-                                 errno);
+                            LOGE("MemFD: bind mount FAILED (errno=%d: %s), falling back to hooks",
+                                 errno, strerror(errno));
                         }
                         // Exempt fd from zygote's automatic fd cleanup during specialization
                         if (g_api) g_api->exemptFd(mfd);
+                    } else {
+                        LOGE("MemFD: memfd_create failed (errno=%d: %s)", errno, strerror(errno));
                     }
+                } else {
+                    LOGE("MemFD: findProfile('%s') returned NULL — no cpuinfo spoof",
+                         g_currentProfileName.c_str());
                 }
             }
             // PR85: DLCLOSE_MODULE_LIBRARY removed — thread_local g_inPropertyFind
@@ -4329,6 +4337,24 @@ public:
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (!g_isTargetApp) return;
+
+        // MemFD postcheck: verify if /proc/cpuinfo bind mount survived
+        // FORCE_DENYLIST_UNMOUNT + specialization. Reads first line to confirm.
+        {
+            FILE* cpuf = fopen("/proc/cpuinfo", "r");
+            if (cpuf) {
+                char line[256] = {};
+                if (fgets(line, sizeof(line), cpuf)) {
+                    // Strip trailing newline
+                    size_t len = strlen(line);
+                    if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
+                    LOGE("MemFD postcheck: /proc/cpuinfo first line = '%s'", line);
+                }
+                fclose(cpuf);
+            } else {
+                LOGE("MemFD postcheck: failed to open /proc/cpuinfo (errno=%d)", errno);
+            }
+        }
 
         // PR56: obtener JNIEnv desde g_jvm (ya no viene como parámetro)
         JNIEnv *env = nullptr;
@@ -5583,6 +5609,71 @@ static bool applySusfsCmdline() {
                   "/data/adb/.omni_data/.cmdline 2>/dev/null") == 0;
 }
 
+// PIF Hijacking: Write OmniShield profile data directly to /data/adb/pif.prop.
+// Selectively updates only hardware/cosmetic keys — preserves user settings
+// (spoofBuild, DEBUG, etc.) that PIF uses for its own configuration.
+// This is the PRIMARY injection path; boot-completed.sh is a backup for 2nd+ boots.
+static void writePifProps(const DeviceFingerprint& fp) {
+    const char* pifPath = "/data/adb/pif.prop";
+
+    struct KV { const char* key; const char* val; };
+    KV pifKeys[] = {
+        {"FINGERPRINT",    fp.fingerprint},
+        {"MANUFACTURER",   fp.manufacturer},
+        {"MODEL",          fp.model},
+        {"BRAND",          fp.brand},
+        {"PRODUCT",        fp.product},
+        {"DEVICE",         fp.device},
+        {"RELEASE",        fp.release},
+        {"ID",             fp.buildId},
+        {"INCREMENTAL",    fp.incremental},
+        {"SECURITY_PATCH", fp.securityPatch},
+    };
+    constexpr int NUM_KEYS = 10;
+
+    // Read existing file content (preserve user settings)
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(pifPath);
+        std::string line;
+        while (std::getline(in, line)) {
+            lines.push_back(line);
+        }
+    }
+
+    // Update existing lines in-place, track which keys were updated
+    bool updated[NUM_KEYS] = {};
+    for (auto& line : lines) {
+        for (int i = 0; i < NUM_KEYS; i++) {
+            std::string prefix = std::string(pifKeys[i].key) + "=";
+            if (line.compare(0, prefix.size(), prefix) == 0) {
+                line = prefix + pifKeys[i].val;
+                updated[i] = true;
+                break;
+            }
+        }
+    }
+
+    // Append keys that didn't exist
+    for (int i = 0; i < NUM_KEYS; i++) {
+        if (!updated[i] && pifKeys[i].val[0] != '\0') {
+            lines.push_back(std::string(pifKeys[i].key) + "=" + pifKeys[i].val);
+        }
+    }
+
+    // Write back
+    FILE* f = fopen(pifPath, "w");
+    if (!f) {
+        LOGE("PIF: failed to open %s for writing (errno=%d)", pifPath, errno);
+        return;
+    }
+    for (auto& line : lines) {
+        fprintf(f, "%s\n", line.c_str());
+    }
+    fclose(f);
+    chmod(pifPath, 0644);
+}
+
 static void writeProfileProps(const DeviceFingerprint& fp,
                               const std::string& profileName, long masterSeed) {
     // PR74: ONLY write runtime properties safe for global resetprop.
@@ -5765,7 +5856,16 @@ static void companion_handler(int client) {
 
                     writeProfileProps(*fp_ptr, profileName, masterSeed);
 
-                    // 3. Apply resetprop immediately (background) — fixes first-boot
+                    // 3. PIF Hijacking: inject profile into /data/adb/pif.prop
+                    // This is the primary injection path — boot-completed.sh is
+                    // only a backup for 2nd+ boots before any scoped app launches.
+                    writePifProps(*fp_ptr);
+                    // Kill GMS to force re-read of pif.prop
+                    system("killall com.google.android.gms.unstable 2>/dev/null &");
+                    LOGE("PIF: injected profile '%s' into /data/adb/pif.prop",
+                         profileName.c_str());
+
+                    // 4. Apply resetprop immediately (background) — fixes first-boot
                     // race condition where boot-completed.sh runs before .profile_props exists
                     system("sh -c '"
                         "RP=/data/adb/ksu/bin/resetprop; "
