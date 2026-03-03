@@ -224,7 +224,7 @@ static int (*orig_ioctl)(int, unsigned long, void*) = nullptr;
 struct FakePropInfo {
     uint32_t serial;                    // offset 0: atomic serial (matches bionic layout)
     char value[PROP_VALUE_MAX];         // offset 4: property value (92 bytes)
-    char name[PROP_NAME_MAX + 1];       // name storage (flexible array replacement)
+    char name[256];                     // name storage — large enough for MIUI long names
 };
 static std::unordered_map<std::string, FakePropInfo*> g_fakePropMap;
 static std::set<const void*> g_fakePropPtrs;           // O(log n) lookup for fake detection
@@ -2941,12 +2941,12 @@ int my_system_property_read(const prop_info *pi, char *name, char *value) {
         // Fix8: orig_system_property_read is NULL (Dobby trampoline failed on thin
         // syscall wrapper). Use the working __system_property_read_callback as fallback
         // to extract property name and value from the prop_info pointer.
-        struct ReadCtx { char n[PROP_NAME_MAX+1]; char v[PROP_VALUE_MAX]; uint32_t s; };
+        struct ReadCtx { char n[256]; char v[PROP_VALUE_MAX]; uint32_t s; };
         ReadCtx ctx = {};
         orig_system_property_read_callback(pi,
             [](void* cookie, const char* n, const char* v, uint32_t s) {
                 auto* c = static_cast<ReadCtx*>(cookie);
-                if (n) strncpy(c->n, n, PROP_NAME_MAX);
+                if (n) strncpy(c->n, n, sizeof(c->n) - 1);
                 if (v) strncpy(c->v, v, PROP_VALUE_MAX - 1);
                 c->s = s;
             }, &ctx);
@@ -3047,7 +3047,7 @@ const prop_info* my_system_property_find(const char* name) {
         // Allocate new fake prop_info (lifetime = process)
         fake = new FakePropInfo();
         memset(fake, 0, sizeof(FakePropInfo));
-        strncpy(fake->name, name, PROP_NAME_MAX);
+        strncpy(fake->name, name, sizeof(fake->name) - 1);
         // Copy serial from real prop_info if available (consistency for atomic readers)
         if (real_pi) {
             fake->serial = reinterpret_cast<const uint32_t*>(real_pi)[0];
@@ -3090,23 +3090,24 @@ static void foreachWrapperCallback(const prop_info* pi, void* cookie) {
     auto* ctx = static_cast<ForeachWrapperCtx*>(cookie);
     if (!pi || !ctx || !ctx->userFn) return;
 
-    // Extract property name from the real prop_info
-    char name[PROP_NAME_MAX + 1] = {};
+    // Extract property name from the real prop_info.
+    // Prefer read_callback (returns full name) over deprecated read (truncates
+    // names >= 31 chars and spams logcat with "property name length >= 31" warnings).
+    char name[256] = {};
     char value[PROP_VALUE_MAX] = {};
 
-    if (orig_system_property_read) {
-        orig_system_property_read(pi, name, value);
-    } else if (orig_system_property_read_callback) {
-        // Fallback: use read_callback to extract name
-        struct ReadCtx { char n[PROP_NAME_MAX+1]; char v[PROP_VALUE_MAX]; };
+    if (orig_system_property_read_callback) {
+        struct ReadCtx { char n[256]; char v[PROP_VALUE_MAX]; };
         ReadCtx rctx = {};
         orig_system_property_read_callback(pi,
             [](void* c, const char* n, const char* v, uint32_t) {
                 auto* rc = static_cast<ReadCtx*>(c);
-                if (n) strncpy(rc->n, n, PROP_NAME_MAX);
+                if (n) strncpy(rc->n, n, sizeof(rc->n) - 1);
                 if (v) strncpy(rc->v, v, PROP_VALUE_MAX - 1);
             }, &rctx);
-        strncpy(name, rctx.n, PROP_NAME_MAX);
+        strncpy(name, rctx.n, sizeof(name) - 1);
+    } else if (orig_system_property_read) {
+        orig_system_property_read(pi, name, value);
     }
 
     if (!name[0]) {
@@ -3303,11 +3304,11 @@ static int my_execve(const char *pathname, char *const argv[], char *const envp[
             }
             // getprop with no args — emulate full property dump with spoofed values
             __system_property_foreach([](const prop_info* pi, void* /*cookie*/) {
-                struct { char name[PROP_NAME_MAX + 1]; } ctx = {};
+                struct { char name[256]; } ctx = {};
                 __system_property_read_callback(pi,
                     [](void* c, const char* n, const char*, unsigned) {
                         auto* p = static_cast<decltype(&ctx)>(c);
-                        if (n) strncpy(p->name, n, PROP_NAME_MAX);
+                        if (n) strncpy(p->name, n, sizeof(p->name) - 1);
                     }, &ctx);
 
                 if (ctx.name[0] == '\0') return;
@@ -3472,10 +3473,10 @@ static std::string generateSpoofedContent(const char *resolved_path,
     std::string dump;
     __system_property_foreach([](const prop_info* pi, void* cookie) {
         auto* out = static_cast<std::string*>(cookie);
-        char name[PROP_NAME_MAX + 1] = {};
+        char name[256] = {};
         __system_property_read_callback(pi,
             [](void* c, const char* n, const char*, unsigned) {
-                if (n) strncpy(static_cast<char*>(c), n, PROP_NAME_MAX);
+                if (n) strncpy(static_cast<char*>(c), n, 255);
             }, name);
 
         if (name[0] == '\0') return;
@@ -3922,24 +3923,27 @@ static void patchPropertyPages() {
         c->total++;
 
         // Read real name + value via original (unhooked) function.
-        char buf[PROP_NAME_MAX + 1 + PROP_VALUE_MAX];
+        // Use 256-byte name buffer to avoid truncating long property names
+        // (MIUI has names like "persist.sys.miui.adj_update_foreground_state.enable.delayMs").
+        static constexpr int NAME_BUF = 256;
+        char buf[NAME_BUF + PROP_VALUE_MAX];
         memset(buf, 0, sizeof(buf));
 
         if (orig_system_property_read_callback) {
             orig_system_property_read_callback(pi,
                 [](void* cb, const char* n, const char* v, uint32_t) {
                     char* b = static_cast<char*>(cb);
-                    if (n) strncpy(b, n, PROP_NAME_MAX);
-                    if (v) strncpy(b + PROP_NAME_MAX + 1, v, PROP_VALUE_MAX - 1);
+                    if (n) strncpy(b, n, 255);
+                    if (v) strncpy(b + 256, v, PROP_VALUE_MAX - 1);
                 }, buf);
         } else if (orig_system_property_read) {
-            orig_system_property_read(pi, buf, buf + PROP_NAME_MAX + 1);
+            orig_system_property_read(pi, buf, buf + NAME_BUF);
         } else {
             return;
         }
 
         const char* name = buf;
-        const char* real_val = buf + PROP_NAME_MAX + 1;
+        const char* real_val = buf + NAME_BUF;
         if (name[0] == '\0') return;
 
         // Get what our spoofing logic returns for this property
@@ -5523,6 +5527,11 @@ static void writeProfileProps(const DeviceFingerprint& fp,
     fprintf(f, "ro.ril.miui.imei0=%s\n", imei0.c_str());
     fprintf(f, "ro.ril.miui.imei1=%s\n", imei1.c_str());
 
+    // MIUI optimization — force off so requestPermissions() uses AOSP
+    // controller (com.android.permissioncontroller) instead of
+    // com.lbe.security.miui which may not exist on global/debloated ROMs
+    fprintf(f, "persist.sys.miui_optimization=false\n");
+
     // Settings.Global device_name — leaks real model name "Redmi 9"
     fprintf(f, "persist.sys.device_name=%s\n", fp.model);
 
@@ -5555,8 +5564,17 @@ static void companion_handler(int client) {
             char miui_ver[PROP_VALUE_MAX] = {};
             __system_property_get("ro.miui.ui.version.code", miui_ver);
             if (miui_ver[0] != '\0') {
+                // 1. Change ACTUAL system property via resetprop — visible to ALL
+                // processes including system_server.  The property hook in scoped apps
+                // only affects the app process, but getPermissionControllerPackageName()
+                // is resolved in system_server via Binder IPC.
+                system("RP=$(command -v resetprop 2>/dev/null); "
+                       "[ -z \"$RP\" ] && [ -x /data/adb/magisk/resetprop ] && RP=/data/adb/magisk/resetprop; "
+                       "[ -z \"$RP\" ] && [ -x /data/adb/ksu/bin/resetprop ] && RP=/data/adb/ksu/bin/resetprop; "
+                       "[ -n \"$RP\" ] && \"$RP\" -n persist.sys.miui_optimization false 2>/dev/null");
+                // 2. Also change Settings.Secure for ContentProvider-based reads
                 system("settings put secure miui_optimization 0 2>/dev/null");
-                LOGE("MIUI fix: settings put secure miui_optimization 0 (sync, before app config)");
+                LOGE("MIUI fix: resetprop + settings put miui_optimization (sync, before app config)");
             }
             s_miuiOptFixed = true;
         }
