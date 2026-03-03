@@ -125,6 +125,7 @@ enum FileType {
     PROC_CMDLINE, PROC_STAT, SYS_BLOCK_MODEL, SYS_CPU_GOVERNORS,
     BT_MAC, BT_NAME,
     PROC_NET_ARP, PROC_NET_DEV,
+    PROC_NET_ROUTE,       // PR98: /proc/net/route — IPv4 routing table (exposed tun0 when proxy active)
     PROC_HOSTNAME,
     PROC_OSTYPE,
     PROC_DTB_MODEL,
@@ -1754,14 +1755,24 @@ int my_open(const char *pathname, int flags, mode_t mode) {
         else if (strstr(pathname, "/sys/class/bluetooth/hci0/name")) type = BT_NAME;
         // PR20: Red virtual (oculta MAC real del router y estadísticas reales)
         else if (strcmp(pathname, "/proc/net/arp") == 0)   type = PROC_NET_ARP;
-        else if (strcmp(pathname, "/proc/net/dev") == 0)   type = PROC_NET_DEV;
-        // PR32: Sellado forense de sockets TCP/UDP
+        else if (strcmp(pathname, "/proc/net/dev") == 0  ||
+                 strcmp(pathname, "/proc/self/net/dev") == 0) type = PROC_NET_DEV;   // PR98: self/net alias
+        // PR98: IPv4 routing table — exposes tun0 route when proxy active; /proc/self/net/ alias also covered
+        else if (strcmp(pathname, "/proc/net/route") == 0 ||
+                 strcmp(pathname, "/proc/self/net/route") == 0) type = PROC_NET_ROUTE;
+        // PR32: Sellado forense de sockets TCP/UDP (+ PR98: self/net aliases)
         else if (strcmp(pathname, "/proc/net/tcp") == 0 ||
-                 strcmp(pathname, "/proc/net/tcp6") == 0)  type = PROC_NET_TCP;
+                 strcmp(pathname, "/proc/net/tcp6") == 0  ||
+                 strcmp(pathname, "/proc/self/net/tcp") == 0 ||
+                 strcmp(pathname, "/proc/self/net/tcp6") == 0) type = PROC_NET_TCP;
         else if (strcmp(pathname, "/proc/net/udp") == 0 ||
-                 strcmp(pathname, "/proc/net/udp6") == 0)  type = PROC_NET_UDP;
-        else if (strstr(pathname, "/proc/net/if_inet6"))   type = PROC_NET_IF_INET6;
-        else if (strstr(pathname, "/proc/net/ipv6_route")) type = PROC_NET_IPV6_ROUTE;
+                 strcmp(pathname, "/proc/net/udp6") == 0  ||
+                 strcmp(pathname, "/proc/self/net/udp") == 0 ||
+                 strcmp(pathname, "/proc/self/net/udp6") == 0) type = PROC_NET_UDP;
+        else if (strstr(pathname, "/proc/net/if_inet6") ||
+                 strstr(pathname, "/proc/self/net/if_inet6"))  type = PROC_NET_IF_INET6; // PR98: self/net alias
+        else if (strstr(pathname, "/proc/net/ipv6_route") ||
+                 strstr(pathname, "/proc/self/net/ipv6_route")) type = PROC_NET_IPV6_ROUTE; // PR98: self/net alias
         // PR37: Nuevos VFS handlers
         else if (strcmp(pathname, "/proc/sys/kernel/random/boot_id") == 0) type = PROC_BOOT_ID;
         else if (strcmp(pathname, "/proc/self/cgroup") == 0 || isProcPidPath(pathname, "cgroup")) type = PROC_SELF_CGROUP;
@@ -2174,6 +2185,20 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                                   " wlan0:  524288    4096    0    0    0     0          0         0"
                                   "   131072    1024    0    0    0     0       0          0\n";
                     }
+                // PR98: Tabla de rutas IPv4 virtualizada — oculta ruta tun0 cuando el proxy está activo.
+                // Formato: Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+                // IPs en hex little-endian: 0001A8C0=192.168.1.0, 0101A8C0=192.168.1.1, 00FFFFFF=255.255.255.0
+                } else if (type == PROC_NET_ROUTE) {
+                    if (g_spoofMobileNetwork) {
+                        content = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+                                  "rmnet_data0\t00000000\t00000000\t0001\t0\t0\t100\t00000000\t0\t0\t0\n"
+                                  "lo\t0000007F\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n";
+                    } else {
+                        content = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+                                  "wlan0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"
+                                  "wlan0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+                                  "lo\t0000007F\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n";
+                    }
                 // PR32: Tabla TCP virtualizada — oculta IPs locales y puertos de servicios reales
                 } else if (type == PROC_NET_TCP) {
                     content = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
@@ -2201,12 +2226,15 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         char tmpBuf[4096]; ssize_t r;
                         std::string raw;
                         while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) raw.append(tmpBuf, r);
-                        // Filter lines containing dummy0, p2p, tun interfaces
+                        // PR42+PR84: Filter lines containing dummy, p2p interfaces.
+                        // PR98: Added tun filter — tun0 gets a link-local IPv6 (fe80::/10)
+                        // automatically from the kernel when brought up, leaking its presence.
                         std::istringstream iss(raw);
                         std::string line;
                         while (std::getline(iss, line)) {
                             if (line.find("dummy") != std::string::npos ||
-                                line.find("p2p") != std::string::npos) {
+                                line.find("p2p")   != std::string::npos ||
+                                line.find("tun")   != std::string::npos) {
                                 continue;  // skip this interface
                             }
                             content += line + "\n";

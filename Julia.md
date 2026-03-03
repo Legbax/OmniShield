@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-03 (PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-03 (PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -414,7 +414,23 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 
 ---
 
-## 15. PR96 / PR97 — Location Selector & Wipe Google Traces (2026-03-03)
+## 15. PR98 — Patch tun0 VPN leakage (2026-03-03)
+
+VdInfo detected `tun0` as an active VPN interface even though hev-socks5-tunnel uses root iptables (not Android VpnService). Three VFS gaps were confirmed:
+
+### Gaps fixed
+
+| Vector | Root cause | Fix |
+|--------|------------|-----|
+| `/proc/net/route` | No `PROC_NET_ROUTE` enum or handler — kernel adds tun0 route when proxy active | Added synthetic routing table (wlan0 routes in WiFi mode, rmnet_data0 in LTE mode) |
+| `/proc/net/if_inet6` WiFi mode | Comment said "filter tun" but `if` only checked `dummy` and `p2p` — tun0 link-local IPv6 (fe80::/10) leaked | Added `line.find("tun") != npos` condition |
+| `/proc/self/net/*` aliases | All handlers used `strcmp("/proc/net/...")` — the `/proc/self/net/` kernel alias bypassed every hook | Extended conditions to also match `/proc/self/net/dev`, `/proc/self/net/route`, `/proc/self/net/if_inet6`, `/proc/self/net/tcp[6]`, `/proc/self/net/udp[6]` |
+
+**Files changed:** `jni/main.cpp`
+
+---
+
+## 16. PR96 / PR97 — Location Selector & Wipe Google Traces (2026-03-03)
 
 ### PR96: Location selector now propagates to native GPS hooks
 
@@ -430,7 +446,7 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 
 ---
 
-## 16. Update Protocol
+## 17. Update Protocol
 
 When modifying code, update this Julia.md:
 1. Add entry to this file if a major PR lands
