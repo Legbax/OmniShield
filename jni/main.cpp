@@ -4704,18 +4704,34 @@ public:
                         env->SetStaticObjectField(build_class, fid_serial, env->NewStringUTF(serial.c_str()));
                     }
 
-                    // MIUI fix: force IS_INTERNATIONAL_BUILD = true.
-                    // MIUI adds this field to android.os.Build. On CN builds it is false,
-                    // causing Activity.requestPermissions() to hardcode pkg=com.lbe.security.miui.
-                    // Setting it here in the main thread guarantees it's true before any Activity runs.
+                    // --- NEW FIX 1: Spoof MIUI Proprietary Flags ---
+                    // Xiaomi stores these flags in miui.os.Build, NOT in android.os.Build.
                     if (g_realDeviceIsMiui) {
-                        jfieldID fid_intl = env->GetStaticFieldID(build_class, "IS_INTERNATIONAL_BUILD", "Z");
+                        jclass miui_build_class = env->FindClass("miui/os/Build");
                         if (env->ExceptionCheck()) env->ExceptionClear();
-                        if (fid_intl) {
-                            env->SetStaticBooleanField(build_class, fid_intl, JNI_TRUE);
-                            LOGE("MIUI fix: forced Build.IS_INTERNATIONAL_BUILD = true");
+
+                        if (miui_build_class) {
+                            // Force International Build
+                            jfieldID fid_intl = env->GetStaticFieldID(miui_build_class, "IS_INTERNATIONAL_BUILD", "Z");
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (fid_intl) {
+                                env->SetStaticBooleanField(miui_build_class, fid_intl, JNI_TRUE);
+                                LOGE("MIUI fix: forced miui.os.Build.IS_INTERNATIONAL_BUILD = true");
+                            }
+
+                            // Force Global Build (Redundancy)
+                            jfieldID fid_global = env->GetStaticFieldID(miui_build_class, "IS_GLOBAL_BUILD", "Z");
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (fid_global) {
+                                env->SetStaticBooleanField(miui_build_class, fid_global, JNI_TRUE);
+                                LOGE("MIUI fix: forced miui.os.Build.IS_GLOBAL_BUILD = true");
+                            }
+                            env->DeleteLocalRef(miui_build_class);
+                        } else {
+                            LOGE("MIUI fix: miui/os/Build class not found!");
                         }
                     }
+                    // ----------------------------------------------------------
 
                     // Build.VERSION.SECURITY_PATCH — en clase anidada Build$VERSION
                     jclass build_version_class = env->FindClass("android/os/Build$VERSION");
