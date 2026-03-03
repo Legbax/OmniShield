@@ -1,6 +1,6 @@
 id=omnishield
-name=Omni-Shield Native
-version=v12.9.60
-versionCode=12960
-author=Legbax
+name=OMNI-Shield
+version=v13.0
+versionCode=13000
+author=Legba
 description=Total Invisibility (The Void). Zygisk module. susfs set_uname integration, dual property elimination via resetprop, telephony country/TAC hooks, UI inset fix

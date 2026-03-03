@@ -1,8 +1,8 @@
 #!/system/bin/sh
-# OmniShield — Magisk/KernelSU module install script
+# OMNI-Shield — Magisk/KernelSU module install script
 # Runs during module installation to set correct permissions.
 
-ui_print "Installing OmniShield..."
+ui_print "Installing OMNI-Shield..."
 
 # Ensure tun2socks binary is executable
 if [ -f "$MODPATH/bin/tun2socks" ]; then
@@ -21,4 +21,4 @@ chmod 755 "$MODPATH/boot-completed.sh" 2>/dev/null
 # Create data directory
 mkdir -p /data/adb/.omni_data
 
-ui_print "OmniShield installed successfully"
+ui_print "OMNI-Shield installed successfully"
