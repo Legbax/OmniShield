@@ -1201,6 +1201,12 @@ int my_system_property_get(const char *key, char *value) {
         }
         else if (k == "ro.secure" || k == "ro.build.selinux") dynamic_buffer = "1";
         else if (k == "ro.debuggable" || k == "sys.oem_unlock_allowed") dynamic_buffer = "0";
+        // MIUI framework crash fix: AppOpsUtils.isXOptMode() reads this property
+        // via SystemProperties.getBoolean(). When enabled (default on non-debug builds),
+        // Activity.requestPermissions() routes to com.lbe.security.miui which may not
+        // exist → ActivityNotFoundException. Force "false" so MIUI uses standard AOSP
+        // permission controller (com.android.permissioncontroller).
+        else if (g_realDeviceIsMiui && k == "persist.sys.miui_optimization") dynamic_buffer = "false";
         else if (k == "ro.hardware.chipname") dynamic_buffer = fp.hardwareChipname;
         else if (k == "ro.product.board") dynamic_buffer = fp.board;
         else if (k == "ro.sf.lcd_density") {
@@ -4943,6 +4949,11 @@ public:
         if (!sensor_vendor_func) sensor_vendor_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor9getVendorEv");
         if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
 
+        // Force-load libandroid_runtime — on some ROMs (MIUI, etc.) the Settings JNI
+        // bridge symbols are only available after explicit dlopen, similar to Fix11
+        // for GPU libraries.
+        dlopen("libandroid_runtime.so", RTLD_NOW);
+
         // Settings.Secure (Android ID)
         // Symbol index 0 = 2-param (JNIEnv*, jstring)
         // Symbol index 1,2 = 3-param (JNIEnv*, jobject contentResolver, jstring)
@@ -4967,6 +4978,8 @@ public:
                 LOGE("Settings.Secure: using 3-param variant (index %d)", settings_variant);
                 DobbyHook(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
             }
+        } else {
+            LOGE("Settings.Secure.getString: NO symbol found — hook NOT installed");
         }
 
         // Settings.Secure (getStringForUser - API 30+)
@@ -4991,6 +5004,8 @@ public:
                 LOGE("Settings.Secure.getStringForUser: using 4-param variant (index %d)", settings_user_variant);
                 DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
             }
+        } else {
+            LOGE("Settings.Secure.getStringForUser: NO symbol found — hook NOT installed");
         }
 
         // PR75b: Settings.Global (device_name leak)
@@ -5012,6 +5027,8 @@ public:
                 LOGE("Settings.Global: using 3-param variant (index %d)", global_variant);
                 DobbyHook(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
             }
+        } else {
+            LOGE("Settings.Global.getString: NO symbol found — hook NOT installed");
         }
 
         // Settings.Global (getStringForUser - API 30+)
@@ -5033,6 +5050,8 @@ public:
                 LOGE("Settings.Global.getStringForUser: using 4-param variant (index %d)", global_user_variant);
                 DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
             }
+        } else {
+            LOGE("Settings.Global.getStringForUser: NO symbol found — hook NOT installed");
         }
 
         // JNI Telephony — PR76: one-by-one injection to prevent all-or-nothing failure.
