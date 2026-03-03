@@ -5815,6 +5815,12 @@ static void writeProfileProps(const DeviceFingerprint& fp,
     fprintf(f, "ro.product.locale=en-US\n");
     fprintf(f, "ro.baseband=%s\n", fp.radioVersion);
 
+    // I) Timezone — eliminate dual reading (hook returns spoofed, property area has real)
+    {
+        std::string tz = omni::engine::getTimezoneForProfile(masterSeed);
+        fprintf(f, "persist.sys.timezone=%s\n", tz.c_str());
+    }
+
     // H) Market name — partition variants (root already done above)
     fprintf(f, "ro.product.odm.marketname=%s\n", fp.model);
     fprintf(f, "ro.product.product.marketname=%s\n", fp.model);
