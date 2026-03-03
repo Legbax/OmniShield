@@ -5391,6 +5391,60 @@ public:
             }
         }
 
+        // MIUI fix: Override permission controller package name in app process.
+        // On MIUI, getPermissionControllerPackageName() IPC to system_server returns
+        // "com.lbe.security.miui" which may be a stub without the REQUEST_PERMISSIONS
+        // Activity → ActivityNotFoundException crash. The result is cached in
+        // ApplicationPackageManager.mPermissionsControllerPackageName. We pre-populate
+        // this cache with the AOSP controller BEFORE any Activity calls requestPermissions().
+        // Must run in a background thread because the Application doesn't exist yet
+        // during postAppSpecialize — it's created later by handleBindApplication().
+        if (g_realDeviceIsMiui) {
+            std::thread([]() {
+                JNIEnv* env2 = nullptr;
+                if (!g_jvm) return;
+                if (g_jvm->AttachCurrentThread(&env2, nullptr) != JNI_OK || !env2) return;
+
+                jclass atClass = env2->FindClass("android/app/ActivityThread");
+                jmethodID currentApp = atClass ?
+                    env2->GetStaticMethodID(atClass, "currentApplication",
+                        "()Landroid/app/Application;") : nullptr;
+                if (env2->ExceptionCheck()) env2->ExceptionClear();
+
+                if (!currentApp) { g_jvm->DetachCurrentThread(); return; }
+
+                // Poll until Application is created (before any Activity.onCreate)
+                for (int i = 0; i < 5000; i++) {
+                    jobject app = env2->CallStaticObjectMethod(atClass, currentApp);
+                    if (env2->ExceptionCheck()) { env2->ExceptionClear(); app = nullptr; }
+                    if (app) {
+                        jclass ctxClass = env2->FindClass("android/content/Context");
+                        jmethodID getPM = env2->GetMethodID(ctxClass, "getPackageManager",
+                            "()Landroid/content/pm/PackageManager;");
+                        jobject pm = env2->CallObjectMethod(app, getPM);
+                        if (env2->ExceptionCheck()) { env2->ExceptionClear(); pm = nullptr; }
+                        if (pm) {
+                            jclass pmClass = env2->GetObjectClass(pm);
+                            jfieldID field = env2->GetFieldID(pmClass,
+                                "mPermissionsControllerPackageName", "Ljava/lang/String;");
+                            if (env2->ExceptionCheck()) env2->ExceptionClear();
+                            if (field) {
+                                jstring aosp = env2->NewStringUTF("com.android.permissioncontroller");
+                                env2->SetObjectField(pm, field, aosp);
+                                LOGE("MIUI fix: forced mPermissionsControllerPackageName -> "
+                                     "com.android.permissioncontroller");
+                            }
+                            env2->DeleteLocalRef(pm);
+                        }
+                        env2->DeleteLocalRef(app);
+                        break;
+                    }
+                    usleep(1000); // 1ms
+                }
+                g_jvm->DetachCurrentThread();
+            }).detach();
+        }
+
         // PR70: Remap module .so from file-backed to anonymous memory.
         // All hooks are installed above — now make the .so invisible in maps.
         remapModuleMemory();
