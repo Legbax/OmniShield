@@ -194,10 +194,11 @@ verify_proxy() {
     [ -z "$proxy_ip" ] && proxy_ip="$PROXY_HOST"
 
     # Step 2: SOCKS5 handshake probe — avoids nc -z (unsupported on Android toybox).
-    # Sends SOCKS5 ClientHello (3 bytes); any response means server is up + speaks SOCKS5.
-    # Connection refused or timeout → nc exits with no output → wc -c = 0.
+    # Sends SOCKS5 ClientHello (3 bytes); server must respond with 2 bytes (VER + METHOD).
+    # The subshell ( printf; sleep 2 ) keeps stdin open so toybox nc does not exit on
+    # stdin-EOF before the server's reply arrives over the network (race condition fix).
     local probe_bytes
-    probe_bytes=$(printf '\x05\x01\x00' | nc -w 10 "$proxy_ip" "$PROXY_PORT" 2>/dev/null | wc -c)
+    probe_bytes=$( ( printf '\x05\x01\x00'; sleep 2 ) | nc -w 5 "$proxy_ip" "$PROXY_PORT" 2>/dev/null | wc -c )
     if [ "${probe_bytes:-0}" -eq 0 ]; then
         log "ERROR: SOCKS5 probe got no response from $proxy_ip:$PROXY_PORT"
         log "Check: host/port correct? Firewall blocking? Server running?"
@@ -380,6 +381,12 @@ do_start() {
     # Fix SELinux context for tun2socks binary
     chcon u:object_r:system_file:s0 "$TUN2SOCKS" 2>/dev/null
 
+    # Verify proxy is reachable BEFORE launching daemon (prevents tun0 cycling on failure)
+    if ! verify_proxy; then
+        log "ERROR: Proxy verification failed — aborting to preserve connectivity"
+        release_lock; return 1
+    fi
+
     # Launch hev-socks5-tunnel daemon (it creates the TUN interface internally)
     log "Launching hev-socks5-tunnel → $PROXY_HOST:$PROXY_PORT"
     nohup "$TUN2SOCKS" "$TUN2SOCKS_CFG" >> "$LOG_FILE" 2>&1 &
@@ -420,14 +427,7 @@ do_start() {
         release_lock; return 1
     fi
 
-    # Verify proxy works before applying iptables (prevents connectivity blackhole)
-    if ! verify_proxy; then
-        log "ERROR: Proxy verification failed — aborting to preserve connectivity"
-        do_stop_quiet
-        release_lock; return 1
-    fi
-
-    # Setup iptables rules (only if proxy is verified working)
+    # Setup iptables rules
     setup_iptables
 
     log "=== PROXY ACTIVE ==="
