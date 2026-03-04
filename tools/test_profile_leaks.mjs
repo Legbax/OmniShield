@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // test_profile_leaks.mjs — OmniShield profile leak detection test suite
-// Parses C++ omni_profiles.h (source of truth) and validates all 40 device profiles
+// Parses C++ omni_profiles.h (source of truth) and validates all 32 device profiles
 // for empty fields, cross-field incoherence, fingerprint mismatches, and suppression bugs.
 // Run: node tools/test_profile_leaks.mjs
 
@@ -148,7 +148,7 @@ class TestRunner {
     console.log('\n' + '-'.repeat(80));
     console.log(`TOTAL: ${this.totalPass} passed, ${this.totalFail} failed, ${this.totalWarn} warnings`);
     const failedProfiles = Object.keys(failsByProfile).length;
-    const totalProfiles = 40;
+    const totalProfiles = 32;
     console.log(`PROFILES: ${totalProfiles - failedProfiles}/${totalProfiles} clean, ${failedProfiles} with issues`);
     console.log('='.repeat(80));
   }
@@ -463,10 +463,10 @@ async function main() {
   const runner = new TestRunner();
 
   // Validate profile count
-  runner.check('_global', 'ProfileCount:40', profileCount === 40,
-    `Expected 40 C++ profiles, got ${profileCount}`);
-  runner.check('_global', 'JS-ProfileCount:40', Object.keys(jsProfiles).length === 40,
-    `Expected 40 JS profiles, got ${Object.keys(jsProfiles).length}`);
+  runner.check('_global', 'ProfileCount:32', profileCount === 32,
+    `Expected 32 C++ profiles, got ${profileCount}`);
+  runner.check('_global', 'JS-ProfileCount:32', Object.keys(jsProfiles).length === 32,
+    `Expected 32 JS profiles, got ${Object.keys(jsProfiles).length}`);
 
   // Run all test suites on each profile
   for (const [name, p] of Object.entries(cppProfiles)) {

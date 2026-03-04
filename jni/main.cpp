@@ -56,7 +56,7 @@
 
 // Globals
 static std::map<std::string, std::string> g_config;
-static std::string g_currentProfileName = "Redmi 9";
+static std::string g_currentProfileName = "Redmi 10X 4G";
 static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
@@ -419,7 +419,6 @@ static bool readConfigViaCompanion(zygisk::Api *api) {
 bool shouldHide(const char* key) {
     if (!key || key[0] == '\0') return false;
     std::string s = toLowerStr(key);
-    if (g_currentProfileName == "Redmi 9" && s.find("lancelot") != std::string::npos) return false;
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
         const auto& fp = *fp_ptr;
@@ -729,9 +728,7 @@ int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
 // to override the ART VM cached System.getProperty("os.version").
 std::string getSpoofedKernelVersion() {
     std::string kv = "4.14.186-perf+";
-    if (g_currentProfileName == "Redmi 9") {
-        kv = "4.14.186-perf+";
-    } else if (const DeviceFingerprint* kfp_ptr = findProfile(g_currentProfileName)) {
+    if (const DeviceFingerprint* kfp_ptr = findProfile(g_currentProfileName)) {
         const auto& kfp = *kfp_ptr;
         std::string plat = toLowerStr(kfp.boardPlatform);
         std::string brd  = toLowerStr(kfp.brand);
@@ -746,7 +743,15 @@ std::string getSpoofedKernelVersion() {
             else
                 kv = "4.19.113-g820a424c538c-ab7336171";
         } else if (plat.find("mt6") != std::string::npos) {
-            kv = "4.14.141-perf+";
+            // Samsung MTK uses numeric kernel suffix, not Qualcomm-style -perf+
+            if (brd == "samsung") {
+                if (plat.find("mt6769") != std::string::npos)
+                    kv = "4.14.113-23424440";  // Galaxy A32 4G / A22 4G
+                else
+                    kv = "4.14.113-25267920";  // Galaxy A31 (MT6768)
+            } else {
+                kv = "4.14.186-perf+";
+            }
         } else if (plat.find("kona") != std::string::npos || plat.find("lahaina") != std::string::npos) {
             kv = "4.19.157-perf+";
         } else if (plat.find("atoll") != std::string::npos || plat.find("lito") != std::string::npos) {
@@ -1795,8 +1800,12 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         else if (plat.find("atoll") != std::string::npos) kv = "4.14.150-g62a62a5a93f7-ab7336171";
                         else if (plat.find("sdm670")  != std::string::npos) kv = "4.9.189-g5d098cef6d96-ab6174032";
                         else kv = "4.19.113-g820a424c538c-ab7336171";
-                    } else if (plat.find("mt6")!=std::string::npos) kv="4.14.141-perf+";
-                    else if (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos) kv="4.19.157-perf+";
+                    } else if (plat.find("mt6")!=std::string::npos) {
+                        // Samsung MTK: numeric suffix; others: perf+
+                        if (brd == "samsung") {
+                            kv = (plat.find("mt6769")!=std::string::npos) ? "4.14.113-23424440" : "4.14.113-25267920";
+                        } else { kv="4.14.186-perf+"; }
+                    } else if (plat.find("kona")!=std::string::npos||plat.find("lahaina")!=std::string::npos) kv="4.19.157-perf+";
                     else if (plat.find("atoll")!=std::string::npos||plat.find("lito")!=std::string::npos) kv="4.19.113-perf+";
                     else if (plat.find("sdm670")!=std::string::npos) kv="4.9.189-perf+";
                     else if (plat.find("bengal")!=std::string::npos||plat.find("holi")!=std::string::npos||
@@ -1923,7 +1932,12 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                         else
                             kv = "4.19.113-g820a424c538c-ab7336171";
                     } else if (plat.find("mt6") != std::string::npos) {
-                        kv = "4.14.141-perf+";
+                        // Samsung MTK: numeric suffix; others: perf+
+                        if (brd == "samsung") {
+                            kv = (plat.find("mt6769") != std::string::npos) ? "4.14.113-23424440" : "4.14.113-25267920";
+                        } else {
+                            kv = "4.14.186-perf+";
+                        }
                     } else if (plat.find("kona") != std::string::npos ||
                                plat.find("lahaina") != std::string::npos) {
                         kv = "4.19.157-perf+";
