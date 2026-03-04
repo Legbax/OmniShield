@@ -10,34 +10,28 @@ if [ -x "$SUSFS_BIN" ] && [ -f "$CFG" ]; then
     PROFILE=$(grep "^profile=" "$CFG" | cut -d'=' -f2-)
     if [ -n "$PROFILE" ]; then
         case "$PROFILE" in
+            # Real device (lancelot/MT6768) — same as other MT6768
             "Redmi 9")
                 KV="4.14.186-perf+" ;;
-            "Pixel 5"|"Pixel 4a 5G")
-                KV="4.19.113-g820a424c538c-ab7336171" ;;
-            "Pixel 4a")
-                KV="4.14.150-g62a62a5a93f7-ab7336171" ;;
-            "Pixel 3a XL")
-                KV="4.9.189-g5d098cef6d96-ab6174032" ;;
-            "Redmi 10X 4G"|"POCO M3 Pro 5G"|"Galaxy A32 5G"|"Galaxy A12"|\
-            "Galaxy A31"|"Realme 8")
-                KV="4.14.141-perf+" ;;
-            "Mi 10T"|"Mi 11"|"POCO F3"|"Galaxy S20 FE"|"OnePlus 8T"|\
-            "OnePlus 8"|"Moto Edge Plus"|"ASUS ZenFone 7")
-                KV="4.19.157-perf+" ;;
-            "Redmi Note 10 Pro"|"Redmi Note 9 Pro"|"POCO X3 NFC"|"Mi 11 Lite"|\
-            "Galaxy A52"|"Galaxy A72"|"OnePlus Nord"|"Moto Edge"|\
-            "Nokia 8.3 5G"|"Realme 8 Pro")
-                KV="4.19.113-perf+" ;;
-            "Moto G Power 2021"|"Moto G Stylus 2021"|"OnePlus N10 5G"|"Nokia 5.4")
-                KV="4.19.157-perf+" ;;
-            "Realme GT Master")
-                KV="5.4.61-perf+" ;;
-            "Galaxy A51"|"Galaxy M31")
-                KV="4.14.113-25145160" ;;
-            "Galaxy F62")
-                KV="4.14.113-22911262" ;;
+            # Samsung MTK MT6768 — numeric kernel suffix (not -perf+)
+            "Galaxy A31"|"Samsung Galaxy A31")
+                KV="4.14.113-25267920" ;;
+            # Samsung MTK MT6769 — numeric kernel suffix (not -perf+)
+            "Galaxy A32 4G"|"Galaxy A22 4G")
+                KV="4.14.113-23424440" ;;
+            # Samsung Exynos 850 — numeric kernel suffix
             "Galaxy A21s")
                 KV="4.19.113-25351273" ;;
+            # All other MediaTek profiles (MT6768/MT6769/MT6785/MT6833/MT6853)
+            "Redmi 10X 4G"|"POCO M3 Pro 5G"|"Galaxy A32 5G"|"Realme 8"|\
+            "Redmi 9 Prime"|"Redmi Note 9"|"Tecno Spark 6"|"Vivo S1"|\
+            "Vivo Y19"|"Vivo Y20G"|"POCO M2"|"Realme Narzo 20"|\
+            "Realme Narzo 10"|"Realme 6i"|"Moto G31"|"Realme C25s"|\
+            "Infinix Note 10"|"Redmi Note 8 2021"|"Moto G41"|\
+            "Realme Narzo 30A"|"Realme Narzo 50A"|"Infinix Hot 10s"|\
+            "Infinix Note 11i"|"Tecno Pova 2"|"Tecno Spark 8 Pro"|\
+            "Realme 6i Pro"|"Tecno Camon 17")
+                KV="4.14.186-perf+" ;;
             *)
                 KV="4.14.186-perf+" ;;
         esac
