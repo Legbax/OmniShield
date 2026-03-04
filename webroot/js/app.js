@@ -111,7 +111,7 @@ async function writeConfig(cfg) {
 // ─── App state ──────────────────────────────────────────────────────
 const state = {
   cfg: {},
-  profile: 'Redmi 10X 4G',
+  profile: 'Redmi 9',
   seed: 0,
   jitter: true,
   networkType: 'wifi',   // 'wifi' | 'lte'
@@ -146,7 +146,7 @@ const overrides = {};
 // ─── Bootstrap ──────────────────────────────────────────────────────
 async function loadState() {
   state.cfg = await readConfig();
-  state.profile      = state.cfg.profile      || 'Redmi 10X 4G';
+  state.profile      = state.cfg.profile      || 'Redmi 9';
   state.seed         = parseInt(state.cfg.master_seed, 10) || generateRandomSeed();
   state.jitter       = (state.cfg.jitter || 'true') !== 'false';
   state.networkType  = (state.cfg.network_type === 'lte' || state.cfg.network_type === 'mobile') ? 'lte' : 'wifi';

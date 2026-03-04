@@ -56,7 +56,7 @@
 
 // Globals
 static std::map<std::string, std::string> g_config;
-static std::string g_currentProfileName = "Redmi 10X 4G";
+static std::string g_currentProfileName = "Redmi 9";
 static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
@@ -419,6 +419,7 @@ static bool readConfigViaCompanion(zygisk::Api *api) {
 bool shouldHide(const char* key) {
     if (!key || key[0] == '\0') return false;
     std::string s = toLowerStr(key);
+    if (g_currentProfileName == "Redmi 9" && s.find("lancelot") != std::string::npos) return false;
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
         const auto& fp = *fp_ptr;

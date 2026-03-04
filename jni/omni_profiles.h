@@ -78,6 +78,22 @@ struct DeviceFingerprint {
 inline const DeviceFingerprint* findProfile(const std::string& name) {
     struct Entry { const char* n; DeviceFingerprint fp; };
     static const Entry TABLE[] = {
+    { "Redmi 9", {
+        "Xiaomi", "Redmi", "Redmi 9", "lancelot",
+        "lancelot_global", "mt6768", "lancelot", "V12.5.6.0.RJCMIXM",
+        "Redmi/lancelot_global/lancelot:11/RP1A.200720.011/V12.5.6.0.RJCMIXM:user/release-keys", "RP1A.200720.011", "release-keys", "user",
+        "MOLY.LR12A.R3.MP.V84.P47", "V12.5.6.0.RJCMIXM", "2021-10-05", "11",
+        "mt6768", "mali", "196610", "MT6768",
+        "zygote64_32", "Redmi/lancelot_global/lancelot:11/RP1A.200720.011/V12.5.6.0.RJCMIXM:user/release-keys", "RP1A.200720.011", "lancelot_global-user 11 RP1A.200720.011 V12.5.6.0.RJCMIXM release-keys",
+        "lancelot_global-user", "pangu-build-component-system-175411", "builder", "1633392000",
+        "REL", "0", "ARM", "Mali-G52 MC2",
+        "OpenGL ES 3.2 v1.r21p0-01rel0.a51a0c509f2714d8e5acbde47570a4b2", "1080", "2340", "395", 8, 4,
+        4000, 3000, 3264, 2448,                                  // PR44: pixelArray rear/front (int32_t)
+        39.2266f, 0.0011974f, 34.906586f, 0.001064f, 4912.0f,  // BMA4xy (Bosch),
+        6.40f, 4.80f, 4.74f, 1.79f,                              // PR44: rear physSize + focal + aperture
+        4.00f, 3.00f, 2.18f, 2.45f,                              // PR44: front physSize + focal + aperture
+        false, false, false                                      // PR38+39: sensor presence bools
+    } },
     { "Redmi 10X 4G", {
         "Xiaomi", "Redmi", "M2004J7AC", "merlin",
         "merlin", "mt6769", "merlin", "V12.5.3.0.QJJCNXM",

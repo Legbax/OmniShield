@@ -2,6 +2,19 @@
 // All 32 profiles with their key fingerprinting data
 
 export const DEVICE_PROFILES = {
+  "Redmi 9": {
+    manufacturer:"Xiaomi", brand:"Redmi", model:"Redmi 9", device:"lancelot",
+    hardware:"mt6768", boardPlatform:"mt6768", eglDriver:"mali",
+    gpuVendor:"ARM", gpuRenderer:"Mali-G52 MC2",
+    buildId:"RP1A.200720.011", securityPatch:"2021-10-05", release:"11",
+    fingerprint:"Redmi/lancelot_global/lancelot:11/RP1A.200720.011/V12.5.6.0.RJCMIXM:user/release-keys",
+    screenWidth:"1080", screenHeight:"2340", screenDensity:"395",
+    coreCount:8, ramGb:4,
+    accelMaxRange:39.2266, accelResolution:0.0011974,
+    gyroMaxRange:34.906586, gyroResolution:0.001064, magMaxRange:4912.0,
+    hasHeartRate:false, hasBarometer:false, hasFingerprintWakeup:false,
+    icon:"📱"
+  },
   "Redmi 10X 4G": {
     manufacturer:"Xiaomi", brand:"Redmi", model:"M2004J7AC", device:"merlin",
     hardware:"mt6769", boardPlatform:"mt6769", eglDriver:"mali",
@@ -423,7 +436,7 @@ export const DEVICE_PROFILES = {
 export const PROFILE_NAMES = Object.keys(DEVICE_PROFILES);
 
 export function getProfileByName(name) {
-  return DEVICE_PROFILES[name] || DEVICE_PROFILES["Redmi 10X 4G"];
+  return DEVICE_PROFILES[name] || DEVICE_PROFILES["Redmi 9"];
 }
 
 export function getProfileBrand(name) {

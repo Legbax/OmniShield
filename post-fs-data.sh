@@ -10,6 +10,9 @@ if [ -x "$SUSFS_BIN" ] && [ -f "$CFG" ]; then
     PROFILE=$(grep "^profile=" "$CFG" | cut -d'=' -f2-)
     if [ -n "$PROFILE" ]; then
         case "$PROFILE" in
+            # Real device (lancelot/MT6768) — same as other MT6768
+            "Redmi 9")
+                KV="4.14.186-perf+" ;;
             # Samsung MTK MT6768 — numeric kernel suffix (not -perf+)
             "Galaxy A31"|"Samsung Galaxy A31")
                 KV="4.14.113-25267920" ;;
