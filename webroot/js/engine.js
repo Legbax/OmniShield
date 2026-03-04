@@ -428,7 +428,7 @@ export function generateSerial(brandIn, seed, securityPatch) {
 
 // ─── JA3 fingerprint (Salesforce algorithm, seed-derived) ────────────────────
 // Generates a real JA3 hash: MD5("SSLVersion,Ciphers,Extensions,Curves,PointFormats")
-// Produces ~36 distinct valid hashes covering Chrome 119-122 and OkHttp 4.x variants.
+// Hash space: ~280 unique valid hashes (Chrome 119-122 / Samsung Internet / OkHttp 4.x).
 // Seed offset +8001 reserved for this function; caller adds ja3Idx*10007 for variation.
 export function generateJA3(seed, brand) {
   const rng = new OmniRandom(seed);
@@ -437,36 +437,50 @@ export function generateJA3(seed, brand) {
   // Samsung Internet is Chromium-based → always Chrome family
   const isOkHttp = br !== 'samsung' && rng.nextInt(2) === 0;
 
-  // ~33% chance to drop legacy AES-CBC/RSA suites (newer Chrome/OkHttp builds)
-  const dropLegacy = rng.nextInt(3) === 0;
+  // Cipher variation: ECDHE-CBC pair (49171,49172) and RSA-CBC pair (47,53) drop independently
+  // — different Chrome versions remove them at different points in their release history
+  const dropECDHE_CBC = rng.nextInt(2) === 0;  // eliminates 49171 + 49172
+  const dropRSA_CBC   = rng.nextInt(2) === 0;  // eliminates 47 + 53
   const baseCiphers = [4865,4866,4867,49195,49199,49196,49200,52392,52393,49171,49172,156,157,47,53];
-  const ciphers = dropLegacy ? baseCiphers.filter(c => ![49171,49172,47,53].includes(c)) : baseCiphers;
+  const ciphers = baseCiphers.filter(c =>
+    !(dropECDHE_CBC && (c === 49171 || c === 49172)) &&
+    !(dropRSA_CBC   && (c === 47    || c === 53))
+  );
+
+  // Curves: some Chrome Android builds include secp521r1 (25) after secp384r1 (24)
+  const hasSecp521 = rng.nextInt(4) === 0;  // 25% probability
+  const curvesStr  = hasSecp521 ? '29-23-24-25' : '29-23-24';
 
   let exts, name;
   if (isOkHttp) {
-    // OkHttp 4.x: fixed extension set, optional padding (ext 21)
-    const hasPadding = rng.nextInt(2) === 1;
-    exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43];
+    // OkHttp 4.x: SCT (ext 18) optional — some OkHttp/Retrofit builds omit it
+    const okHasSct   = rng.nextInt(2) === 1;  // ext 18 signed_cert_timestamp
+    const hasPadding = rng.nextInt(2) === 1;  // ext 21 padding (always last)
+    exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13];
+    if (okHasSct) exts.push(18);
+    exts.push(51, 45, 43);
     if (hasPadding) exts.push(21);
     name = `OkHttp/4.${10 + rng.nextInt(3)}.0`;
   } else {
     // Chrome / Samsung Internet: core extensions + seed-controlled optionals
-    const hasSct     = rng.nextInt(2) === 1;  // ext 18  signed_cert_timestamp
-    const hasCmpCrt  = rng.nextInt(2) === 1;  // ext 27  compress_cert
-    const hasAlps    = rng.nextInt(2) === 1;  // ext 17513 application_settings (ALPS)
-    const hasPadding = rng.nextInt(2) === 1;  // ext 21  padding (always last)
+    const hasSct      = rng.nextInt(2) === 1;  // ext 18    signed_cert_timestamp
+    const hasCmpCrt   = rng.nextInt(2) === 1;  // ext 27    compress_cert
+    const hasAlps     = rng.nextInt(2) === 1;  // ext 17513 application_settings (ALPS)
+    const hasDelegCrd = rng.nextInt(4) === 0;  // ext 34    delegated_credentials (Chrome 105+, ~25%)
+    const hasPadding  = rng.nextInt(2) === 1;  // ext 21    padding (always last)
     exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13];
-    if (hasSct) exts.push(18);
+    if (hasSct)      exts.push(18);
     exts.push(51, 45, 43);
-    if (hasCmpCrt)  exts.push(27);
-    if (hasAlps)    exts.push(17513);
-    if (hasPadding) exts.push(21);
+    if (hasCmpCrt)   exts.push(27);
+    if (hasAlps)     exts.push(17513);
+    if (hasDelegCrd) exts.push(34);
+    if (hasPadding)  exts.push(21);
     name = br === 'samsung'
       ? `Samsung Internet ${23 + rng.nextInt(2)}`
       : `Chrome ${119 + rng.nextInt(4)} Android`;
   }
 
-  const ja3str = `771,${ciphers.join('-')},${exts.join('-')},29-23-24,0`;
+  const ja3str = `771,${ciphers.join('-')},${exts.join('-')},${curvesStr},0`;
   return { name, hash: md5(ja3str) };
 }
 
