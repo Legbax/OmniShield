@@ -562,6 +562,10 @@ function getEffectiveBrand(profileName) {
   if (lower.includes('nokia')) return 'nokia';
   if (lower.includes('realme')) return 'realme';
   if (lower.includes('asus')) return 'asus';
+  if (lower.startsWith('tecno') || lower.includes('tecno')) return 'tecno';
+  if (lower.startsWith('infinix') || lower.includes('infinix')) return 'infinix';
+  if (lower.startsWith('vivo') || lower.includes('vivo')) return 'vivo';
+  if (lower.startsWith('oppo') || lower.includes('oppo')) return 'oppo';
   return 'default';
 }
 
