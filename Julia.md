@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-04 (PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-04 (PR102: fix verify_proxy() — replace curl socks5h:// with nc -z TCP test + curl --socks5-hostname fallback (Android curl has no SOCKS5 support); PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -537,3 +537,29 @@ registered in `postAppSpecialize` immediately after the existing `Location` gett
   internet access. Logs the exit IP on success for diagnostic purposes.
 
 **Files changed:** `proxy_manager.sh` (`generate_config` YAML: `udp: tcp`; new `verify_proxy()` function; call in `do_start()` before `setup_iptables`)
+
+---
+
+## 21. PR102 — Fix verify_proxy(): Android curl has no SOCKS5 support (2026-03-04)
+
+**Root cause:** `verify_proxy()` (PR101) used `curl -x socks5h://...` to test the proxy.
+Android's system `curl` (toybox/AOSP build) is **not compiled with SOCKS5 support**. The
+`socks5h://` URL scheme is silently ignored — curl attempts the target URL directly,
+returns empty output, and `verify_proxy` concludes the proxy is unreachable on every
+activation attempt even when the proxy is perfectly functional.
+
+**Fix:** Replace `curl -x socks5h://...` with a two-step approach:
+
+1. **`nc -z -w 10 $PROXY_HOST $PROXY_PORT`** — TCP reachability test via netcat (toybox,
+   always available on KernelSU/Magisk). If this fails, the proxy is definitively
+   unreachable → abort, no iptables applied, connectivity preserved.
+
+2. **`curl --socks5-hostname`** — full SOCKS5+auth test using a curl option (rather than
+   URL scheme). This flag path is sometimes compiled in when the URL scheme isn't. If it
+   succeeds, the exit IP is logged for diagnostics.
+
+3. **Graceful fallback:** If curl still can't do SOCKS5 (Android build limitation) but
+   TCP passed in step 1, proceed with a warning. The tunnel daemon validates credentials
+   internally on first use.
+
+**Files changed:** `proxy_manager.sh` (replace body of `verify_proxy()`)
