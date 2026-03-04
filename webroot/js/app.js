@@ -6,6 +6,7 @@ import {
   getTimezone, getCarrierName, getSimCountry, computeCorrelation,
   validateIMEI, validateICCID, validateIMSI, validateMAC, validatePhone,
   validateAndroidId, validateGsfId, validateWidevineId, validateBootId, validateSerial,
+  imeiMatchesBrand, macMatchesBrand, serialMatchesBrand,
   generateUUID, generateWifiSsid, generateGmail, generateJA3,
   US_CITIES_100, CARRIER_NAMES, IMSI_POOLS
 } from './engine.js';
@@ -14,7 +15,7 @@ import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js'
 // ─── JA3/TLS fingerprint — computed dynamically via generateJA3() ─────────────
 // Each device derives a unique but valid JA3 hash from its master_seed using the
 // real Salesforce algorithm: MD5("SSLVersion,Ciphers,Extensions,Curves,PointFmts").
-// Covers ~36 distinct Chrome 119-122 / OkHttp 4.x variants (all valid ClientHellos).
+// Covers 256 distinct Chrome 119-122 / OkHttp 4.x variants (all valid ClientHellos).
 // ja3Idx override is a variation offset: final_seed = master_seed + 8001 + ja3Idx*10007
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
@@ -523,10 +524,10 @@ function setProfileCard(fp, name) {
 }
 
 function renderIdsTab() {
-  renderField('f-imei',       state.imei,        validateIMEI(state.imei));
-  renderField('f-imei2',      state.imei2,       validateIMEI(state.imei2));
-  renderField('f-serial',     state.serial,      validateSerial(state.serial));
-  renderField('f-hw-serial',  state.hwSerial,    validateSerial(state.hwSerial));
+  renderField('f-imei',       state.imei,        validateIMEI(state.imei)     && imeiMatchesBrand(state.imei,     state.profile));
+  renderField('f-imei2',      state.imei2,       validateIMEI(state.imei2)    && imeiMatchesBrand(state.imei2,    state.profile));
+  renderField('f-serial',     state.serial,      validateSerial(state.serial)  && serialMatchesBrand(state.serial,  state.profile));
+  renderField('f-hw-serial',  state.hwSerial,    validateSerial(state.hwSerial) && serialMatchesBrand(state.hwSerial, state.profile));
   renderField('f-android-id', state.androidId,   validateAndroidId(state.androidId));
   renderField('f-ssaid',      state.ssaid,       validateAndroidId(state.ssaid));
   renderField('f-gsf-id',     state.gsfId,       validateGsfId(state.gsfId));
@@ -562,8 +563,8 @@ function renderTelephonyTab() {
   renderField('f-sim-cc',     state.simCountry, state.simCountry === 'US');
   renderField('f-sim-op',     state.simOperator, !!state.simOperator);
   renderField('f-mccmnc',     state.mccmnc,     /^\d{5,6}$/.test(state.mccmnc));
-  renderField('f-wifi-mac',   state.wifiMac,    validateMAC(state.wifiMac));
-  renderField('f-bt-mac',     state.btMac,      validateMAC(state.btMac));
+  renderField('f-wifi-mac',   state.wifiMac,    validateMAC(state.wifiMac)  && macMatchesBrand(state.wifiMac,  state.profile));
+  renderField('f-bt-mac',     state.btMac,      validateMAC(state.btMac)    && macMatchesBrand(state.btMac,    state.profile));
   renderField('f-wifi-ssid',  state.wifiSsid,   !!state.wifiSsid);
   renderField('f-wifi-bssid', state.wifiBssid,  validateMAC(state.wifiBssid));
 

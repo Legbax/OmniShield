@@ -636,6 +636,31 @@ const BRAND_OUIS = {
   tecno:    [[0x40,0xED,0x7E],[0x80,0xB0,0x3D],[0xA4,0x9A,0x58]],
 };
 
+// ─── Brand-contextual validators ─────────────────────────────────────────────
+// These combine format validation with brand-pool membership, so a badge reflects
+// whether the value belongs to the *current* profile's brand, not just a valid format.
+
+export function imeiMatchesBrand(imei, profileName) {
+  const brand = getEffectiveBrand(profileName).toLowerCase();
+  const brandTacs = TACS[brand] || TACS.default;
+  return brandTacs.some(t => imei.startsWith(t));
+}
+
+export function macMatchesBrand(mac, profileName) {
+  const brand = getEffectiveBrand(profileName).toLowerCase();
+  const pool = BRAND_OUIS[brand];
+  if (!pool) return true;  // unknown brand → no OUI constraint
+  const parts = mac.split(':').slice(0, 3).map(h => parseInt(h, 16));
+  return pool.some(o => o[0] === parts[0] && o[1] === parts[1] && o[2] === parts[2]);
+}
+
+export function serialMatchesBrand(serial, profileName) {
+  const brand = getEffectiveBrand(profileName).toLowerCase();
+  if (brand === 'samsung') return /^[RSXZ][A-Z0-9]{2}[A-Z][A-Z0-9]{7,}$/i.test(serial);
+  if (brand === 'google')  return /^[A-HJ-NP-Z0-9]{7}$/i.test(serial);
+  return validateSerial(serial);  // other brands: generic length/charset check
+}
+
 // ─── Correlation score ────────────────────────────────────────────────────────
 // Returns { score: 0-100, checks: [{name, passed, weight}] }
 // Each check validates whether a generated value is coherent with the profile.
