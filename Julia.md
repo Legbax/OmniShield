@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-03 (PR95: Dual property elimination via expanded resetprop + timezone fix)
+**Last updated:** 2026-03-04 (PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -414,7 +414,39 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 
 ---
 
-## 15. Update Protocol
+## 15. PR98 — Patch tun0 VPN leakage (2026-03-03)
+
+VdInfo detected `tun0` as an active VPN interface even though hev-socks5-tunnel uses root iptables (not Android VpnService). Three VFS gaps were confirmed:
+
+### Gaps fixed
+
+| Vector | Root cause | Fix |
+|--------|------------|-----|
+| `/proc/net/route` | No `PROC_NET_ROUTE` enum or handler — kernel adds tun0 route when proxy active | Added synthetic routing table (wlan0 routes in WiFi mode, rmnet_data0 in LTE mode) |
+| `/proc/net/if_inet6` WiFi mode | Comment said "filter tun" but `if` only checked `dummy` and `p2p` — tun0 link-local IPv6 (fe80::/10) leaked | Added `line.find("tun") != npos` condition |
+| `/proc/self/net/*` aliases | All handlers used `strcmp("/proc/net/...")` — the `/proc/self/net/` kernel alias bypassed every hook | Extended conditions to also match `/proc/self/net/dev`, `/proc/self/net/route`, `/proc/self/net/if_inet6`, `/proc/self/net/tcp[6]`, `/proc/self/net/udp[6]` |
+
+**Files changed:** `jni/main.cpp`
+
+---
+
+## 16. PR96 / PR97 — Location Selector & Wipe Google Traces (2026-03-03)
+
+### PR96: Location selector now propagates to native GPS hooks
+
+**Bug:** `parseConfigString()` read `profile`, `master_seed`, `seed_version` etc. but silently ignored `location_lat`, `location_lon`, `location_alt`. `initLocationCache()` always called `generateLocationForRegion()` from seed, making the UI Location selector cosmetic-only.
+
+**Fix (`jni/main.cpp`):** Added block at the end of `parseConfigString()` that reads `location_lat`/`location_lon`/`location_alt` from config and sets `g_cachedLat`/`g_cachedLon`/`g_cachedAlt` + `g_locationCached = true`. Since this runs AFTER the `seed_version` reset of `g_locationCached`, user-pinned coordinates always win over the generated fallback.
+
+### PR97: Wipe Google Traces — com.android.webview always targeted
+
+**Bug:** `wipeGoogleTraces()` only wiped the dynamically detected `$WV` package (resolved via `cmd webviewupdate current-webview-package`). On devices where the active WebView is `com.google.android.webview` or Chrome, `com.android.webview` (AOSP built-in) kept residual session data. Additionally, if `cmd webviewupdate` returned unexpected multi-line output, `$WV` could be invalid and `pm clear` silently failed for the wrong package.
+
+**Fix (`webroot/js/app.js`):** Added `| tr -d '\n'` to sanitise `$WV`, added `[ -z "$WV" ] && WV=com.google.android.webview` null-guard, and explicitly added `com.android.webview` to all three operations (`am force-stop`, `pm clear`, `rm -rf`) independently of `$WV`.
+
+---
+
+## 17. Update Protocol
 
 When modifying code, update this Julia.md:
 1. Add entry to this file if a major PR lands
@@ -423,3 +455,33 @@ When modifying code, update this Julia.md:
 4. Update property lists if properties added/removed (Section 7)
 5. Update known limitations if status changes (Section 11)
 6. Update critical invariants if new crash patterns discovered (Section 3)
+
+---
+
+## 18. PR99 — Expand JA3 hash space: 32 → 256 unique hashes (2026-03-04)
+
+The `generateJA3()` randomize button used `ja3Idx ∈ [0, 1000)` but the actual output
+space was only **32 unique hashes** — MT19937 with different seeds still maps to the same
+discrete states. Verified: 100 000 seeds → exactly 32 distinct hashes.
+
+Four new variation axes were added, all corresponding to combinations observed in real
+Android TLS traffic:
+
+| Axis | Implementation | Combos added |
+|------|---------------|-------------|
+| Independent ECDHE-CBC drop (49171+49172) | `dropECDHE_CBC = rng.nextInt(2)` | ×2 cipher |
+| Independent RSA-CBC drop (47+53) | `dropRSA_CBC = rng.nextInt(2)` | ×2 cipher (4 total) |
+| secp521r1 (25) in curves | `hasSecp521 = rng.nextInt(4) === 0` (25%) | ×2 curves |
+| delegated_credentials (ext 34) for Chrome | `hasDelegCrd = rng.nextInt(4) === 0` (25%) | ×2 Chrome exts |
+| SCT (ext 18) optional for OkHttp | `okHasSct = rng.nextInt(2)` | OkHttp subset |
+
+**Result:** Chrome: 4 cipher × 2 curves × 32 ext combos = **256 unique hashes**.
+OkHttp variants are a mathematical subset of Chrome hashes → all brands produce exactly
+256 unique hashes. Samsung Internet never produces OkHttp variants (confirmed).
+
+**Note on "technical infinity":** JA3 is inherently bounded — the algorithm only captures
+5 discrete fields of the ClientHello. The practical ceiling for any Android TLS client is
+a few thousand hashes, not infinite.
+
+**Files changed:** `webroot/js/engine.js` (`generateJA3`, +14 net lines)
+**QA:** 33/33 profiles clean, 0 failures.

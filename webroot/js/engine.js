@@ -1,6 +1,70 @@
 // engine.js — OmniShield generation engine (mirrors jni/omni_engine.hpp exactly)
 // Uses BigInt for 64-bit precision matching C++ std::mt19937_64
 
+// ─── MD5 (RFC 1321, pure JS) ──────────────────────────────────────────────────
+// Input: UTF-8 string. Output: 32-char lowercase hex.
+function md5(str) {
+  // Per-round shift amounts
+  const S = [7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+             5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+             4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+             6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21];
+  // K[i] = floor(abs(sin(i+1)) * 2^32)
+  const K = [
+    0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+    0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+    0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+    0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+    0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+    0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391,
+  ];
+  // UTF-8 encode
+  const msg = [];
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) msg.push(c);
+    else if (c < 0x800) msg.push(0xc0|(c>>6), 0x80|(c&0x3f));
+    else msg.push(0xe0|(c>>12), 0x80|((c>>6)&0x3f), 0x80|(c&0x3f));
+  }
+  const msgLen = msg.length;
+  // Padding: append 0x80 then zeros, then 64-bit LE bit-length
+  msg.push(0x80);
+  while (msg.length % 64 !== 56) msg.push(0);
+  let bits = msgLen * 8;
+  for (let i = 0; i < 8; i++) { msg.push(bits & 0xff); bits >>>= 8; }
+  // Initial hash state
+  let h0 = 0x67452301|0, h1 = 0xefcdab89|0, h2 = 0x98badcfe|0, h3 = 0x10325476|0;
+  // Process 512-bit blocks
+  for (let ofs = 0; ofs < msg.length; ofs += 64) {
+    const W = new Int32Array(16);
+    for (let j = 0; j < 16; j++)
+      W[j] = msg[ofs+j*4] | (msg[ofs+j*4+1]<<8) | (msg[ofs+j*4+2]<<16) | (msg[ofs+j*4+3]<<24);
+    let a = h0, b = h1, c = h2, d = h3;
+    for (let i = 0; i < 64; i++) {
+      let f, g;
+      if      (i < 16) { f = (b & c) | (~b & d); g = i; }
+      else if (i < 32) { f = (d & b) | (~d & c); g = (5*i+1) % 16; }
+      else if (i < 48) { f = b ^ c ^ d;           g = (3*i+5) % 16; }
+      else             { f = c ^ (b | ~d);         g = (7*i)   % 16; }
+      f = (f + a + K[i] + W[g]) | 0;
+      a = d; d = c; c = b;
+      b = (b + ((f << S[i]) | (f >>> (32-S[i])))) | 0;
+    }
+    h0 = (h0+a)|0; h1 = (h1+b)|0; h2 = (h2+c)|0; h3 = (h3+d)|0;
+  }
+  const le32 = v => { let s='', u=v>>>0; for (let i=0;i<4;i++) s+=((u>>>(i*8))&0xff).toString(16).padStart(2,'0'); return s; };
+  return le32(h0)+le32(h1)+le32(h2)+le32(h3);
+}
+// Self-test: RFC 1321 test vectors + JA3 string hashes (catches any MD5 regression)
+if (md5('abc') !== '900150983cd24fb0d6963f7d28e17f72')
+  throw new Error('OmniShield: MD5 self-test failed (abc)');
+if (md5('771,4865-4866-4867-49195-49199-49196-49200-52392-52393-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0') !== '77d1a489ef746d17cc0cd09f2de71b5d')
+  throw new Error('OmniShield: MD5 self-test failed (Chrome 120 JA3 string)');
+if (md5('771,4865-4866-4867-49195-49199-49196-49200-52392-52393-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0') !== '479dc4a100ab08c520e0adfe30107d65')
+  throw new Error('OmniShield: MD5 self-test failed (OkHttp 4.x JA3 string)');
+
 // ─── MT19937-64 (matches std::mt19937_64) ────────────────────────────────────
 class MT64 {
   constructor(seed) {
@@ -68,15 +132,16 @@ const TACS = {
   oppo:     ["86885004","86885005","35604210","35604211","35604212","35604213"],
   asus:     ["35851710","35851711","35325010","35325011","35325012","35325013"],
   "hmd global":["35720210","35720211","35489310","35489311"],
+  infinix:  ["35318491","35318492","35318493","35884011","35884012","35884013"],
+  tecno:    ["35779310","35779311","35779312","35779313","35779314","35779315"],
   default:  ["35271311","35449209","35674910","35438210","35617710"]
 };
 
-// OUI pools (mirrors OUIS in omni_engine.hpp)
+// OUI pools — fallback only (no Qualcomm OUIs; all profiles are MediaTek)
 const OUIS = [
-  [0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x18,0xDB,0x7E],[0x28,0xCC,0x01], // Qualcomm
-  [0x60,0x57,0x18],[0xAC,0x37,0x43],[0x00,0x90,0x4C],                   // MediaTek
-  [0xD4,0xBE,0xD9],[0xA4,0xC3,0xF0],[0xF8,0x8F,0xCA],                   // Broadcom
-  [0x40,0x9B,0xCD],[0x24,0x4B,0x03]                                       // Samsung
+  [0x60,0x57,0x18],[0xAC,0x37,0x43],[0x00,0x90,0x4C],  // MediaTek
+  [0xD4,0xBE,0xD9],[0xA4,0xC3,0xF0],[0xF8,0x8F,0xCA],  // Broadcom (common in MTK phones)
+  [0x40,0x9B,0xCD],[0x24,0x4B,0x03]                     // Samsung
 ];
 
 // IMSI pools (USA carriers, mirrors IMSI_POOLS in omni_engine.hpp)
@@ -287,18 +352,34 @@ export function generateMAC(brandIn, seed) {
   const brand = (brandIn || '').toLowerCase();
   let oui;
   if (brand === 'samsung') {
+    // Samsung Electronics registered OUIs
     const pool = [[0x24,0x4B,0x03],[0x40,0x9B,0xCD],[0xD4,0xBE,0xD9]];
     oui = pool[rng.nextInt(pool.length)];
   } else if (brand === 'google') {
     const pool = [[0xF8,0x8F,0xCA],[0xA4,0xC3,0xF0]];
     oui = pool[rng.nextInt(pool.length)];
   } else if (['xiaomi','redmi','poco'].includes(brand)) {
-    const pool = [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]];
+    // Xiaomi Communications Co., Ltd registered OUIs
+    const pool = [[0x40,0x31,0x3C],[0xF4,0x8B,0x32],[0x28,0xE3,0x1F],[0x6C,0xE8,0x5C]];
     oui = pool[rng.nextInt(pool.length)];
   } else if (brand === 'oneplus') {
     oui = [0x40,0x4E,0x36];
   } else if (brand === 'motorola') {
-    oui = [0x18,0xDB,0x7E];
+    // Motorola Mobility LLC registered OUIs
+    const pool = [[0xDC,0x2B,0x2A],[0x40,0xCE,0x24],[0xCC,0xF9,0x54]];
+    oui = pool[rng.nextInt(pool.length)];
+  } else if (['realme','oppo'].includes(brand)) {
+    // OPPO Electronics Corp Ltd registered OUIs (Realme parent)
+    const pool = [[0xAC,0x2B,0xA1],[0x60,0x7F,0x66],[0x14,0x7D,0xDA]];
+    oui = pool[rng.nextInt(pool.length)];
+  } else if (brand === 'vivo') {
+    // Vivo Mobile Communication Co., Ltd registered OUIs
+    const pool = [[0xD0,0xB8,0xAA],[0x54,0x8C,0xA0],[0xB4,0x3A,0x28]];
+    oui = pool[rng.nextInt(pool.length)];
+  } else if (['infinix','tecno'].includes(brand)) {
+    // TRANSSION Holdings registered OUIs
+    const pool = [[0x40,0xED,0x7E],[0x80,0xB0,0x3D],[0xA4,0x9A,0x58]];
+    oui = pool[rng.nextInt(pool.length)];
   } else {
     oui = OUIS[rng.nextInt(OUIS.length)];
   }
@@ -332,10 +413,75 @@ export function generateSerial(brandIn, seed, securityPatch) {
     return res;
   }
   const an = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const len = 8 + rng.nextInt(5);
+  // Brand-specific serial lengths matching real OEM formats
+  let len;
+  if (['xiaomi','redmi','poco'].includes(brand))      len = 13; // e.g. WJW3KCY0XAABB
+  else if (brand === 'motorola')                      len = 10; // e.g. ZU3CG6BF8X
+  else if (['realme','oppo'].includes(brand))         len = 11; // e.g. RZ8M21BVMHB
+  else if (brand === 'vivo')                          len = 12; // e.g. V2103PKTFKXV
+  else if (['infinix','tecno'].includes(brand))       len = 13; // e.g. X693BNBMK02A4
+  else                                                len = 8 + rng.nextInt(5);
   let res = '';
   for (let i = 0; i < len; i++) res += an[rng.nextInt(an.length)];
   return res;
+}
+
+// ─── JA3 fingerprint (Salesforce algorithm, seed-derived) ────────────────────
+// Generates a real JA3 hash: MD5("SSLVersion,Ciphers,Extensions,Curves,PointFormats")
+// Hash space: ~280 unique valid hashes (Chrome 119-122 / Samsung Internet / OkHttp 4.x).
+// Seed offset +8001 reserved for this function; caller adds ja3Idx*10007 for variation.
+export function generateJA3(seed, brand) {
+  const rng = new OmniRandom(seed);
+  const br = (brand || '').toLowerCase();
+
+  // Samsung Internet is Chromium-based → always Chrome family
+  const isOkHttp = br !== 'samsung' && rng.nextInt(2) === 0;
+
+  // Cipher variation: ECDHE-CBC pair (49171,49172) and RSA-CBC pair (47,53) drop independently
+  // — different Chrome versions remove them at different points in their release history
+  const dropECDHE_CBC = rng.nextInt(2) === 0;  // eliminates 49171 + 49172
+  const dropRSA_CBC   = rng.nextInt(2) === 0;  // eliminates 47 + 53
+  const baseCiphers = [4865,4866,4867,49195,49199,49196,49200,52392,52393,49171,49172,156,157,47,53];
+  const ciphers = baseCiphers.filter(c =>
+    !(dropECDHE_CBC && (c === 49171 || c === 49172)) &&
+    !(dropRSA_CBC   && (c === 47    || c === 53))
+  );
+
+  // Curves: some Chrome Android builds include secp521r1 (25) after secp384r1 (24)
+  const hasSecp521 = rng.nextInt(4) === 0;  // 25% probability
+  const curvesStr  = hasSecp521 ? '29-23-24-25' : '29-23-24';
+
+  let exts, name;
+  if (isOkHttp) {
+    // OkHttp 4.x: SCT (ext 18) optional — some OkHttp/Retrofit builds omit it
+    const okHasSct   = rng.nextInt(2) === 1;  // ext 18 signed_cert_timestamp
+    const hasPadding = rng.nextInt(2) === 1;  // ext 21 padding (always last)
+    exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13];
+    if (okHasSct) exts.push(18);
+    exts.push(51, 45, 43);
+    if (hasPadding) exts.push(21);
+    name = `OkHttp/4.${10 + rng.nextInt(3)}.0`;
+  } else {
+    // Chrome / Samsung Internet: core extensions + seed-controlled optionals
+    const hasSct      = rng.nextInt(2) === 1;  // ext 18    signed_cert_timestamp
+    const hasCmpCrt   = rng.nextInt(2) === 1;  // ext 27    compress_cert
+    const hasAlps     = rng.nextInt(2) === 1;  // ext 17513 application_settings (ALPS)
+    const hasDelegCrd = rng.nextInt(4) === 0;  // ext 34    delegated_credentials (Chrome 105+, ~25%)
+    const hasPadding  = rng.nextInt(2) === 1;  // ext 21    padding (always last)
+    exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13];
+    if (hasSct)      exts.push(18);
+    exts.push(51, 45, 43);
+    if (hasCmpCrt)   exts.push(27);
+    if (hasAlps)     exts.push(17513);
+    if (hasDelegCrd) exts.push(34);
+    if (hasPadding)  exts.push(21);
+    name = br === 'samsung'
+      ? `Samsung Internet ${23 + rng.nextInt(2)}`
+      : `Chrome ${119 + rng.nextInt(4)} Android`;
+  }
+
+  const ja3str = `771,${ciphers.join('-')},${exts.join('-')},${curvesStr},0`;
+  return { name, hash: md5(ja3str) };
 }
 
 // ─── Random ID (hex, mirrors generateRandomId) ───────────────────────────────
@@ -416,6 +562,10 @@ function getEffectiveBrand(profileName) {
   if (lower.includes('nokia')) return 'nokia';
   if (lower.includes('realme')) return 'realme';
   if (lower.includes('asus')) return 'asus';
+  if (lower.startsWith('tecno') || lower.includes('tecno')) return 'tecno';
+  if (lower.startsWith('infinix') || lower.includes('infinix')) return 'infinix';
+  if (lower.startsWith('vivo') || lower.includes('vivo')) return 'vivo';
+  if (lower.startsWith('oppo') || lower.includes('oppo')) return 'oppo';
   return 'default';
 }
 
@@ -473,12 +623,47 @@ export function validateSerial(v) { return v && v.length >= 8 && /^[A-Z0-9]+$/i.
 const BRAND_OUIS = {
   samsung:  [[0x24,0x4B,0x03],[0x40,0x9B,0xCD],[0xD4,0xBE,0xD9]],
   google:   [[0xF8,0x8F,0xCA],[0xA4,0xC3,0xF0]],
-  xiaomi:   [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]],
-  redmi:    [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]],
-  poco:     [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]],
+  // Xiaomi Communications Co., Ltd
+  xiaomi:   [[0x40,0x31,0x3C],[0xF4,0x8B,0x32],[0x28,0xE3,0x1F],[0x6C,0xE8,0x5C]],
+  redmi:    [[0x40,0x31,0x3C],[0xF4,0x8B,0x32],[0x28,0xE3,0x1F],[0x6C,0xE8,0x5C]],
+  poco:     [[0x40,0x31,0x3C],[0xF4,0x8B,0x32],[0x28,0xE3,0x1F],[0x6C,0xE8,0x5C]],
   oneplus:  [[0x40,0x4E,0x36]],
-  motorola: [[0x18,0xDB,0x7E]],
+  // Motorola Mobility LLC
+  motorola: [[0xDC,0x2B,0x2A],[0x40,0xCE,0x24],[0xCC,0xF9,0x54]],
+  // OPPO Electronics Corp Ltd (Realme parent)
+  realme:   [[0xAC,0x2B,0xA1],[0x60,0x7F,0x66],[0x14,0x7D,0xDA]],
+  oppo:     [[0xAC,0x2B,0xA1],[0x60,0x7F,0x66],[0x14,0x7D,0xDA]],
+  // Vivo Mobile Communication Co., Ltd
+  vivo:     [[0xD0,0xB8,0xAA],[0x54,0x8C,0xA0],[0xB4,0x3A,0x28]],
+  // TRANSSION Holdings
+  infinix:  [[0x40,0xED,0x7E],[0x80,0xB0,0x3D],[0xA4,0x9A,0x58]],
+  tecno:    [[0x40,0xED,0x7E],[0x80,0xB0,0x3D],[0xA4,0x9A,0x58]],
 };
+
+// ─── Brand-contextual validators ─────────────────────────────────────────────
+// These combine format validation with brand-pool membership, so a badge reflects
+// whether the value belongs to the *current* profile's brand, not just a valid format.
+
+export function imeiMatchesBrand(imei, profileName) {
+  const brand = getEffectiveBrand(profileName).toLowerCase();
+  const brandTacs = TACS[brand] || TACS.default;
+  return brandTacs.some(t => imei.startsWith(t));
+}
+
+export function macMatchesBrand(mac, profileName) {
+  const brand = getEffectiveBrand(profileName).toLowerCase();
+  const pool = BRAND_OUIS[brand];
+  if (!pool) return true;  // unknown brand → no OUI constraint
+  const parts = mac.split(':').slice(0, 3).map(h => parseInt(h, 16));
+  return pool.some(o => o[0] === parts[0] && o[1] === parts[1] && o[2] === parts[2]);
+}
+
+export function serialMatchesBrand(serial, profileName) {
+  const brand = getEffectiveBrand(profileName).toLowerCase();
+  if (brand === 'samsung') return /^[RSXZ][A-Z0-9]{2}[A-Z][A-Z0-9]{7,}$/i.test(serial);
+  if (brand === 'google')  return /^[A-HJ-NP-Z0-9]{7}$/i.test(serial);
+  return validateSerial(serial);  // other brands: generic length/charset check
+}
 
 // ─── Correlation score ────────────────────────────────────────────────────────
 // Returns { score: 0-100, checks: [{name, passed, weight}] }

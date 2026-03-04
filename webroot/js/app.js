@@ -6,21 +6,17 @@ import {
   getTimezone, getCarrierName, getSimCountry, computeCorrelation,
   validateIMEI, validateICCID, validateIMSI, validateMAC, validatePhone,
   validateAndroidId, validateGsfId, validateWidevineId, validateBootId, validateSerial,
-  generateUUID, generateWifiSsid, generateGmail,
+  imeiMatchesBrand, macMatchesBrand, serialMatchesBrand,
+  generateUUID, generateWifiSsid, generateGmail, generateJA3,
   US_CITIES_100, CARRIER_NAMES, IMSI_POOLS
 } from './engine.js';
 import { DEVICE_PROFILES, PROFILE_NAMES, getProfileByName } from './profiles.js';
 
-// ─── JA3/TLS fingerprint presets (all Android-native clients) ─────────
-// Firefox excluded: uses Gecko engine — incoherent with Android system WebView / app traffic.
-// All presets here are Blink/Chromium-based or native Android HTTP stacks.
-const JA3_PRESETS = [
-  { name: 'Chrome 120 Android',       hash: '0700a69a2db4c9c8e5dedc5a1d14e7ce' },
-  { name: 'Chrome 119 Android',       hash: 'bfbe57248732353af79a92ba6271b9d4' },
-  { name: 'Samsung Internet 23',      hash: 'a0e9f5d64349fb13191bc781f81f42e1' },
-  { name: 'OkHttp/4.12.0',            hash: 'd4e5b18d6b55c71db63d10a11e90e667' },
-  { name: 'OkHttp/3.14.9 (Retrofit)', hash: 'c27a9b4a8b52c3ed95c5b1dc2e88b9f1' },
-];
+// ─── JA3/TLS fingerprint — computed dynamically via generateJA3() ─────────────
+// Each device derives a unique but valid JA3 hash from its master_seed using the
+// real Salesforce algorithm: MD5("SSLVersion,Ciphers,Extensions,Curves,PointFmts").
+// Covers 256 distinct Chrome 119-122 / OkHttp 4.x variants (all valid ClientHellos).
+// ja3Idx override is a variation offset: final_seed = master_seed + 8001 + ja3Idx*10007
 
 // ─── KernelSU exec wrapper ──────────────────────────────────────────
 // The KernelSU/APatch manager injects a global `ksu` object into the
@@ -221,7 +217,7 @@ function computeAll() {
   state.bootId     = overrides.bootId     ?? generateBootId(seed);
   state.gmailAccount = overrides.gmailAccount ?? generateGmail(seed);
   state.gpuRenderer  = fp.gpuRenderer || 'Adreno 619';
-  state.ja3          = JA3_PRESETS[(seed + (overrides.ja3Idx || 0)) % JA3_PRESETS.length];
+  state.ja3          = generateJA3(seed + 8001 + (overrides.ja3Idx || 0) * 10007, brand);
   state.carrier    = getCarrierName(profile, seed);
   state.simCountry = getSimCountry(profile, seed);
   state.simOperator = state.carrier;
@@ -528,10 +524,10 @@ function setProfileCard(fp, name) {
 }
 
 function renderIdsTab() {
-  renderField('f-imei',       state.imei,        validateIMEI(state.imei));
-  renderField('f-imei2',      state.imei2,       validateIMEI(state.imei2));
-  renderField('f-serial',     state.serial,      validateSerial(state.serial));
-  renderField('f-hw-serial',  state.hwSerial,    validateSerial(state.hwSerial));
+  renderField('f-imei',       state.imei,        validateIMEI(state.imei)     && imeiMatchesBrand(state.imei,     state.profile));
+  renderField('f-imei2',      state.imei2,       validateIMEI(state.imei2)    && imeiMatchesBrand(state.imei2,    state.profile));
+  renderField('f-serial',     state.serial,      validateSerial(state.serial)  && serialMatchesBrand(state.serial,  state.profile));
+  renderField('f-hw-serial',  state.hwSerial,    validateSerial(state.hwSerial) && serialMatchesBrand(state.hwSerial, state.profile));
   renderField('f-android-id', state.androidId,   validateAndroidId(state.androidId));
   renderField('f-ssaid',      state.ssaid,       validateAndroidId(state.ssaid));
   renderField('f-gsf-id',     state.gsfId,       validateGsfId(state.gsfId));
@@ -567,8 +563,8 @@ function renderTelephonyTab() {
   renderField('f-sim-cc',     state.simCountry, state.simCountry === 'US');
   renderField('f-sim-op',     state.simOperator, !!state.simOperator);
   renderField('f-mccmnc',     state.mccmnc,     /^\d{5,6}$/.test(state.mccmnc));
-  renderField('f-wifi-mac',   state.wifiMac,    validateMAC(state.wifiMac));
-  renderField('f-bt-mac',     state.btMac,      validateMAC(state.btMac));
+  renderField('f-wifi-mac',   state.wifiMac,    validateMAC(state.wifiMac)  && macMatchesBrand(state.wifiMac,  state.profile));
+  renderField('f-bt-mac',     state.btMac,      validateMAC(state.btMac)    && macMatchesBrand(state.btMac,    state.profile));
   renderField('f-wifi-ssid',  state.wifiSsid,   !!state.wifiSsid);
   renderField('f-wifi-bssid', state.wifiBssid,  validateMAC(state.wifiBssid));
 
@@ -762,7 +758,7 @@ window.randomizeField = function(field) {
     'f-adv-id':     () => { overrides.advertisingId = generateUUID(newSubSeed+1); state.advertisingId = overrides.advertisingId; },
     'f-boot-id':    () => { overrides.bootId        = generateBootId(newSubSeed); state.bootId = overrides.bootId; },
     'f-gmail':      () => { overrides.gmailAccount  = generateGmail(newSubSeed); state.gmailAccount = overrides.gmailAccount; },
-    'f-ja3':        () => { overrides.ja3Idx = Math.floor(Math.random() * JA3_PRESETS.length); state.ja3 = JA3_PRESETS[overrides.ja3Idx]; },
+    'f-ja3':        () => { overrides.ja3Idx = Math.floor(Math.random() * 1000); state.ja3 = generateJA3(state.seed + 8001 + overrides.ja3Idx * 10007, brand); },
     'f-imsi':       () => { overrides.imsi          = generateIMSI(state.profile, newSubSeed); state.imsi = overrides.imsi; state.mccmnc = state.imsi.substring(0,6); state.simOperator = state.carrier; },
     'f-iccid':      () => { overrides.iccid         = generateICCID(state.profile, newSubSeed); state.iccid = overrides.iccid; },
     'f-phone':      () => { overrides.phone         = generatePhoneNumber(state.profile, newSubSeed); state.phone = overrides.phone; },
@@ -1124,18 +1120,27 @@ window.wipeGoogleTraces = async function() {
 
   // Detect the active WebView provider package, then background the
   // destructive commands with nohup so they survive WebView process death.
+  // PR97: Always explicitly target com.android.webview (AOSP built-in) AND the
+  // dynamically resolved active provider ($WV). Previously only $WV was targeted,
+  // leaving com.android.webview data untouched on devices where the active
+  // provider differs (e.g. Chrome as WebView, or Google WebView active while
+  // AOSP WebView still holds cached data from previous sessions).
   await ksu_exec(
     `nohup sh -c "` +
     `sleep 2; ` +
-    `WV=$(cmd webviewupdate current-webview-package 2>/dev/null || echo com.google.android.webview); ` +
+    `WV=$(cmd webviewupdate current-webview-package 2>/dev/null | tr -d '\\n' || echo com.google.android.webview); ` +
+    `[ -z "\\$WV" ] && WV=com.google.android.webview; ` +
     `am force-stop com.android.vending 2>/dev/null; ` +
     `am force-stop com.google.android.gms 2>/dev/null; ` +
     `am force-stop com.google.android.gsf 2>/dev/null; ` +
+    `am force-stop com.android.webview 2>/dev/null; ` +
     `am force-stop \\$WV 2>/dev/null; ` +
     `pm clear --user 0 com.google.android.gsf 2>/dev/null; ` +
     `pm clear --user 0 com.google.android.gms 2>/dev/null; ` +
     `pm clear --user 0 com.android.vending 2>/dev/null; ` +
+    `pm clear --user 0 com.android.webview 2>/dev/null; ` +
     `pm clear --user 0 \\$WV 2>/dev/null; ` +
+    `rm -rf /data/user/0/com.android.webview/ /data/data/com.android.webview/ /data/user_de/0/com.android.webview/ 2>/dev/null; ` +
     `rm -rf /data/user/0/\\$WV/ /data/data/\\$WV/ /data/user_de/0/\\$WV/ 2>/dev/null` +
     `" >/dev/null 2>&1 &`
   );
