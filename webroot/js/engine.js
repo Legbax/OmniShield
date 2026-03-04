@@ -68,17 +68,16 @@ const TACS = {
   oppo:     ["86885004","86885005","35604210","35604211","35604212","35604213"],
   asus:     ["35851710","35851711","35325010","35325011","35325012","35325013"],
   "hmd global":["35720210","35720211","35489310","35489311"],
-  infinix:  ["35884011","35884012","35884013","35884014","35884015","35884016"],
+  infinix:  ["35318491","35318492","35318493","35884011","35884012","35884013"],
   tecno:    ["35779310","35779311","35779312","35779313","35779314","35779315"],
   default:  ["35271311","35449209","35674910","35438210","35617710"]
 };
 
-// OUI pools (mirrors OUIS in omni_engine.hpp)
+// OUI pools — fallback only (no Qualcomm OUIs; all profiles are MediaTek)
 const OUIS = [
-  [0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x18,0xDB,0x7E],[0x28,0xCC,0x01], // Qualcomm
-  [0x60,0x57,0x18],[0xAC,0x37,0x43],[0x00,0x90,0x4C],                   // MediaTek
-  [0xD4,0xBE,0xD9],[0xA4,0xC3,0xF0],[0xF8,0x8F,0xCA],                   // Broadcom
-  [0x40,0x9B,0xCD],[0x24,0x4B,0x03]                                       // Samsung
+  [0x60,0x57,0x18],[0xAC,0x37,0x43],[0x00,0x90,0x4C],  // MediaTek
+  [0xD4,0xBE,0xD9],[0xA4,0xC3,0xF0],[0xF8,0x8F,0xCA],  // Broadcom (common in MTK phones)
+  [0x40,0x9B,0xCD],[0x24,0x4B,0x03]                     // Samsung
 ];
 
 // IMSI pools (USA carriers, mirrors IMSI_POOLS in omni_engine.hpp)
@@ -289,18 +288,34 @@ export function generateMAC(brandIn, seed) {
   const brand = (brandIn || '').toLowerCase();
   let oui;
   if (brand === 'samsung') {
+    // Samsung Electronics registered OUIs
     const pool = [[0x24,0x4B,0x03],[0x40,0x9B,0xCD],[0xD4,0xBE,0xD9]];
     oui = pool[rng.nextInt(pool.length)];
   } else if (brand === 'google') {
     const pool = [[0xF8,0x8F,0xCA],[0xA4,0xC3,0xF0]];
     oui = pool[rng.nextInt(pool.length)];
   } else if (['xiaomi','redmi','poco'].includes(brand)) {
-    const pool = [[0x40,0x4E,0x36],[0xF0,0x1F,0xAF],[0x60,0x57,0x18]];
+    // Xiaomi Communications Co., Ltd registered OUIs
+    const pool = [[0x40,0x31,0x3C],[0xF4,0x8B,0x32],[0x28,0xE3,0x1F],[0x6C,0xE8,0x5C]];
     oui = pool[rng.nextInt(pool.length)];
   } else if (brand === 'oneplus') {
     oui = [0x40,0x4E,0x36];
   } else if (brand === 'motorola') {
-    oui = [0x18,0xDB,0x7E];
+    // Motorola Mobility LLC registered OUIs
+    const pool = [[0xDC,0x2B,0x2A],[0x40,0xCE,0x24],[0xCC,0xF9,0x54]];
+    oui = pool[rng.nextInt(pool.length)];
+  } else if (['realme','oppo'].includes(brand)) {
+    // OPPO Electronics Corp Ltd registered OUIs (Realme parent)
+    const pool = [[0xAC,0x2B,0xA1],[0x60,0x7F,0x66],[0x14,0x7D,0xDA]];
+    oui = pool[rng.nextInt(pool.length)];
+  } else if (brand === 'vivo') {
+    // Vivo Mobile Communication Co., Ltd registered OUIs
+    const pool = [[0xD0,0xB8,0xAA],[0x54,0x8C,0xA0],[0xB4,0x3A,0x28]];
+    oui = pool[rng.nextInt(pool.length)];
+  } else if (['infinix','tecno'].includes(brand)) {
+    // TRANSSION Holdings registered OUIs
+    const pool = [[0x40,0xED,0x7E],[0x80,0xB0,0x3D],[0xA4,0x9A,0x58]];
+    oui = pool[rng.nextInt(pool.length)];
   } else {
     oui = OUIS[rng.nextInt(OUIS.length)];
   }
@@ -334,7 +349,14 @@ export function generateSerial(brandIn, seed, securityPatch) {
     return res;
   }
   const an = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const len = 8 + rng.nextInt(5);
+  // Brand-specific serial lengths matching real OEM formats
+  let len;
+  if (['xiaomi','redmi','poco'].includes(brand))      len = 13; // e.g. WJW3KCY0XAABB
+  else if (brand === 'motorola')                      len = 10; // e.g. ZU3CG6BF8X
+  else if (['realme','oppo'].includes(brand))         len = 11; // e.g. RZ8M21BVMHB
+  else if (brand === 'vivo')                          len = 12; // e.g. V2103PKTFKXV
+  else if (['infinix','tecno'].includes(brand))       len = 13; // e.g. X693BNBMK02A4
+  else                                                len = 8 + rng.nextInt(5);
   let res = '';
   for (let i = 0; i < len; i++) res += an[rng.nextInt(an.length)];
   return res;

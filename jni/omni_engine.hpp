@@ -30,17 +30,16 @@ static const std::map<std::string, std::vector<std::string>> TACS_BY_BRAND = {
     {"oppo",     {"86885004", "86885005", "35604210", "35604211", "35604212", "35604213"}},
     {"asus",     {"35851710", "35851711", "35325010", "35325011", "35325012", "35325013"}},
     {"hmd global", {"35720210", "35720211", "35489310", "35489311"}},
-    {"infinix",  {"35884011", "35884012", "35884013", "35884014", "35884015", "35884016"}},
+    {"infinix",  {"35318491", "35318492", "35318493", "35884011", "35884012", "35884013"}},
     {"tecno",    {"35779310", "35779311", "35779312", "35779313", "35779314", "35779315"}},
     {"default",  {"35271311", "35449209", "35674910", "35438210", "35617710"}}
 };
 
-// OUI pools
+// OUI pools — fallback only (no Qualcomm OUIs; all profiles are MediaTek)
 static const std::vector<std::vector<uint8_t>> OUIS = {
-    {0x40, 0x4E, 0x36}, {0xF0, 0x1F, 0xAF}, {0x18, 0xDB, 0x7E}, {0x28, 0xCC, 0x01}, // Qualcomm
-    {0x60, 0x57, 0x18}, {0xAC, 0x37, 0x43}, {0x00, 0x90, 0x4C},                     // MediaTek
-    {0xD4, 0xBE, 0xD9}, {0xA4, 0xC3, 0xF0}, {0xF8, 0x8F, 0xCA},                     // Broadcom
-    {0x40, 0x9B, 0xCD}, {0x24, 0x4B, 0x03}                                          // Samsung
+    {0x60, 0x57, 0x18}, {0xAC, 0x37, 0x43}, {0x00, 0x90, 0x4C},  // MediaTek
+    {0xD4, 0xBE, 0xD9}, {0xA4, 0xC3, 0xF0}, {0xF8, 0x8F, 0xCA},  // Broadcom (common in MTK phones)
+    {0x40, 0x9B, 0xCD}, {0x24, 0x4B, 0x03}                        // Samsung
 };
 
 inline std::string toLower(const std::string& str) {
@@ -194,16 +193,34 @@ inline std::string generateRandomMac(const std::string& brandIn, long seed) {
     std::vector<uint8_t> oui;
 
     if (brand == "samsung") {
+        // Samsung Electronics registered OUIs
         std::vector<std::vector<uint8_t>> pool = {{0x24, 0x4B, 0x03}, {0x40, 0x9B, 0xCD}, {0xD4, 0xBE, 0xD9}};
         oui = pool[rng.nextInt(pool.size())];
     } else if (brand == "google") {
         std::vector<std::vector<uint8_t>> pool = {{0xF8, 0x8F, 0xCA}, {0xA4, 0xC3, 0xF0}};
         oui = pool[rng.nextInt(pool.size())];
     } else if (brand == "xiaomi" || brand == "redmi" || brand == "poco") {
-        std::vector<std::vector<uint8_t>> pool = {{0x40, 0x4E, 0x36}, {0xF0, 0x1F, 0xAF}, {0x60, 0x57, 0x18}};
+        // Xiaomi Communications Co., Ltd registered OUIs (not chipset OUIs)
+        std::vector<std::vector<uint8_t>> pool = {{0x40, 0x31, 0x3C}, {0xF4, 0x8B, 0x32}, {0x28, 0xE3, 0x1F}, {0x6C, 0xE8, 0x5C}};
         oui = pool[rng.nextInt(pool.size())];
-    } else if (brand == "oneplus") { oui = {0x40, 0x4E, 0x36};
-    } else if (brand == "motorola") { oui = {0x18, 0xDB, 0x7E};
+    } else if (brand == "oneplus") {
+        oui = {0x40, 0x4E, 0x36};
+    } else if (brand == "motorola") {
+        // Motorola Mobility LLC registered OUIs
+        std::vector<std::vector<uint8_t>> pool = {{0xDC, 0x2B, 0x2A}, {0x40, 0xCE, 0x24}, {0xCC, 0xF9, 0x54}};
+        oui = pool[rng.nextInt(pool.size())];
+    } else if (brand == "realme" || brand == "oppo") {
+        // OPPO Electronics Corp Ltd registered OUIs (Realme parent)
+        std::vector<std::vector<uint8_t>> pool = {{0xAC, 0x2B, 0xA1}, {0x60, 0x7F, 0x66}, {0x14, 0x7D, 0xDA}};
+        oui = pool[rng.nextInt(pool.size())];
+    } else if (brand == "vivo") {
+        // Vivo Mobile Communication Co., Ltd registered OUIs
+        std::vector<std::vector<uint8_t>> pool = {{0xD0, 0xB8, 0xAA}, {0x54, 0x8C, 0xA0}, {0xB4, 0x3A, 0x28}};
+        oui = pool[rng.nextInt(pool.size())];
+    } else if (brand == "infinix" || brand == "tecno") {
+        // TRANSSION Holdings registered OUIs
+        std::vector<std::vector<uint8_t>> pool = {{0x40, 0xED, 0x7E}, {0x80, 0xB0, 0x3D}, {0xA4, 0x9A, 0x58}};
+        oui = pool[rng.nextInt(pool.size())];
     } else { oui = OUIS[rng.nextInt(OUIS.size())]; }
 
     std::stringstream ss;
@@ -239,6 +256,31 @@ inline std::string generateRandomSerial(const std::string& brandIn, long seed, c
         std::string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
         std::string res = "";
         for(int i=0; i<7; ++i) res += chars[rng.nextInt(chars.length())];
+        return res;
+    } else if (brand == "xiaomi" || brand == "redmi" || brand == "poco") {
+        // Xiaomi/Redmi serial: 13 chars uppercase alphanumeric
+        std::string res = "";
+        for(int i=0; i<13; ++i) res += alphaNum[rng.nextInt(alphaNum.length())];
+        return res;
+    } else if (brand == "motorola") {
+        // Motorola Mobility serial: 10 chars uppercase alphanumeric (e.g. ZU3CG6BF8X)
+        std::string res = "";
+        for(int i=0; i<10; ++i) res += alphaNum[rng.nextInt(alphaNum.length())];
+        return res;
+    } else if (brand == "realme" || brand == "oppo") {
+        // Realme serial: 11 chars uppercase alphanumeric (e.g. RZ8M21BVMHB)
+        std::string res = "";
+        for(int i=0; i<11; ++i) res += alphaNum[rng.nextInt(alphaNum.length())];
+        return res;
+    } else if (brand == "vivo") {
+        // Vivo serial: 12 chars uppercase alphanumeric (e.g. V2103PKTFKXV)
+        std::string res = "";
+        for(int i=0; i<12; ++i) res += alphaNum[rng.nextInt(alphaNum.length())];
+        return res;
+    } else if (brand == "infinix" || brand == "tecno") {
+        // TRANSSION (Infinix/Tecno) serial: 13 chars uppercase alphanumeric
+        std::string res = "";
+        for(int i=0; i<13; ++i) res += alphaNum[rng.nextInt(alphaNum.length())];
         return res;
     } else {
         int len = 8 + rng.nextInt(5);
