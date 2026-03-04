@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-04 (PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-04 (PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -485,3 +485,55 @@ a few thousand hashes, not infinite.
 
 **Files changed:** `webroot/js/engine.js` (`generateJA3`, +14 net lines)
 **QA:** 33/33 profiles clean, 0 failures.
+
+---
+
+## 19. PR100 — Hook LocationManager.getLastKnownLocation for GPS-off spoofing (2026-03-04)
+
+**Root cause:** The existing `Location` getter hooks (`getLatitude`, `getLongitude`, etc.)
+are passive — they only fire when Android creates a `Location` object to return. When
+GPS is off and no network-location fix is available, `LocationManager.getLastKnownLocation()`
+returns `null` without ever creating a `Location` object. No object → hooks never invoked →
+apps see "location unavailable" regardless of `g_cachedLat/Lon` values.
+
+**Fix:** Added `LocationManagerHook::getLastKnownLocation` hooked via `hookJniNativeMethods`
+on `android/location/LocationManager`. The hook intercepts the call before the system can
+return null and **constructs a synthetic `android.location.Location` object** populated with
+`g_cachedLat`, `g_cachedLon`, `g_cachedAlt`, a realistic accuracy value, and the current
+wall-clock time. Returns `nullptr` only if no coordinates are configured (lat == 0.0 && lon == 0.0).
+
+This covers all providers: `"gps"`, `"network"`, `"fused"` — Google's FusedLocationProvider
+internally calls `getLastKnownLocation("fused")` which our hook intercepts. The hook is
+registered in `postAppSpecialize` immediately after the existing `Location` getter hooks.
+
+**Files changed:** `jni/main.cpp` (new `LocationManagerHook` struct + `hookJniNativeMethods` registration, ~45 lines)
+
+---
+
+## 20. PR101 — Proxy pre-flight check + UDP-over-TCP for DNS compatibility (2026-03-04)
+
+**Root causes:**
+
+1. **`udp: udp` requires SOCKS5 UDP ASSOCIATE (RFC 1928 §7).** Most self-hosted and
+   commercial SOCKS5 servers only implement TCP CONNECT. When hev-socks5-tunnel tries to
+   open a UDP ASSOCIATE channel for DNS queries (UDP port 53 is DNAT'd through the tunnel),
+   the server rejects it. DNS fails → scoped apps can't resolve hostnames → appear completely
+   offline even though TCP works.
+
+2. **No pre-flight check before applying iptables.** If the SOCKS5 server is unreachable
+   or rejects connections, iptables rules are applied anyway. Scoped-app traffic enters
+   the tunnel but nothing comes back → total connectivity loss for all scoped apps.
+
+**Fixes:**
+
+- **`udp: tcp`** in `generate_config()` YAML: wraps UDP packets (including DNS) inside TCP
+  SOCKS5 CONNECT sessions. Supported by virtually all SOCKS5 servers. DNS over TCP is
+  standard (RFC 7766); Google DNS and Cloudflare both support it.
+
+- **`verify_proxy()`** function added to `proxy_manager.sh`: uses `curl -x socks5h://...`
+  to make a test HTTP request through the proxy before applying iptables rules. Two fallback
+  URLs tried (`api.ipify.org`, `ifconfig.me`). If both fail, `do_start()` calls `do_stop_quiet`
+  and returns error — iptables rules are **never applied** → scoped apps keep normal
+  internet access. Logs the exit IP on success for diagnostic purposes.
+
+**Files changed:** `proxy_manager.sh` (`generate_config` YAML: `udp: tcp`; new `verify_proxy()` function; call in `do_start()` before `setup_iptables`)

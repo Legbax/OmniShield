@@ -144,7 +144,7 @@ socks5:
   port: ${PROXY_PORT}
   address: '${PROXY_HOST}'
 ${auth_block}
-  udp: udp
+  udp: tcp
 
 misc:
   task-stack-size: 81920
@@ -182,6 +182,30 @@ setup_routing() {
     done
     ip route add default dev "$TUN_NAME" table "$ROUTE_TABLE" 2>/dev/null
     log "Routing table $ROUTE_TABLE → $TUN_NAME (waited ${tun_waited}s for TUN)"
+}
+
+# ─── Verify SOCKS5 proxy is actually reachable before applying iptables ──
+# Without this, a broken proxy causes all scoped apps to lose connectivity
+# because their traffic is routed into the tunnel but nothing comes back.
+verify_proxy() {
+    local auth=""
+    [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ] && \
+        auth="${PROXY_USER}:${PROXY_PASS}@"
+    local proxy_url="socks5h://${auth}${PROXY_HOST}:${PROXY_PORT}"
+    local result
+    result=$(curl -s -m 10 -x "$proxy_url" \
+        https://api.ipify.org 2>/dev/null)
+    if [ -z "$result" ]; then
+        result=$(curl -s -m 10 -x "$proxy_url" \
+            https://ifconfig.me 2>/dev/null)
+    fi
+    if [ -n "$result" ]; then
+        log "Proxy verified — exit IP: $result"
+        return 0
+    fi
+    log "ERROR: SOCKS5 proxy ${PROXY_HOST}:${PROXY_PORT} is unreachable or rejected the connection"
+    log "Check: host/port/credentials correct? Server supports SOCKS5?"
+    return 1
 }
 
 # ─── Setup iptables rules (per-UID marking + routing) ─────────────────
@@ -380,7 +404,14 @@ do_start() {
         release_lock; return 1
     fi
 
-    # Setup iptables rules
+    # Verify proxy works before applying iptables (prevents connectivity blackhole)
+    if ! verify_proxy; then
+        log "ERROR: Proxy verification failed — aborting to preserve connectivity"
+        do_stop_quiet
+        release_lock; return 1
+    fi
+
+    # Setup iptables rules (only if proxy is verified working)
     setup_iptables
 
     log "=== PROXY ACTIVE ==="
