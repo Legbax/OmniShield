@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-03 (PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-04 (PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -455,3 +455,33 @@ When modifying code, update this Julia.md:
 4. Update property lists if properties added/removed (Section 7)
 5. Update known limitations if status changes (Section 11)
 6. Update critical invariants if new crash patterns discovered (Section 3)
+
+---
+
+## 18. PR99 — Expand JA3 hash space: 32 → 256 unique hashes (2026-03-04)
+
+The `generateJA3()` randomize button used `ja3Idx ∈ [0, 1000)` but the actual output
+space was only **32 unique hashes** — MT19937 with different seeds still maps to the same
+discrete states. Verified: 100 000 seeds → exactly 32 distinct hashes.
+
+Four new variation axes were added, all corresponding to combinations observed in real
+Android TLS traffic:
+
+| Axis | Implementation | Combos added |
+|------|---------------|-------------|
+| Independent ECDHE-CBC drop (49171+49172) | `dropECDHE_CBC = rng.nextInt(2)` | ×2 cipher |
+| Independent RSA-CBC drop (47+53) | `dropRSA_CBC = rng.nextInt(2)` | ×2 cipher (4 total) |
+| secp521r1 (25) in curves | `hasSecp521 = rng.nextInt(4) === 0` (25%) | ×2 curves |
+| delegated_credentials (ext 34) for Chrome | `hasDelegCrd = rng.nextInt(4) === 0` (25%) | ×2 Chrome exts |
+| SCT (ext 18) optional for OkHttp | `okHasSct = rng.nextInt(2)` | OkHttp subset |
+
+**Result:** Chrome: 4 cipher × 2 curves × 32 ext combos = **256 unique hashes**.
+OkHttp variants are a mathematical subset of Chrome hashes → all brands produce exactly
+256 unique hashes. Samsung Internet never produces OkHttp variants (confirmed).
+
+**Note on "technical infinity":** JA3 is inherently bounded — the algorithm only captures
+5 discrete fields of the ClientHello. The practical ceiling for any Android TLS client is
+a few thousand hashes, not infinite.
+
+**Files changed:** `webroot/js/engine.js` (`generateJA3`, +14 net lines)
+**QA:** 33/33 profiles clean, 0 failures.
