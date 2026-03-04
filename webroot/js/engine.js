@@ -1,6 +1,70 @@
 // engine.js — OmniShield generation engine (mirrors jni/omni_engine.hpp exactly)
 // Uses BigInt for 64-bit precision matching C++ std::mt19937_64
 
+// ─── MD5 (RFC 1321, pure JS) ──────────────────────────────────────────────────
+// Input: UTF-8 string. Output: 32-char lowercase hex.
+function md5(str) {
+  // Per-round shift amounts
+  const S = [7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+             5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+             4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+             6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21];
+  // K[i] = floor(abs(sin(i+1)) * 2^32)
+  const K = [
+    0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+    0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+    0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+    0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+    0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+    0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391,
+  ];
+  // UTF-8 encode
+  const msg = [];
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) msg.push(c);
+    else if (c < 0x800) msg.push(0xc0|(c>>6), 0x80|(c&0x3f));
+    else msg.push(0xe0|(c>>12), 0x80|((c>>6)&0x3f), 0x80|(c&0x3f));
+  }
+  const msgLen = msg.length;
+  // Padding: append 0x80 then zeros, then 64-bit LE bit-length
+  msg.push(0x80);
+  while (msg.length % 64 !== 56) msg.push(0);
+  let bits = msgLen * 8;
+  for (let i = 0; i < 8; i++) { msg.push(bits & 0xff); bits >>>= 8; }
+  // Initial hash state
+  let h0 = 0x67452301|0, h1 = 0xefcdab89|0, h2 = 0x98badcfe|0, h3 = 0x10325476|0;
+  // Process 512-bit blocks
+  for (let ofs = 0; ofs < msg.length; ofs += 64) {
+    const W = new Int32Array(16);
+    for (let j = 0; j < 16; j++)
+      W[j] = msg[ofs+j*4] | (msg[ofs+j*4+1]<<8) | (msg[ofs+j*4+2]<<16) | (msg[ofs+j*4+3]<<24);
+    let a = h0, b = h1, c = h2, d = h3;
+    for (let i = 0; i < 64; i++) {
+      let f, g;
+      if      (i < 16) { f = (b & c) | (~b & d); g = i; }
+      else if (i < 32) { f = (d & b) | (~d & c); g = (5*i+1) % 16; }
+      else if (i < 48) { f = b ^ c ^ d;           g = (3*i+5) % 16; }
+      else             { f = c ^ (b | ~d);         g = (7*i)   % 16; }
+      f = (f + a + K[i] + W[g]) | 0;
+      a = d; d = c; c = b;
+      b = (b + ((f << S[i]) | (f >>> (32-S[i])))) | 0;
+    }
+    h0 = (h0+a)|0; h1 = (h1+b)|0; h2 = (h2+c)|0; h3 = (h3+d)|0;
+  }
+  const le32 = v => { let s='', u=v>>>0; for (let i=0;i<4;i++) s+=((u>>>(i*8))&0xff).toString(16).padStart(2,'0'); return s; };
+  return le32(h0)+le32(h1)+le32(h2)+le32(h3);
+}
+// Self-test: RFC 1321 test vectors + JA3 string hashes (catches any MD5 regression)
+if (md5('abc') !== '900150983cd24fb0d6963f7d28e17f72')
+  throw new Error('OmniShield: MD5 self-test failed (abc)');
+if (md5('771,4865-4866-4867-49195-49199-49196-49200-52392-52393-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513-21,29-23-24,0') !== '77d1a489ef746d17cc0cd09f2de71b5d')
+  throw new Error('OmniShield: MD5 self-test failed (Chrome 120 JA3 string)');
+if (md5('771,4865-4866-4867-49195-49199-49196-49200-52392-52393-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0') !== '479dc4a100ab08c520e0adfe30107d65')
+  throw new Error('OmniShield: MD5 self-test failed (OkHttp 4.x JA3 string)');
+
 // ─── MT19937-64 (matches std::mt19937_64) ────────────────────────────────────
 class MT64 {
   constructor(seed) {
@@ -360,6 +424,50 @@ export function generateSerial(brandIn, seed, securityPatch) {
   let res = '';
   for (let i = 0; i < len; i++) res += an[rng.nextInt(an.length)];
   return res;
+}
+
+// ─── JA3 fingerprint (Salesforce algorithm, seed-derived) ────────────────────
+// Generates a real JA3 hash: MD5("SSLVersion,Ciphers,Extensions,Curves,PointFormats")
+// Produces ~36 distinct valid hashes covering Chrome 119-122 and OkHttp 4.x variants.
+// Seed offset +8001 reserved for this function; caller adds ja3Idx*10007 for variation.
+export function generateJA3(seed, brand) {
+  const rng = new OmniRandom(seed);
+  const br = (brand || '').toLowerCase();
+
+  // Samsung Internet is Chromium-based → always Chrome family
+  const isOkHttp = br !== 'samsung' && rng.nextInt(2) === 0;
+
+  // ~33% chance to drop legacy AES-CBC/RSA suites (newer Chrome/OkHttp builds)
+  const dropLegacy = rng.nextInt(3) === 0;
+  const baseCiphers = [4865,4866,4867,49195,49199,49196,49200,52392,52393,49171,49172,156,157,47,53];
+  const ciphers = dropLegacy ? baseCiphers.filter(c => ![49171,49172,47,53].includes(c)) : baseCiphers;
+
+  let exts, name;
+  if (isOkHttp) {
+    // OkHttp 4.x: fixed extension set, optional padding (ext 21)
+    const hasPadding = rng.nextInt(2) === 1;
+    exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13, 18, 51, 45, 43];
+    if (hasPadding) exts.push(21);
+    name = `OkHttp/4.${10 + rng.nextInt(3)}.0`;
+  } else {
+    // Chrome / Samsung Internet: core extensions + seed-controlled optionals
+    const hasSct     = rng.nextInt(2) === 1;  // ext 18  signed_cert_timestamp
+    const hasCmpCrt  = rng.nextInt(2) === 1;  // ext 27  compress_cert
+    const hasAlps    = rng.nextInt(2) === 1;  // ext 17513 application_settings (ALPS)
+    const hasPadding = rng.nextInt(2) === 1;  // ext 21  padding (always last)
+    exts = [0, 23, 65281, 10, 11, 35, 16, 5, 13];
+    if (hasSct) exts.push(18);
+    exts.push(51, 45, 43);
+    if (hasCmpCrt)  exts.push(27);
+    if (hasAlps)    exts.push(17513);
+    if (hasPadding) exts.push(21);
+    name = br === 'samsung'
+      ? `Samsung Internet ${23 + rng.nextInt(2)}`
+      : `Chrome ${119 + rng.nextInt(4)} Android`;
+  }
+
+  const ja3str = `771,${ciphers.join('-')},${exts.join('-')},29-23-24,0`;
+  return { name, hash: md5(ja3str) };
 }
 
 // ─── Random ID (hex, mirrors generateRandomId) ───────────────────────────────
