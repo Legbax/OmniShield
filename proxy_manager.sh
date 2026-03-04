@@ -188,32 +188,42 @@ setup_routing() {
 # Without this, a broken proxy causes all scoped apps to lose connectivity
 # because their traffic is routed into the tunnel but nothing comes back.
 verify_proxy() {
-    # Step 1: TCP reachability via nc (toybox, always available on KernelSU/Magisk)
-    # Android system curl is NOT compiled with SOCKS5 support; nc is the fallback.
-    if ! nc -z -w 10 "$PROXY_HOST" "$PROXY_PORT" 2>/dev/null; then
-        log "ERROR: Cannot TCP-connect to $PROXY_HOST:$PROXY_PORT (refused/timeout)"
+    # Step 1: Resolve hostname to IP first — Android toybox nc fails DNS lookups
+    # internally for hostnames; resolve_host() uses getent/ping which work correctly.
+    local proxy_ip
+    proxy_ip=$(resolve_host "$PROXY_HOST")
+    [ -z "$proxy_ip" ] && proxy_ip="$PROXY_HOST"
+
+    # Step 2: TCP reachability using resolved IP (avoids nc internal DNS failure)
+    if ! nc -z -w 10 "$proxy_ip" "$PROXY_PORT" 2>/dev/null; then
+        log "ERROR: Cannot TCP-connect to $proxy_ip:$PROXY_PORT (refused/timeout)"
         log "Check: host/port correct? Firewall blocking? Server running?"
         return 1
     fi
-    log "Proxy TCP reachable: $PROXY_HOST:$PROXY_PORT"
+    log "Proxy TCP reachable: $proxy_ip:$PROXY_PORT"
 
-    # Step 2: Full SOCKS5+auth test via curl --socks5-hostname
-    # This flag may work on Android curl builds that reject the socks5h:// URL scheme.
-    local auth_arg=""
-    [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ] && \
-        auth_arg="-U ${PROXY_USER}:${PROXY_PASS}"
-    local result
-    result=$(curl -s -m 10 --socks5-hostname "${PROXY_HOST}:${PROXY_PORT}" \
-        $auth_arg https://api.ipify.org 2>/dev/null)
-    if [ -n "$result" ]; then
-        log "Proxy verified — exit IP: $result"
+    # Step 3: Check if system curl actually supports SOCKS5 before attempting auth test
+    if ! curl -V 2>/dev/null | grep -qi "socks5"; then
+        log "WARN: curl SOCKS5 unavailable (Android build limitation)"
+        log "WARN: TCP reachable — proceeding (tunnel will validate credentials)"
         return 0
     fi
 
-    # Step 3: curl SOCKS5 unavailable (Android build limitation) — TCP passed above
-    log "WARN: curl cannot test SOCKS5 auth (Android build limitation)"
-    log "WARN: TCP reachable — proceeding (tunnel will validate credentials)"
-    return 0
+    # Step 4: Full SOCKS5 auth + connectivity test via HTTP status code
+    local auth_arg=""
+    [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ] && \
+        auth_arg="-U ${PROXY_USER}:${PROXY_PASS}"
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 \
+        --socks5-hostname "${PROXY_HOST}:${PROXY_PORT}" \
+        $auth_arg https://www.google.com 2>/dev/null)
+    if [ "$http_code" = "200" ] || [ "$http_code" = "301" ] || [ "$http_code" = "302" ]; then
+        log "Proxy verified successfully (HTTP $http_code)"
+        return 0
+    fi
+    log "ERROR: SOCKS5 handshake/auth failed (HTTP $http_code)"
+    log "Check: invalid credentials or IP not whitelisted on proxy dashboard."
+    return 1
 }
 
 # ─── Setup iptables rules (per-UID marking + routing) ─────────────────

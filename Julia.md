@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-04 (PR102: fix verify_proxy() — replace curl socks5h:// with nc -z TCP test + curl --socks5-hostname fallback (Android curl has no SOCKS5 support); PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-04 (PR103: fix verify_proxy() — pre-resolve hostname via resolve_host() before nc (toybox nc can't resolve DNS); check curl -V for SOCKS5 support; use HTTP code for auth validation; PR102: fix verify_proxy() — replace curl socks5h:// with nc -z TCP test + curl --socks5-hostname fallback (Android curl has no SOCKS5 support); PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -563,3 +563,31 @@ activation attempt even when the proxy is perfectly functional.
    internally on first use.
 
 **Files changed:** `proxy_manager.sh` (replace body of `verify_proxy()`)
+
+---
+
+## 22. PR103 — Fix verify_proxy(): pre-resolve hostname; check curl SOCKS5 support (2026-03-04)
+
+**Root cause:** Android's toybox `nc` fails to resolve hostnames internally — when passed
+`ultra.marsproxies.com` directly it either times out on DNS or returns NXDOMAIN. This caused
+`nc -z` (PR102) to report TCP failure even when the proxy port was perfectly reachable.
+
+**Fix (4 steps):**
+
+1. **Pre-resolve via `resolve_host()`** — the function already exists in proxy_manager.sh
+   (used by `setup_iptables`). It uses `getent hosts` + `ping` for DNS, which work
+   correctly in the Android root context. `nc` receives a dotted-decimal IP address,
+   bypassing its broken internal DNS resolver.
+
+2. **`nc -z` on resolved IP** — TCP reachability check with no hostname lookup required.
+   Aborts if TCP is refused or times out.
+
+3. **`curl -V | grep -qi socks5`** — checks whether the system's curl binary was actually
+   compiled with SOCKS5 support before attempting an auth test. Avoids false negatives from
+   builds that silently ignore `--socks5-hostname`.
+
+4. **HTTP status code auth test** — if curl does support SOCKS5, verifies credentials by
+   checking the HTTP response code from `https://www.google.com` (200/301/302 = pass).
+   Catches invalid credentials and IP-whitelist rejections.
+
+**Files changed:** `proxy_manager.sh` (rewrite of `verify_proxy()` body)
