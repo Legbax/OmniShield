@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-04 (PR103: fix verify_proxy() — pre-resolve hostname via resolve_host() before nc (toybox nc can't resolve DNS); check curl -V for SOCKS5 support; use HTTP code for auth validation; PR102: fix verify_proxy() — replace curl socks5h:// with nc -z TCP test + curl --socks5-hostname fallback (Android curl has no SOCKS5 support); PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-04 (PR104: fix resolve_host() greedy sed regex extracts byte-count (84) instead of IP from ping output; PR103: fix verify_proxy() — pre-resolve hostname via resolve_host() before nc (toybox nc can't resolve DNS); check curl -V for SOCKS5 support; use HTTP code for auth validation; PR102: fix verify_proxy() — replace curl socks5h:// with nc -z TCP test + curl --socks5-hostname fallback (Android curl has no SOCKS5 support); PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
 
 ---
 
@@ -591,3 +591,33 @@ activation attempt even when the proxy is perfectly functional.
    Catches invalid credentials and IP-whitelist rejections.
 
 **Files changed:** `proxy_manager.sh` (rewrite of `verify_proxy()` body)
+
+---
+
+## 23. PR104 — Fix resolve_host() greedy regex extracts byte-count instead of IP (2026-03-04)
+
+**Root cause:** `resolve_host()` uses ping as a DNS fallback. Android ping output is:
+```
+PING ultra.marsproxies.com (84.238.x.x) 56(84) bytes of data.
+```
+The sed pattern `s/.*(\([0-9.]*\)).*/\1/p` uses greedy `.*` which skips past the IP
+group `(84.238.x.x)` all the way to the last parenthesized group `(84)` (byte count).
+Result: `resolve_host` returned `84` instead of `84.238.x.x`, so `verify_proxy()` and
+`setup_iptables()` both used the wrong address.
+
+**Fix:** Replace `.*` with `[^(]*` (characters that are NOT `(`) before the capture group.
+`[^(]*` is non-greedy by nature — it stops at the **first** `(` in the line, which is
+always the IP address. `[0-9][0-9.]*` requires at least one digit (prevents empty matches).
+
+```sh
+# OLD — greedy:
+sed -n 's/.*(\([0-9.]*\)).*/\1/p'
+# NEW — stops at first parenthesized group:
+sed -n 's/[^(]*(\([0-9][0-9.]*\)).*/\1/p'
+```
+
+This fix also corrects `setup_iptables()` which uses `resolve_host()` to get the proxy IP
+for the iptables bypass rule (traffic to the proxy itself must not be rerouted through the
+tunnel). That rule was using `84` as the exempt IP instead of the real proxy address.
+
+**Files changed:** `proxy_manager.sh` (`resolve_host()` — one line)

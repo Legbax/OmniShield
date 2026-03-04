@@ -98,7 +98,7 @@ resolve_host() {
     ip=$(getent hosts "$1" 2>/dev/null | head -1 | awk '{print $1}')
     [ -n "$ip" ] && { echo "$ip"; return; }
     # Try ping-based resolution
-    ip=$(ping -c1 -W2 "$1" 2>/dev/null | head -1 | sed -n 's/.*(\([0-9.]*\)).*/\1/p')
+    ip=$(ping -c1 -W2 "$1" 2>/dev/null | head -1 | sed -n 's/[^(]*(\([0-9][0-9.]*\)).*/\1/p')
     [ -n "$ip" ] && { echo "$ip"; return; }
     # Fallback: return original (iptables will attempt its own resolution)
     echo "$1"
