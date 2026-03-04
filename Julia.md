@@ -2,7 +2,7 @@
 
 **Version:** v13.0 (The Void)
 **Author:** Legba
-**Last updated:** 2026-03-03 (PR95: Dual property elimination via expanded resetprop + timezone fix)
+**Last updated:** 2026-03-04 (PR-LOC + PR-PROXY: Location config fix + Proxy TUN race condition fix)
 
 ---
 
@@ -366,6 +366,8 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 | `gsm.version.baseband` dual | Partial | Runtime prop, modem daemon overwrites after resetprop |
 | WebView UA | Partial | Chromium caches UA during Zygote init before hooks |
 | `Settings.Global.getString("device_name")` | Fixed | PR76: `settings put global device_name` in boot-completed.sh |
+| Custom UI location ignored by native hooks | Fixed | PR-LOC: `parseConfigString()` now reads `location_lat/lon/alt` from config |
+| Proxy causes total connectivity loss on start | Fixed | PR-PROXY: `setup_routing()` now waits for tun0 to exist before adding route to table 100 |
 
 ---
 

@@ -164,9 +164,24 @@ YAMLEOF
 # ─── Setup routing after TUN is up ────────────────────────────────────
 # hev-socks5-tunnel creates the TUN interface internally.
 # We only need to add policy routing after it's up.
+# PR-PROXY: Wait for the TUN interface to actually appear before adding the
+# route.  hev-socks5-tunnel writes its PID file as soon as it forks, but the
+# TUN ioctl may happen slightly later.  If ip route add runs before tun0
+# exists it silently fails, leaving routing table $ROUTE_TABLE empty.  Any
+# packet later marked 0x1337 and looked up in that empty table is immediately
+# dropped by the kernel — apps lose all connectivity.
 setup_routing() {
+    local tun_waited=0
+    while ! ip link show "$TUN_NAME" >/dev/null 2>&1; do
+        if [ "$tun_waited" -ge 10 ]; then
+            log "ERROR: TUN interface $TUN_NAME not created after 10s"
+            return 1
+        fi
+        sleep 1
+        tun_waited=$((tun_waited + 1))
+    done
     ip route add default dev "$TUN_NAME" table "$ROUTE_TABLE" 2>/dev/null
-    log "Routing table $ROUTE_TABLE → $TUN_NAME"
+    log "Routing table $ROUTE_TABLE → $TUN_NAME (waited ${tun_waited}s for TUN)"
 }
 
 # ─── Setup iptables rules (per-UID marking + routing) ─────────────────
@@ -359,7 +374,11 @@ do_start() {
     fi
 
     # Setup routing (TUN was created by hev-socks5-tunnel)
-    setup_routing
+    if ! setup_routing; then
+        log "ERROR: Routing setup failed — aborting to avoid traffic blackhole"
+        do_stop_quiet
+        release_lock; return 1
+    fi
 
     # Setup iptables rules
     setup_iptables

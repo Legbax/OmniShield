@@ -347,6 +347,21 @@ static void parseConfigString(const std::string& content) {
             g_seedVersion    = newSeedVersion;
         }
     }
+    // PR-LOC: Read user-defined coordinates from UI (location_lat/lon/alt keys).
+    // Without this, initLocationCache() always generated coords from the seed,
+    // ignoring the city the user selected in the WebUI.
+    if (g_config.count("location_lat") && g_config.count("location_lon")) {
+        try {
+            double lat = std::stod(g_config["location_lat"]);
+            double lon = std::stod(g_config["location_lon"]);
+            g_cachedLat = lat;
+            g_cachedLon = lon;
+            if (g_config.count("location_alt")) {
+                try { g_cachedAlt = std::stod(g_config["location_alt"]); } catch(...) {}
+            }
+            g_locationCached = true;
+        } catch(...) {}
+    }
 }
 
 // Direct file read — fallback when companion is unavailable
