@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.0
-versionCode=13000
+version=v13.1
+versionCode=13100
 author=Legba
-description=Total Invisibility (The Void). Zygisk module. susfs set_uname integration, dual property elimination via resetprop, telephony country/TAC hooks, UI inset fix
+description=PR105 — Binder Location Hook + stealth fixes
