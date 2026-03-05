@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.7
-versionCode=13700
+version=v13.8
+versionCode=13800
 author=Legba
-description=PR112 — BBinder mutation BEFORE orig + token diagnostics
+description=PR113 — JavaBBinder::onTransact hook (libandroid_runtime.so)
