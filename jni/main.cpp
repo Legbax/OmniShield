@@ -4794,6 +4794,38 @@ static void* resolveRuntimeSymbol(const char* mangled) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// PR118: Hook para la reconstrucción nativa del objeto Location
+// Firma: void android_location_Location_readFromParcel(JNIEnv* env, jobject clazz, jobject parcelObj)
+using fn_Location_readFromParcel = void(*)(JNIEnv*, jobject, jobject);
+static fn_Location_readFromParcel orig_Location_readFromParcel = nullptr;
+
+static void my_Location_readFromParcel(JNIEnv* env, jobject thiz, jobject parcel) {
+    // 1. Dejamos que el sistema reconstruya el objeto originalmente
+    orig_Location_readFromParcel(env, thiz, parcel);
+
+    // 2. Inmediatamente después, sobreescribimos los campos de Java usando JNI
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+
+    if (latBits != 0 || lonBits != 0) {
+        double fakeLat, fakeLon;
+        memcpy(&fakeLat, &latBits, 8);
+        memcpy(&fakeLon, &lonBits, 8);
+
+        jclass locClass = env->GetObjectClass(thiz);
+        // Buscamos los métodos setter de la clase Location en Java
+        jmethodID setLat = env->GetMethodID(locClass, "setLatitude", "(D)V");
+        jmethodID setLon = env->GetMethodID(locClass, "setLongitude", "(D)V");
+
+        if (setLat && setLon) {
+            env->CallVoidMethod(thiz, setLat, fakeLat);
+            env->CallVoidMethod(thiz, setLon, fakeLon);
+            LOGD("[PR118] Location object mutated after readFromParcel: %.6f, %.6f", fakeLat, fakeLon);
+        }
+        env->DeleteLocalRef(locClass);
+    }
+}
+
 static void applyBBinderHook() {
     // ─────────────────────────────────────────────────────────────────────────
     // PR106: BBinder::transact fallback (inlined en MIUI, conservado por compatibilidad)
@@ -4884,13 +4916,13 @@ static void applyBBinderHook() {
         LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
     }
 
-    // PR117: Interceptación en el motor de datos (libbinder.so / libandroid_runtime.so)
-    void* readDouble = resolveLibbinderSymbol("_ZNK7android6Parcel10readDoubleEv");
-    if (readDouble) {
-        DobbyHook(readDouble, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
-        LOGE("[PR117] Parcel::readDouble hooked OK");
+    // PR118: El punto de entrada de todos los objetos Location vía Binder
+    void* readFromParcel = resolveRuntimeSymbol("_ZN7android16Location_readFromParcelEP7_JNIEnvP8_jobjectS3_");
+    if (readFromParcel) {
+        DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
+        LOGE("[PR118] Location::readFromParcel hooked OK");
     } else {
-        LOGE("[PR117] Parcel::readDouble UNRESOLVED");
+        LOGE("[PR118] Location::readFromParcel UNRESOLVED");
     }
 }
 
