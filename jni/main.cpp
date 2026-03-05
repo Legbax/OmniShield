@@ -4403,48 +4403,67 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
                   LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
 }
 
+// 1. Calcular bytes opcionales según mFieldsMask (AOSP Android 11)
+static size_t locationOptionalBytes(int32_t mask) {
+    size_t n = 0;
+    if (mask & 0x01) n += 8; // altitude: double
+    if (mask & 0x02) n += 4; // speed: float
+    if (mask & 0x04) n += 4; // bearing: float
+    if (mask & 0x08) n += 4; // accuracy: float
+    if (mask & 0x10) n += 4; // vertical accuracy: float
+    if (mask & 0x20) n += 4; // speed accuracy: float
+    if (mask & 0x40) n += 4; // bearing accuracy: float
+    return n;
+}
+
+// 2. Mutar coordenadas en un buffer de Location.writeToParcel (Reutilizable)
+static bool mutateLocationInBuffer(uint8_t* buf, size_t sz, size_t base_offset, double lat, double lon) {
+    if (base_offset + 4 > sz) return false;
+
+    int32_t providerLen = 0;
+    memcpy(&providerLen, buf + base_offset, 4);
+    if (providerLen < 0 || providerLen > 64) return false;
+
+    size_t providerBytes = 4 + (size_t)providerLen * 2;
+    providerBytes = (providerBytes + 3) & ~3u; // Alinear a 4 bytes
+
+    size_t maskOffset = base_offset + providerBytes + 24; // mTime(8)+mElapsedRt(8)+mElapsedRtUnc(8)
+    if (maskOffset + 4 > sz) return false;
+
+    int32_t fieldsMask = 0;
+    memcpy(&fieldsMask, buf + maskOffset, 4);
+
+    size_t optBytes  = locationOptionalBytes(fieldsMask);
+    size_t latOffset = maskOffset + 4 + optBytes;
+    size_t lonOffset = latOffset + 8;
+
+    if (lonOffset + 8 > sz) return false;
+
+    memcpy(buf + latOffset, &lat, 8); // mLatitude
+    memcpy(buf + lonOffset, &lon, 8); // mLongitude
+    return true;
+}
+
+// 3. Adaptador para respuestas síncronas (IPCThreadState::transact)
 static void mutateLocationReply(void* reply_parcel) {
-    // Leer coordenadas de los atómicos (thread-safe, sin mutex)
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-    if (latBits == 0 && lonBits == 0) return; // sin coordenadas configuradas
-    if (!reply_parcel) return;
+    if (latBits == 0 && lonBits == 0) return;
 
     const uint8_t* raw = parcel_data(reply_parcel);
-    size_t sz          = parcel_dataSize(reply_parcel);
+    size_t sz = parcel_dataSize(reply_parcel);
     if (!raw || sz < 24) return;
 
-    // Guard: verificar non-null marker en offset 8.
-    // Si la Location es null (sin GPS fix), el servidor escribe writeInt(0)
-    // y no hay objeto que parsear. Sin este guard, raw+12 contendría basura.
     int32_t nonNull = 0;
     memcpy(&nonNull, raw + 8, 4);
     if (nonNull != 1) return;
 
-    // Leer longitud real del string mProvider (offset 12, int32)
-    int32_t providerLen = 0;
-    memcpy(&providerLen, raw + 12, 4);
-    if (providerLen < 0 || providerLen > 64) return; // guard contra datos corruptos
-
-    // Tamaño del string en Parcel: int32 length + chars UTF-16 + padding a 4 bytes
-    size_t providerBytes = 4 + (size_t)providerLen * 2;
-    providerBytes = (providerBytes + 3) & ~3u;
-
-    // Offset de mLatitude:
-    //   12 (inicio del string) + providerBytes + 28 bytes fijos
-    //   28 = mTime(8) + mElapsedRealtimeNs(8) + mElapsedRealtimeUncertaintyNs(8) + mFieldsMask(4)
-    size_t latOffset = 12 + providerBytes + 28;
-    size_t lonOffset = latOffset + 8;
-
-    if (sz < lonOffset + 8) return; // reply demasiado corto — no es un Location válido
-
     double lat, lon;
     memcpy(&lat, &latBits, 8);
     memcpy(&lon, &lonBits, 8);
-    parcel_write_double_at(reply_parcel, latOffset, lat);
-    parcel_write_double_at(reply_parcel, lonOffset, lon);
-    LOGD("[PR105] Location reply mutated: lat=%.6f lon=%.6f (provider len=%d)",
-         lat, lon, providerLen);
+
+    // En el REPLY, el objeto Location empieza en el offset 12
+    mutateLocationInBuffer(const_cast<uint8_t*>(raw), sz, 12, lat, lon);
 }
 
 static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
@@ -4460,17 +4479,76 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
     return status;
 }
 
+static constexpr int32_t ILOCLISTENER_STR_LEN = 34;
+static constexpr uint32_t TRANSACTION_onLocationChanged = 1;
+static constexpr size_t ILOCLISTENER_HDR = 84;
+static constexpr size_t LOC_COPY_MAX = 1024;
+
+typedef int32_t (*bbinder_transact_fn)(void*, uint32_t, const void*, void*, uint32_t);
+static bbinder_transact_fn orig_bbinder_transact = nullptr;
+
+static bool isLocationCallback(const void* data_parcel, uint32_t code) {
+    if (code != TRANSACTION_onLocationChanged || !data_parcel) return false;
+    size_t sz = parcel_dataSize(data_parcel);
+    if (sz < ILOCLISTENER_HDR + 48) return false;
+    const uint8_t* raw = parcel_data(data_parcel);
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+    return (strLen == ILOCLISTENER_STR_LEN && memcmp(raw + 12, LOC_TOKEN_PREFIX, 8) == 0);
+}
+
+static int32_t my_bbinder_transact(void* self, uint32_t code, const void* data, void* reply, uint32_t flags) {
+    if (!isLocationCallback(data, code)) return orig_bbinder_transact(self, code, data, reply, flags);
+
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+    if (latBits == 0 && lonBits == 0) return orig_bbinder_transact(self, code, data, reply, flags);
+
+    size_t sz = parcel_dataSize(data);
+    if (sz > LOC_COPY_MAX) return orig_bbinder_transact(self, code, data, reply, flags);
+
+    uint8_t stackBuf[LOC_COPY_MAX];
+    memcpy(stackBuf, parcel_data(data), sz);
+
+    double lat, lon;
+    memcpy(&lat, &latBits, 8);
+    memcpy(&lon, &lonBits, 8);
+
+    // Mutar en la copia del stack (Location empieza en offset 84 para el DATA de este listener)
+    mutateLocationInBuffer(stackBuf, sz, ILOCLISTENER_HDR, lat, lon);
+
+    // Redirección de mData: Shadow Copy
+    uint8_t** mDataField = reinterpret_cast<uint8_t**>(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
+    uint8_t* savedMData = *mDataField;
+    *mDataField = stackBuf;
+
+    int32_t status = orig_bbinder_transact(self, code, data, reply, flags);
+    *mDataField = savedMData; // Restauración crítica
+
+    return status;
+}
+
 static void applyBinderHooks() {
+    // Hook Saliente (PR105)
     // DobbySymbolResolver escanea /proc/self/maps internamente — no necesita dlopen.
     // Símbolo: android::IPCThreadState::transact(int,uint,Parcel const&,Parcel*,uint)
     // Verificado para libbinder.so AOSP Android 11 arm64.
-    void* sym = DobbySymbolResolver("libbinder.so",
+    void* symIPC = DobbySymbolResolver("libbinder.so",
         "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
-    if (sym) {
-        DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
-        LOGE("[PR105] IPCThreadState::transact hooked OK @ %p", sym);
+    if (symIPC) {
+        DobbyHook(symIPC, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
+        LOGE("[PR105] IPCThreadState::transact hooked OK @ %p", symIPC);
     } else {
         LOGE("[PR105] IPCThreadState::transact symbol NOT FOUND — Binder location hook inactive");
+    }
+
+    // Hook Entrante (PR106)
+    void* symBB = DobbySymbolResolver("libbinder.so", "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
+    if (symBB) {
+        DobbyHook(symBB, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
+        LOGE("[PR106] BBinder::transact hooked OK @ %p", symBB);
+    } else {
+        LOGE("[PR106] BBinder::transact symbol NOT FOUND");
     }
 }
 // ─────────────────────────────────────────────────────────────────────────────
