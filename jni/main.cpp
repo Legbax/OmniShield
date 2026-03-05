@@ -67,6 +67,14 @@ static bool g_debugMode = true;  // PR53: activar con debug_mode=true en .identi
 static double g_cachedLat       = 0.0;
 static double g_cachedLon       = 0.0;
 static double g_cachedAlt       = 0.0;
+
+// PR105: Atómicos thread-safe para el Binder hook de Location.
+// g_cachedLat/Lon siguen siendo las variables primarias.
+// g_cachedLatBits/LonBits son espejos atómicos para uso en my_ipc_transact.
+#include <atomic>
+static std::atomic<int64_t> g_cachedLatBits{0};
+static std::atomic<int64_t> g_cachedLonBits{0};
+
 static bool   g_locationCached  = false;
 
 // PR38+39: Sensor chip statics — valores del perfil activo para los hooks de Sensor
@@ -107,6 +115,16 @@ static void initLocationCache() {
                                                 g_cachedLat, g_cachedLon);
         g_cachedAlt    = omni::engine::generateAltitudeForRegion(g_currentProfileName, g_masterSeed);
         g_locationCached = true;
+    }
+    // PR105: Propagar coordenadas al Binder hook de forma thread-safe.
+    // Debe ejecutarse siempre, tanto si se generaron coords nuevas como si
+    // g_locationCached ya era true (coords cargadas por parseConfigString).
+    {
+        int64_t lb, lob;
+        memcpy(&lb,  &g_cachedLat, 8);
+        memcpy(&lob, &g_cachedLon, 8);
+        g_cachedLatBits.store(lb,  std::memory_order_release);
+        g_cachedLonBits.store(lob, std::memory_order_release);
     }
 }
 
@@ -362,6 +380,14 @@ static void parseConfigString(const std::string& content) {
             }
         } catch(...) {}
     }
+    // PR105: Propagar location pinneada por el usuario a los atómicos del Binder hook.
+    if (g_locationCached) {
+        int64_t lb, lob;
+        memcpy(&lb,  &g_cachedLat, 8);
+        memcpy(&lob, &g_cachedLon, 8);
+        g_cachedLatBits.store(lb,  std::memory_order_release);
+        g_cachedLonBits.store(lob, std::memory_order_release);
+    }
 }
 
 // Direct file read — fallback when companion is unavailable
@@ -514,8 +540,13 @@ static inline bool isProcPidPath(const char* path, const char* suffix) {
 // instead of the file path.  This hides the module from maps readers even
 // if they bypass our openat/read hooks (e.g. direct syscall).
 static void remapModuleMemory() {
-    FILE *fp = fopen("/proc/self/maps", "re");
-    if (!fp) return;
+    // PR105: Usar syscall directo para evitar pasar por my_fopen,
+    // que filtraría las entradas del propio módulo y haría esta función un no-op.
+    int _maps_fd = (int)syscall(__NR_openat, AT_FDCWD, "/proc/self/maps",
+                                O_RDONLY | O_CLOEXEC);
+    if (_maps_fd < 0) return;
+    FILE *fp = fdopen(_maps_fd, "re");
+    if (!fp) { close(_maps_fd); return; }
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
         if (!isHiddenPath(line)) continue;
@@ -4289,6 +4320,373 @@ static void* my_dlopen_hook(const char* filename, int flags) {
     return handle;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PR105: Binder Location Hook — IPCThreadState::transact (Android 11, arm64)
+//
+// Arquitectura:
+//   - Hook en llamadas SALIENTES (IPCThreadState::transact)
+//   - Detecta calls a ILocationManager.getLastLocation (code=1) y
+//     getCurrentLocation (code=2) leyendo el interface token en el
+//     Parcel DATA (offset 12, UTF-16LE "andr")
+//   - Muta las coordenadas en el Parcel REPLY DESPUÉS de que
+//     orig_ipc_transact retorna, usando offsets dinámicos calculados
+//     a partir de la longitud real del string mProvider
+//
+// Parcel DATA layout (writeInterfaceToken, Android 11):
+//   offset  0: StrictMode policy mask (int32)
+//   offset  4: workSource header (int32)
+//   offset  8: string length = 33 (int32)
+//   offset 12: "android.location.ILocationManager" UTF-16LE  ← token aquí
+//
+// Parcel REPLY layout (writeNoException + Location.writeToParcel, Android 11):
+//   offset  0: StrictMode mask (int32)       ← writeNoException
+//   offset  4: exception code = 0 (int32)   ← writeNoException
+//   offset  8: non-null marker (int32)       ← 1=Location, 0=null
+//   offset 12: mProvider length (int32)      ← Location.writeToParcel
+//   offset 16: mProvider chars (UTF-16LE, variable)
+//   offset 16+pad: mTime(8) + mElapsedRtNs(8) + mElapsedRtUncNs(8) + mFieldsMask(4) = 28 bytes
+//   offset 16+pad+28: mLatitude (double)
+//   offset 16+pad+36: mLongitude (double)
+//
+// Verificado contra AOSP android-11.0.0_r46:
+//   frameworks/native/libs/binder/Parcel.cpp
+//   frameworks/base/location/java/android/location/Location.java
+//   frameworks/base/location/java/android/location/ILocationManager.aidl
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Acceso al Parcel via offsets del struct (arm64, Android 11).
+// Parcel NO tiene vtable. mData es el primer campo en offset 0x00.
+static inline const uint8_t* parcel_data(const void* p) {
+    return *reinterpret_cast<const uint8_t* const*>(
+        static_cast<const uint8_t*>(p) + 0x00);
+}
+static inline size_t parcel_dataSize(const void* p) {
+    return *reinterpret_cast<const size_t*>(
+        static_cast<const uint8_t*>(p) + 0x08);
+}
+// Escritura in-place en el buffer mData del reply (buffer privado del caller,
+// PROT_READ|PROT_WRITE — distinto del buffer PROT_READ de BBinder::transact).
+static inline void parcel_write_double_at(void* p, size_t offset, double val) {
+    uint8_t* data = *reinterpret_cast<uint8_t**>(
+        static_cast<uint8_t*>(p) + 0x00);
+    memcpy(data + offset, &val, sizeof(double));
+}
+
+// Transaction codes en ILocationManager.aidl Android 11 (FIRST_CALL_TRANSACTION=1):
+//   1 = getLastLocation
+//   2 = getCurrentLocation
+// Verificado: método #1 en el .aidl según orden de aparición.
+static constexpr uint32_t TRANSACTION_getLastLocation    = 1;
+static constexpr uint32_t TRANSACTION_getCurrentLocation = 2;
+
+// Token "andr" en UTF-16LE (primeros 4 chars de "android.location.ILocationManager")
+// Posición: offset 12 en el DATA Parcel (después de StrictMode+workSource+strLen).
+static constexpr uint8_t  LOC_TOKEN_PREFIX[8] = {
+    0x61,0x00, 0x6E,0x00, 0x64,0x00, 0x72,0x00  // 'a','n','d','r'
+};
+static constexpr size_t LOC_TOKEN_OFFSET   = 12; // inicio del texto UTF-16
+static constexpr size_t LOC_TOKEN_MIN_SIZE = 80; // 4+4+4+(33*2+2) = 80 bytes exactos
+
+typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t,
+                                   const void*, void*, uint32_t);
+static ipc_transact_fn orig_ipc_transact = nullptr;
+
+static bool isLocationRequest(const void* data_parcel, uint32_t code) {
+    // Filtro O(1): transaction code exacto
+    if (code != TRANSACTION_getLastLocation &&
+        code != TRANSACTION_getCurrentLocation) return false;
+    if (!data_parcel) return false;
+    // Guard de tamaño mínimo para leer el token completo
+    if (parcel_dataSize(data_parcel) < LOC_TOKEN_MIN_SIZE) return false;
+    // Confirmar interface token (guard contra colisión de codes entre servicios)
+    return memcmp(parcel_data(data_parcel) + LOC_TOKEN_OFFSET,
+                  LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR105b: Cálculo dinámico de campos opcionales de Location.writeToParcel()
+//
+// Location.writeToParcel() escribe campos opcionales entre mFieldsMask y
+// mLatitude. Su presencia depende de los bits de mFieldsMask:
+//   bit 0 = HAS_ALTITUDE          → double (8 bytes)
+//   bit 1 = HAS_SPEED             → float  (4 bytes)
+//   bit 2 = HAS_BEARING           → float  (4 bytes)
+//   bit 3 = HAS_ACCURACY          → float  (4 bytes) ← siempre en GPS/network
+//   bit 4 = HAS_VERTICAL_ACCURACY → float  (4 bytes)
+//   bit 5 = HAS_SPEED_ACCURACY    → float  (4 bytes)
+//   bit 6 = HAS_BEARING_ACCURACY  → float  (4 bytes)
+// Verificado contra AOSP android-11.0.0_r46 Location.java
+// ─────────────────────────────────────────────────────────────────────────────
+static size_t locationOptionalBytes(int32_t mask) {
+    size_t n = 0;
+    if (mask & 0x01) n += 8;
+    if (mask & 0x02) n += 4;
+    if (mask & 0x04) n += 4;
+    if (mask & 0x08) n += 4;
+    if (mask & 0x10) n += 4;
+    if (mask & 0x20) n += 4;
+    if (mask & 0x40) n += 4;
+    return n;
+}
+
+// Muta lat/lon en un buffer de Location.writeToParcel serializado.
+// base_offset = inicio del campo providerLen dentro del buffer.
+// Reutilizado por mutateLocationReply (base=12) y my_bbinder_transact (base=84 o 132).
+static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
+                                   size_t base_offset, double lat, double lon) {
+    if (base_offset + 4 > sz) return false;
+    int32_t providerLen = 0;
+    memcpy(&providerLen, buf + base_offset, 4);
+    if (providerLen < 0 || providerLen > 64) return false;
+
+    size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+
+    // mTime(8) + mElapsedRealtimeNs(8) + mElapsedRealtimeUncertaintyNs(8) = 24
+    size_t maskOffset = base_offset + providerBytes + 24;
+    if (maskOffset + 4 > sz) return false;
+    int32_t fieldsMask = 0;
+    memcpy(&fieldsMask, buf + maskOffset, 4);
+
+    size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
+    size_t lonOffset = latOffset + 8;
+    if (lonOffset + 8 > sz) return false;
+
+    memcpy(buf + latOffset, &lat, 8);
+    memcpy(buf + lonOffset, &lon, 8);
+    return true;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 3. Adaptador para respuestas síncronas (IPCThreadState::transact)
+static void mutateLocationReply(void* reply) {
+    if (!reply) return;
+    size_t sz = parcel_dataSize(reply);
+    if (sz < 16) return;
+
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+    if (latBits == 0 && lonBits == 0) return;
+
+    const uint8_t* raw = parcel_data(reply);
+    int32_t providerLen = 0;
+    memcpy(&providerLen, raw + 12, 4);
+    if (providerLen < 0 || providerLen > 64) return;
+
+    // Calcular bytes del proveedor con padding
+    size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+
+    // PR105b: Leer mFieldsMask para calcular bytes opcionales antes de mLatitude.
+    // offset de mFieldsMask = 12 + providerBytes + 24 (mTime + mElapsedRtNs + mElapsedRtUncNs)
+    size_t maskOffset = 12 + providerBytes + 24;
+
+    if (sz < maskOffset + 4) return;
+    int32_t fieldsMask = 0;
+    memcpy(&fieldsMask, raw + maskOffset, 4);
+
+    size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
+    size_t lonOffset = latOffset + 8;
+
+    if (sz < lonOffset + 8) return; // reply demasiado corto
+
+    double lat, lon;
+    memcpy(&lat, &latBits, 8);
+    memcpy(&lon, &lonBits, 8);
+
+    parcel_write_double_at(reply, latOffset, lat);
+    parcel_write_double_at(reply, lonOffset, lon);
+
+    LOGD("[PR105b] Location reply mutated: lat=%.6f lon=%.6f (mask=0x%02x)",
+         lat, lon, (uint32_t)fieldsMask);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR107: GMS Outgoing Hook
+// Token: "com.google.android.gms.location.internal.ILocationListener" (58 chars)
+// Header = 4+4+4+(58*2+2→padded120) = 132 bytes
+// Location mínima = 56 bytes → MIN_SIZE = 188
+// Prefix UTF-16LE "com." = {0x63,0x00,0x6F,0x00,0x6D,0x00,0x2E,0x00}
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr int32_t GMS_ILOCLISTENER_STR_LEN = 58;
+static constexpr size_t  GMS_ILOCLISTENER_HDR      = 132;
+static constexpr size_t  GMS_ILOCLISTENER_MIN_SIZE = 188;
+static constexpr uint8_t GMS_TOKEN_PREFIX[8] = {
+    0x63,0x00, 0x6F,0x00, 0x6D,0x00, 0x2E,0x00  // 'com.'
+};
+
+static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
+    // PR109-DBG: filtro de código eliminado para diagnóstico.
+    // strLen==58 + prefijo "com." son suficientemente específicos.
+    if (!data_parcel) return false;
+    size_t sz = parcel_dataSize(data_parcel);
+    if (sz < GMS_ILOCLISTENER_MIN_SIZE) return false;
+    const uint8_t* raw = parcel_data(data_parcel);
+    if (!raw) return false;
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+    if (strLen != GMS_ILOCLISTENER_STR_LEN) return false;
+    bool match = (memcmp(raw + 12, GMS_TOKEN_PREFIX, sizeof(GMS_TOKEN_PREFIX)) == 0);
+    if (match) {
+        LOGD("[PR109-DBG] GMS token MATCH code=%u sz=%zu", code, sz);
+    }
+    return match;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
+                                const void* data, void* reply, uint32_t flags) {
+    // PR105: detección AOSP getLastLocation/getCurrentLocation (muta REPLY)
+    bool isAospLoc = isLocationRequest(data, code);
+
+    // PR107: detección GMS outgoing ILocationListener (muta DATA in-place antes del envío)
+    // El DATA Parcel en IPCThreadState es heap local de GMS — PROT_READ|PROT_WRITE.
+    // Modificación in-place segura, sin shadow copy.
+    if (isGmsLocationOutgoing(data, code)) {
+        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+        if (latBits != 0 || lonBits != 0) {
+            double lat, lon;
+            memcpy(&lat, &latBits, 8);
+            memcpy(&lon, &lonBits, 8);
+            uint8_t* mutableData = *reinterpret_cast<uint8_t**>(
+                const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
+            size_t sz = parcel_dataSize(data);
+            bool ok = mutateLocationInBuffer(mutableData, sz, GMS_ILOCLISTENER_HDR, lat, lon);
+            LOGD("[PR107] GMS→app location mutated: lat=%.6f lon=%.6f ok=%d (code=%u)",
+                 lat, lon, (int)ok, code);
+        }
+    }
+
+    int32_t status = orig_ipc_transact(self, handle, code, data, reply, flags);
+
+    // PR105: mutar REPLY de AOSP ILocationManager
+    if (isAospLoc && status == 0 && reply) {
+        mutateLocationReply(reply);
+    }
+
+    return status;
+}
+
+static constexpr int32_t ILOCLISTENER_STR_LEN = 34;
+static constexpr uint32_t TRANSACTION_onLocationChanged = 1;
+static constexpr size_t ILOCLISTENER_HDR = 84;
+static constexpr size_t LOC_COPY_MAX = 1024;
+
+typedef int32_t (*bbinder_transact_fn)(void*, uint32_t, const void*, void*, uint32_t);
+static bbinder_transact_fn orig_bbinder_transact = nullptr;
+
+static bool isLocationCallback(const void* data_parcel, uint32_t code) {
+    if (code != TRANSACTION_onLocationChanged || !data_parcel) return false;
+    size_t sz = parcel_dataSize(data_parcel);
+    if (sz < ILOCLISTENER_HDR + 48) return false;
+    const uint8_t* raw = parcel_data(data_parcel);
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+    return (strLen == ILOCLISTENER_STR_LEN && memcmp(raw + 12, LOC_TOKEN_PREFIX, 8) == 0);
+}
+
+static int32_t my_bbinder_transact(void* self, uint32_t code, const void* data, void* reply, uint32_t flags) {
+    if (!isLocationCallback(data, code)) return orig_bbinder_transact(self, code, data, reply, flags);
+
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+    if (latBits == 0 && lonBits == 0) return orig_bbinder_transact(self, code, data, reply, flags);
+
+    size_t sz = parcel_dataSize(data);
+    if (sz > LOC_COPY_MAX) return orig_bbinder_transact(self, code, data, reply, flags);
+
+    uint8_t stackBuf[LOC_COPY_MAX];
+    memcpy(stackBuf, parcel_data(data), sz);
+
+    double lat, lon;
+    memcpy(&lat, &latBits, 8);
+    memcpy(&lon, &lonBits, 8);
+
+    // Mutar en la copia del stack (Location empieza en offset 84 para el DATA de este listener)
+    mutateLocationInBuffer(stackBuf, sz, ILOCLISTENER_HDR, lat, lon);
+
+    // Redirección de mData: Shadow Copy
+    uint8_t** mDataField = reinterpret_cast<uint8_t**>(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
+    uint8_t* savedMData = *mDataField;
+    *mDataField = stackBuf;
+
+    int32_t status = orig_bbinder_transact(self, code, data, reply, flags);
+    *mDataField = savedMData; // Restauración crítica
+
+    return status;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR108: Resolución robusta de símbolos privados — MIUI 12.5 / MediaTek
+//
+// En MIUI 12.5 (Redmi 9/Lancelot), libbinder.so compila los símbolos de Binder
+// como PRIVADOS (.symtab), no exportados en .dynsym.
+// DobbySymbolResolver solo lee .dynsym → falla silenciosamente.
+//
+// Cadena de 3 intentos:
+//   1. DobbySymbolResolver  → .dynsym estándar (ROMs AOSP)
+//   2. dlsym(RTLD_DEFAULT)  → todos los símbolos ya mapeados en el proceso
+//   3. dlopen + dlsym       → búsqueda explícita en libbinder.so
+// ─────────────────────────────────────────────────────────────────────────────
+static void* resolveLibbinderSymbol(const char* mangled) {
+    void* sym = nullptr;
+
+    // Intento 1: DobbySymbolResolver
+    sym = DobbySymbolResolver("libbinder.so", mangled);
+    if (sym) {
+        LOGD("[PR108] via DobbySymbolResolver: %s @ %p", mangled, sym);
+        return sym;
+    }
+
+    // Intento 2: dlsym(RTLD_DEFAULT) — busca en todos los símbolos del proceso
+    sym = dlsym(RTLD_DEFAULT, mangled);
+    if (sym) {
+        LOGD("[PR108] via dlsym(RTLD_DEFAULT): %s @ %p", mangled, sym);
+        return sym;
+    }
+
+    // Intento 3: dlopen explícito
+    // RTLD_NOLOAD: no carga si no está mapeada (evita double-load)
+    void* lib = dlopen("libbinder.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) {
+        lib = dlopen("/system/lib64/libbinder.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (lib) {
+        sym = dlsym(lib, mangled);
+        // No llamar dlclose: mantener handle para que la dirección sea estable
+        if (sym) {
+            LOGD("[PR108] via dlopen+dlsym: %s @ %p", mangled, sym);
+            return sym;
+        }
+    }
+
+    LOGE("[PR108] UNRESOLVED: %s", mangled);
+    return nullptr;
+}
+
+static void applyBBinderHook() {
+    void* sym = resolveLibbinderSymbol(
+        "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
+    if (sym) {
+        DobbyHook(sym, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
+        LOGE("[PR106] BBinder::transact hooked OK @ %p", sym);
+    } else {
+        LOGE("[PR106] BBinder::transact UNRESOLVED");
+    }
+}
+
+static void applyBinderHooks() {
+    void* sym = resolveLibbinderSymbol(
+        "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
+    if (sym) {
+        DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
+        LOGE("[PR105] IPCThreadState::transact hooked OK @ %p", sym);
+    } else {
+        LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
+    }
+    applyBBinderHook();
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 class OmniModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
@@ -5251,93 +5649,14 @@ public:
             }
         }
 
-        // PR38+39: Location spoofing hooks
-        // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
-        // pero los getters son métodos Java locales sobre el Parcel deserializado).
-        // isFromMockProvider DEBE ser false — Snapchat lo verifica explícitamente.
-        // Coordenadas coherentes con región del perfil → MCC/timezone/locale alineados.
-        {
-            struct LocationHook {
-                static jdouble getLatitude(JNIEnv*, jobject)  { return g_cachedLat; }
-                static jdouble getLongitude(JNIEnv*, jobject) { return g_cachedLon; }
-                static jdouble getAltitude(JNIEnv*, jobject)  { return g_cachedAlt; }
-                static jfloat  getAccuracy(JNIEnv*, jobject) {
-                    // Precisión GPS realista: 4-12 metros (buen fix satelital)
-                    return 4.0f + (float)(g_masterSeed % 8);
-                }
-                static jfloat  getVerticalAccuracyMeters(JNIEnv*, jobject) {
-                    return 8.0f + (float)(g_masterSeed % 6);
-                }
-                static jboolean isFromMockProvider(JNIEnv*, jobject) {
-                    return JNI_FALSE;  // CRÍTICO: nunca revelar que la location es mock
-                }
-                static jfloat  getSpeed(JNIEnv*, jobject)   { return 0.0f; }
-                static jfloat  getBearing(JNIEnv*, jobject) { return 0.0f; }
-                static jlong   getTime(JNIEnv*, jobject) {
-                    struct timespec ts;
-                    clock_gettime(CLOCK_REALTIME, &ts);
-                    return (jlong)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
-                }
-            };
-            JNINativeMethod locationMethods[] = {
-                {"getLatitude",               "()D", (void*)LocationHook::getLatitude},
-                {"getLongitude",              "()D", (void*)LocationHook::getLongitude},
-                {"getAltitude",               "()D", (void*)LocationHook::getAltitude},
-                {"getAccuracy",               "()F", (void*)LocationHook::getAccuracy},
-                {"getVerticalAccuracyMeters", "()F", (void*)LocationHook::getVerticalAccuracyMeters},
-                {"isFromMockProvider",        "()Z", (void*)LocationHook::isFromMockProvider},
-                {"getSpeed",                  "()F", (void*)LocationHook::getSpeed},
-                {"getBearing",                "()F", (void*)LocationHook::getBearing},
-                {"getTime",                   "()J", (void*)LocationHook::getTime},
-            };
-            g_api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        }
+        // PR105: Location JNI hooks REMOVED.
+        // hookJniNativeMethods solo intercepta métodos registrados via RegisterNatives.
+        // Location.getLatitude/getLongitude/getLastKnownLocation son métodos Java puros
+        // — nunca registrados como nativos. Todos los hooks eran silent no-ops (fnPtr=nullptr).
+        // Cobertura ahora en: my_ipc_transact (Binder hook, PR105) + property/VFS hooks.
 
-        // PR-LOC2: Hook LocationManager.getLastKnownLocation to inject synthetic
-        // location even when GPS is off. The existing Location getter hooks only
-        // fire when a real Location object is delivered by the system; if GPS is
-        // off no object is created and those hooks never run. This hook intercepts
-        // BEFORE the system returns null and constructs the object ourselves.
-        // Covers all providers: "gps", "network", "fused" (Google's provider
-        // internally calls getLastKnownLocation("fused")).
-        {
-            struct LocationManagerHook {
-                static jobject getLastKnownLocation(JNIEnv* env, jobject /*mgr*/, jstring /*provider*/) {
-                    if (g_cachedLat == 0.0 && g_cachedLon == 0.0) return nullptr;
-                    jclass cls = env->FindClass("android/location/Location");
-                    if (!cls) return nullptr;
-                    jmethodID ctor = env->GetMethodID(cls, "<init>", "(Ljava/lang/String;)V");
-                    if (!ctor) { env->DeleteLocalRef(cls); return nullptr; }
-                    jstring prov = env->NewStringUTF("gps");
-                    if (!prov) { env->DeleteLocalRef(cls); return nullptr; }
-                    jobject loc = env->NewObject(cls, ctor, prov);
-                    env->DeleteLocalRef(prov);
-                    if (!loc) { env->DeleteLocalRef(cls); return nullptr; }
-                    auto call = [&](const char* name, const char* sig, auto val) {
-                        jmethodID m = env->GetMethodID(cls, name, sig);
-                        if (m) env->CallVoidMethod(loc, m, val);
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                    };
-                    call("setLatitude",  "(D)V", (jdouble)g_cachedLat);
-                    call("setLongitude", "(D)V", (jdouble)g_cachedLon);
-                    call("setAltitude",  "(D)V", (jdouble)g_cachedAlt);
-                    call("setAccuracy",  "(F)V", (jfloat)(4.0f + (float)(g_masterSeed % 8)));
-                    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-                    call("setTime", "(J)V", (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL));
-                    env->DeleteLocalRef(cls);
-                    return loc;
-                }
-            };
-            JNINativeMethod lmMethods[] = {
-                {"getLastKnownLocation",
-                 "(Ljava/lang/String;)Landroid/location/Location;",
-                 (void*)LocationManagerHook::getLastKnownLocation},
-            };
-            g_api->hookJniNativeMethods(env, "android/location/LocationManager", lmMethods, 1);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            LOGD("[loc] LocationManager.getLastKnownLocation hooked");
-        }
+        // PR105: Binder hook para ILocationManager.getLastLocation
+        applyBinderHooks();
 
         // PR38+39: ConnectivityManager — NetworkInfo getters
         // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
@@ -5590,13 +5909,24 @@ public:
                 if (!g_jvm) return;
                 if (g_jvm->AttachCurrentThread(&env2, nullptr) != JNI_OK || !env2) return;
 
-                jclass atClass = env2->FindClass("android/app/ActivityThread");
+                // PR105: GlobalRef para evitar que el GC invalide atClass
+                // durante el bucle de 5 segundos de polling.
+                jclass atClassLocal = env2->FindClass("android/app/ActivityThread");
+                jclass atClass = atClassLocal
+                    ? static_cast<jclass>(env2->NewGlobalRef(atClassLocal))
+                    : nullptr;
+                env2->DeleteLocalRef(atClassLocal);
+
                 jmethodID currentApp = atClass ?
                     env2->GetStaticMethodID(atClass, "currentApplication",
                         "()Landroid/app/Application;") : nullptr;
                 if (env2->ExceptionCheck()) env2->ExceptionClear();
 
-                if (!currentApp) { g_jvm->DetachCurrentThread(); return; }
+                if (!currentApp) {
+                    if (atClass) env2->DeleteGlobalRef(atClass);
+                    g_jvm->DetachCurrentThread();
+                    return;
+                }
 
                 // Poll until Application is created (before any Activity.onCreate)
                 for (int i = 0; i < 5000; i++) {
@@ -5626,6 +5956,8 @@ public:
                     }
                     usleep(1000); // 1ms
                 }
+                // PR105: liberar GlobalRef al salir del hilo
+                if (atClass) env2->DeleteGlobalRef(atClass);
                 g_jvm->DetachCurrentThread();
             }).detach();
         }

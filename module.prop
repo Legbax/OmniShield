@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.0
-versionCode=13000
+version=v13.5
+versionCode=13500
 author=Legba
-description=Total Invisibility (The Void). Zygisk module. susfs set_uname integration, dual property elimination via resetprop, telephony country/TAC hooks, UI inset fix
+description=PR108 — dlsym fallback simbolos privados MIUI + PR105b offset fix + PR107 GMS hook
