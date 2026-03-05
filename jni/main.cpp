@@ -4514,15 +4514,21 @@ static constexpr uint8_t GMS_TOKEN_PREFIX[8] = {
 };
 
 static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
-    if (code != 1 && code != 2) return false;
+    // PR109-DBG: filtro de código eliminado para diagnóstico.
+    // strLen==58 + prefijo "com." son suficientemente específicos.
     if (!data_parcel) return false;
-    if (parcel_dataSize(data_parcel) < GMS_ILOCLISTENER_MIN_SIZE) return false;
+    size_t sz = parcel_dataSize(data_parcel);
+    if (sz < GMS_ILOCLISTENER_MIN_SIZE) return false;
     const uint8_t* raw = parcel_data(data_parcel);
     if (!raw) return false;
     int32_t strLen = 0;
     memcpy(&strLen, raw + 8, 4);
     if (strLen != GMS_ILOCLISTENER_STR_LEN) return false;
-    return memcmp(raw + 12, GMS_TOKEN_PREFIX, sizeof(GMS_TOKEN_PREFIX)) == 0;
+    bool match = (memcmp(raw + 12, GMS_TOKEN_PREFIX, sizeof(GMS_TOKEN_PREFIX)) == 0);
+    if (match) {
+        LOGD("[PR109-DBG] GMS token MATCH code=%u sz=%zu", code, sz);
+    }
+    return match;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
