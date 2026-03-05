@@ -74,7 +74,7 @@ CFGEOF
 echo "--- Test 1: Config Parsing ---"
 
 # Source relevant functions from proxy_manager.sh with overridden paths
-PROXY_SCRIPT="./proxy_manager.sh"
+PROXY_SCRIPT="/home/user/OmniShield/proxy_manager.sh"
 
 # Parse config using same grep+cut logic as the script
 PROXY_ENABLED=$(grep "^proxy_enabled=" "$CONFIG" | cut -d'=' -f2- | tr -d ' \r\n')
@@ -322,7 +322,7 @@ echo ""
 # ─── Test 7: Config Save/Load Roundtrip (app.js keys match shell) ────
 echo "--- Test 7: Config Key Consistency ---"
 
-JS_KEYS=$(grep -oP "cfg\.proxy_\w+" ./webroot/js/app.js | sed 's/cfg\.//' | sort -u)
+JS_KEYS=$(grep -oP "cfg\.proxy_\w+" /home/user/OmniShield/webroot/js/app.js | sed 's/cfg\.//' | sort -u)
 SH_KEYS=$(grep -oP 'grep "\^proxy_\w+=' "$PROXY_SCRIPT" | grep -oP 'proxy_\w+' | sort -u)
 
 JS_COUNT=$(echo "$JS_KEYS" | wc -l)
@@ -342,8 +342,8 @@ echo ""
 # ─── Test 8: HTML ID Cross-Reference ─────────────────────────────────
 echo "--- Test 8: HTML/JS ID Cross-Reference ---"
 
-HTML_IDS=$(grep -oP 'id="proxy-[^"]*"' ./webroot/index.html | sed 's/id="//;s/"//' | sort -u)
-JS_IDS=$(grep -oP "getElementById\('proxy-[^']*'\)" ./webroot/js/app.js | sed "s/getElementById('//;s/')//" | sort -u)
+HTML_IDS=$(grep -oP 'id="proxy-[^"]*"' /home/user/OmniShield/webroot/index.html | sed 's/id="//;s/"//' | sort -u)
+JS_IDS=$(grep -oP "getElementById\('proxy-[^']*'\)" /home/user/OmniShield/webroot/js/app.js | sed "s/getElementById('//;s/')//" | sort -u)
 
 for js_id in $JS_IDS; do
     if echo "$HTML_IDS" | grep -q "^${js_id}$"; then
@@ -358,7 +358,7 @@ echo ""
 # ─── Test 9: Build Workflow Completeness ──────────────────────────────
 echo "--- Test 9: Build Workflow ---"
 
-BUILD="./.github/workflows/build.yml"
+BUILD="/home/user/OmniShield/.github/workflows/build.yml"
 grep -q "proxy_manager.sh" "$BUILD" && pass "proxy_manager.sh in build" || fail "proxy_manager.sh missing from build"
 grep -q "customize.sh" "$BUILD" && pass "customize.sh in build" || fail "customize.sh missing from build"
 grep -q "tun2socks" "$BUILD" && pass "tun2socks download in build" || fail "tun2socks missing from build"
