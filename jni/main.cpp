@@ -4601,6 +4601,7 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
     // ─────────────────────────────────────────────────────────────────────
 
     // Verificar si hay coordenadas configuradas
+    LOGD("[PR112-PULSE] code=%u sz=%zu", code, parcel_dataSize(data));
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 

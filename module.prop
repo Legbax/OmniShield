@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.6
-versionCode=13600
+version=v13.7
+versionCode=13700
 author=Legba
 description=PR112 — BBinder mutation BEFORE orig + token diagnostics
