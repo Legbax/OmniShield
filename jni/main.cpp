@@ -5294,6 +5294,51 @@ public:
             if (env->ExceptionCheck()) env->ExceptionClear();
         }
 
+        // PR-LOC2: Hook LocationManager.getLastKnownLocation to inject synthetic
+        // location even when GPS is off. The existing Location getter hooks only
+        // fire when a real Location object is delivered by the system; if GPS is
+        // off no object is created and those hooks never run. This hook intercepts
+        // BEFORE the system returns null and constructs the object ourselves.
+        // Covers all providers: "gps", "network", "fused" (Google's provider
+        // internally calls getLastKnownLocation("fused")).
+        {
+            struct LocationManagerHook {
+                static jobject getLastKnownLocation(JNIEnv* env, jobject /*mgr*/, jstring /*provider*/) {
+                    if (g_cachedLat == 0.0 && g_cachedLon == 0.0) return nullptr;
+                    jclass cls = env->FindClass("android/location/Location");
+                    if (!cls) return nullptr;
+                    jmethodID ctor = env->GetMethodID(cls, "<init>", "(Ljava/lang/String;)V");
+                    if (!ctor) { env->DeleteLocalRef(cls); return nullptr; }
+                    jstring prov = env->NewStringUTF("gps");
+                    if (!prov) { env->DeleteLocalRef(cls); return nullptr; }
+                    jobject loc = env->NewObject(cls, ctor, prov);
+                    env->DeleteLocalRef(prov);
+                    if (!loc) { env->DeleteLocalRef(cls); return nullptr; }
+                    auto call = [&](const char* name, const char* sig, auto val) {
+                        jmethodID m = env->GetMethodID(cls, name, sig);
+                        if (m) env->CallVoidMethod(loc, m, val);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                    };
+                    call("setLatitude",  "(D)V", (jdouble)g_cachedLat);
+                    call("setLongitude", "(D)V", (jdouble)g_cachedLon);
+                    call("setAltitude",  "(D)V", (jdouble)g_cachedAlt);
+                    call("setAccuracy",  "(F)V", (jfloat)(4.0f + (float)(g_masterSeed % 8)));
+                    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+                    call("setTime", "(J)V", (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL));
+                    env->DeleteLocalRef(cls);
+                    return loc;
+                }
+            };
+            JNINativeMethod lmMethods[] = {
+                {"getLastKnownLocation",
+                 "(Ljava/lang/String;)Landroid/location/Location;",
+                 (void*)LocationManagerHook::getLastKnownLocation},
+            };
+            g_api->hookJniNativeMethods(env, "android/location/LocationManager", lmMethods, 1);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            LOGD("[loc] LocationManager.getLastKnownLocation hooked");
+        }
+
         // PR38+39: ConnectivityManager — NetworkInfo getters
         // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
         // Solo activo cuando network_type=lte (g_spoofMobileNetwork=true).

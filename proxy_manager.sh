@@ -98,7 +98,7 @@ resolve_host() {
     ip=$(getent hosts "$1" 2>/dev/null | head -1 | awk '{print $1}')
     [ -n "$ip" ] && { echo "$ip"; return; }
     # Try ping-based resolution
-    ip=$(ping -c1 -W2 "$1" 2>/dev/null | head -1 | sed -n 's/.*(\([0-9.]*\)).*/\1/p')
+    ip=$(ping -c1 -W2 "$1" 2>/dev/null | head -1 | sed -n 's/[^(]*(\([0-9][0-9.]*\)).*/\1/p')
     [ -n "$ip" ] && { echo "$ip"; return; }
     # Fallback: return original (iptables will attempt its own resolution)
     echo "$1"
@@ -142,9 +142,9 @@ tunnel:
 
 socks5:
   port: ${PROXY_PORT}
-  address: '${PROXY_HOST}'
+  address: '${GLOBAL_PROXY_IP}'
 ${auth_block}
-  udp: udp
+  udp: tcp
 
 misc:
   task-stack-size: 81920
@@ -164,16 +164,70 @@ YAMLEOF
 # ─── Setup routing after TUN is up ────────────────────────────────────
 # hev-socks5-tunnel creates the TUN interface internally.
 # We only need to add policy routing after it's up.
+# PR-PROXY: Wait for the TUN interface to actually appear before adding the
+# route.  hev-socks5-tunnel writes its PID file as soon as it forks, but the
+# TUN ioctl may happen slightly later.  If ip route add runs before tun0
+# exists it silently fails, leaving routing table $ROUTE_TABLE empty.  Any
+# packet later marked 0x1337 and looked up in that empty table is immediately
+# dropped by the kernel — apps lose all connectivity.
 setup_routing() {
+    local tun_waited=0
+    while ! ip link show "$TUN_NAME" >/dev/null 2>&1; do
+        if [ "$tun_waited" -ge 10 ]; then
+            log "ERROR: TUN interface $TUN_NAME not created after 10s"
+            return 1
+        fi
+        sleep 1
+        tun_waited=$((tun_waited + 1))
+    done
     ip route add default dev "$TUN_NAME" table "$ROUTE_TABLE" 2>/dev/null
-    log "Routing table $ROUTE_TABLE → $TUN_NAME"
+    log "Routing table $ROUTE_TABLE → $TUN_NAME (waited ${tun_waited}s for TUN)"
+}
+
+# ─── Verify SOCKS5 proxy is actually reachable before applying iptables ──
+# Without this, a broken proxy causes all scoped apps to lose connectivity
+# because their traffic is routed into the tunnel but nothing comes back.
+verify_proxy() {
+    # Use the single IP resolved at do_start() time — no second DNS lookup here.
+    local proxy_ip="$GLOBAL_PROXY_IP"
+
+    # Step 2: SOCKS5 handshake probe — avoids nc -z (unsupported on Android toybox).
+    # Sends SOCKS5 ClientHello (3 bytes); server must respond with 2 bytes (VER + METHOD).
+    # The subshell ( printf; sleep 2 ) keeps stdin open so toybox nc does not exit on
+    # stdin-EOF before the server's reply arrives over the network (race condition fix).
+    local probe_bytes
+    probe_bytes=$( ( printf '\x05\x01\x00'; sleep 2 ) | nc -w 5 "$proxy_ip" "$PROXY_PORT" 2>/dev/null | wc -c )
+    if [ "${probe_bytes:-0}" -eq 0 ]; then
+        log "ERROR: SOCKS5 probe got no response from $proxy_ip:$PROXY_PORT"
+        log "Check: host/port correct? Firewall blocking? Server running?"
+        return 1
+    fi
+    log "Proxy SOCKS5 reachable: $proxy_ip:$PROXY_PORT"
+
+    # Step 3: Optional full auth check via curl (only if curl has SOCKS5 support)
+    if ! curl -V 2>/dev/null | grep -qi "socks5"; then
+        log "WARN: curl SOCKS5 unavailable (Android build) — probe passed, proceeding"
+        return 0
+    fi
+    local auth_arg=""
+    [ -n "$PROXY_USER" ] && [ -n "$PROXY_PASS" ] && \
+        auth_arg="-U ${PROXY_USER}:${PROXY_PASS}"
+    local result
+    result=$(curl -s -m 10 --socks5-hostname "${PROXY_HOST}:${PROXY_PORT}" \
+        $auth_arg https://api.ipify.org 2>/dev/null)
+    if [ -n "$result" ]; then
+        log "Proxy verified — exit IP: $result"
+        return 0
+    fi
+    log "WARN: curl SOCKS5 auth check inconclusive — SOCKS5 probe passed, proceeding"
+    return 0
 }
 
 # ─── Setup iptables rules (per-UID marking + routing) ─────────────────
 setup_iptables() {
-    # Resolve proxy host to IP for iptables (hostnames cause DNS lookups in iptables)
-    local proxy_ip
-    proxy_ip=$(resolve_host "$PROXY_HOST")
+    # Use the single IP resolved at do_start() time — same IP the daemon is
+    # connecting to, so the exclusion rule correctly prevents the routing loop.
+    local proxy_ip="$GLOBAL_PROXY_IP"
 
     # Create mangle chain for packet marking
     iptables -t mangle -N "$CHAIN_MARK" 2>/dev/null
@@ -312,6 +366,20 @@ do_start() {
         release_lock; return 1
     fi
 
+    # Resolve proxy hostname to a single IP once.
+    # MarsProxies (and many providers) use round-robin DNS — every call to
+    # resolve_host() may return a different server IP.  All three subsystems
+    # that need the IP (generate_config, verify_proxy, setup_iptables) MUST
+    # use the same address; if the daemon connects to IP-B while iptables only
+    # exempts IP-C, the daemon's own traffic is marked and looped back through
+    # tun0 → routing loop → nothing loads.
+    GLOBAL_PROXY_IP=$(resolve_host "$PROXY_HOST")
+    if [ -z "$GLOBAL_PROXY_IP" ]; then
+        log "ERROR: Cannot resolve proxy hostname: $PROXY_HOST"
+        release_lock; return 1
+    fi
+    log "Proxy IP locked to: $GLOBAL_PROXY_IP"
+
     # Generate tun2socks config
     generate_config
 
@@ -324,6 +392,12 @@ do_start() {
 
     # Fix SELinux context for tun2socks binary
     chcon u:object_r:system_file:s0 "$TUN2SOCKS" 2>/dev/null
+
+    # Verify proxy is reachable BEFORE launching daemon (prevents tun0 cycling on failure)
+    if ! verify_proxy; then
+        log "ERROR: Proxy verification failed — aborting to preserve connectivity"
+        release_lock; return 1
+    fi
 
     # Launch hev-socks5-tunnel daemon (it creates the TUN interface internally)
     log "Launching hev-socks5-tunnel → $PROXY_HOST:$PROXY_PORT"
@@ -359,7 +433,11 @@ do_start() {
     fi
 
     # Setup routing (TUN was created by hev-socks5-tunnel)
-    setup_routing
+    if ! setup_routing; then
+        log "ERROR: Routing setup failed — aborting to avoid traffic blackhole"
+        do_stop_quiet
+        release_lock; return 1
+    fi
 
     # Setup iptables rules
     setup_iptables
