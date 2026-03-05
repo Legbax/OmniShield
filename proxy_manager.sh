@@ -142,7 +142,7 @@ tunnel:
 
 socks5:
   port: ${PROXY_PORT}
-  address: '${PROXY_HOST}'
+  address: '${GLOBAL_PROXY_IP}'
 ${auth_block}
   udp: tcp
 
@@ -188,10 +188,8 @@ setup_routing() {
 # Without this, a broken proxy causes all scoped apps to lose connectivity
 # because their traffic is routed into the tunnel but nothing comes back.
 verify_proxy() {
-    # Step 1: Resolve hostname to IP (toybox nc can fail on hostname DNS lookups)
-    local proxy_ip
-    proxy_ip=$(resolve_host "$PROXY_HOST")
-    [ -z "$proxy_ip" ] && proxy_ip="$PROXY_HOST"
+    # Use the single IP resolved at do_start() time — no second DNS lookup here.
+    local proxy_ip="$GLOBAL_PROXY_IP"
 
     # Step 2: SOCKS5 handshake probe — avoids nc -z (unsupported on Android toybox).
     # Sends SOCKS5 ClientHello (3 bytes); server must respond with 2 bytes (VER + METHOD).
@@ -227,9 +225,9 @@ verify_proxy() {
 
 # ─── Setup iptables rules (per-UID marking + routing) ─────────────────
 setup_iptables() {
-    # Resolve proxy host to IP for iptables (hostnames cause DNS lookups in iptables)
-    local proxy_ip
-    proxy_ip=$(resolve_host "$PROXY_HOST")
+    # Use the single IP resolved at do_start() time — same IP the daemon is
+    # connecting to, so the exclusion rule correctly prevents the routing loop.
+    local proxy_ip="$GLOBAL_PROXY_IP"
 
     # Create mangle chain for packet marking
     iptables -t mangle -N "$CHAIN_MARK" 2>/dev/null
@@ -367,6 +365,20 @@ do_start() {
         log "ERROR: No valid UIDs resolved — add apps to scope first"
         release_lock; return 1
     fi
+
+    # Resolve proxy hostname to a single IP once.
+    # MarsProxies (and many providers) use round-robin DNS — every call to
+    # resolve_host() may return a different server IP.  All three subsystems
+    # that need the IP (generate_config, verify_proxy, setup_iptables) MUST
+    # use the same address; if the daemon connects to IP-B while iptables only
+    # exempts IP-C, the daemon's own traffic is marked and looped back through
+    # tun0 → routing loop → nothing loads.
+    GLOBAL_PROXY_IP=$(resolve_host "$PROXY_HOST")
+    if [ -z "$GLOBAL_PROXY_IP" ]; then
+        log "ERROR: Cannot resolve proxy hostname: $PROXY_HOST"
+        release_lock; return 1
+    fi
+    log "Proxy IP locked to: $GLOBAL_PROXY_IP"
 
     # Generate tun2socks config
     generate_config
