@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.2
-versionCode=13200
+version=v13.3
+versionCode=13300
 author=Legba
-description=PR105b+PR106 — Binder Location Hooks + dynamic offsets
+description=PR107 — GMS Outgoing Location Hook + AOSP Dual Binder Integration

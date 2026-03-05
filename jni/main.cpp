@@ -4387,6 +4387,12 @@ static constexpr uint8_t  LOC_TOKEN_PREFIX[8] = {
 static constexpr size_t LOC_TOKEN_OFFSET   = 12; // inicio del texto UTF-16
 static constexpr size_t LOC_TOKEN_MIN_SIZE = 80; // 4+4+4+(33*2+2) = 80 bytes exactos
 
+// PR107: Constantes para GMS (com.google.android.gms.location.internal.ILocationListener)
+static constexpr int32_t  GMS_ILOCLISTENER_STR_LEN  = 58;
+static constexpr size_t   GMS_ILOCLISTENER_HDR       = 132;
+static constexpr size_t   GMS_ILOCLISTENER_MIN_SIZE  = 188;
+static constexpr uint8_t  GMS_TOKEN_PREFIX[8] = { 0x63,0x00, 0x6F,0x00, 0x6D,0x00, 0x2E,0x00 }; // 'com.' en UTF-16LE
+
 typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t,
                                    const void*, void*, uint32_t);
 static ipc_transact_fn orig_ipc_transact = nullptr;
@@ -4466,16 +4472,44 @@ static void mutateLocationReply(void* reply_parcel) {
     mutateLocationInBuffer(const_cast<uint8_t*>(raw), sz, 12, lat, lon);
 }
 
-static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
-                                const void* data, void* reply, uint32_t flags) {
-    // Detectar ANTES de la llamada (el DATA Parcel se lee aquí, no el REPLY)
-    bool isLoc = isLocationRequest(data, code);
-    // Ejecutar transacción original
+static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
+    if (code != 1 && code != 2) return false;
+    if (!data_parcel) return false;
+    if (parcel_dataSize(data_parcel) < GMS_ILOCLISTENER_MIN_SIZE) return false;
+
+    const uint8_t* raw = parcel_data(data_parcel);
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+
+    return (strLen == GMS_ILOCLISTENER_STR_LEN && memcmp(raw + 12, GMS_TOKEN_PREFIX, 8) == 0);
+}
+
+static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code, const void* data, void* reply, uint32_t flags) {
+    bool isAospLoc = isLocationRequest(data, code);
+
+    // PR107: Mutar DATA saliente de GMS (in-place)
+    if (isGmsLocationOutgoing(data, code)) {
+        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+        if (latBits != 0 || lonBits != 0) {
+            double lat, lon;
+            memcpy(&lat, &latBits, 8); memcpy(&lon, &lonBits, 8);
+
+            uint8_t* mutableData = *reinterpret_cast<uint8_t**>(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
+            size_t sz = parcel_dataSize(data);
+            if (mutateLocationInBuffer(mutableData, sz, GMS_ILOCLISTENER_HDR, lat, lon)) {
+                LOGD("[PR107] GMS Outgoing location mutated: lat=%.6f lon=%.6f", lat, lon);
+            }
+        }
+    }
+
     int32_t status = orig_ipc_transact(self, handle, code, data, reply, flags);
-    // Mutar el REPLY solo si era una llamada de location y tuvo éxito
-    if (isLoc && status == 0 && reply) {
+
+    // PR105: Mutar REPLY entrante de AOSP
+    if (isAospLoc && status == 0 && reply) {
         mutateLocationReply(reply);
     }
+
     return status;
 }
 
