@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v14.0
-versionCode=14000
+version=v15.0
+versionCode=15000
 author=Legba
-description=PR115 — JavaBBinder vtable hook (dynamic scan + static fallback)
+description=PR116 — Native Location Setter Hook (Ultimate Bypass)

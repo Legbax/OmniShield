@@ -4403,6 +4403,33 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
                   LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
 }
 
+// PR116: Hooks maestros para los setters nativos de Location
+using fn_Location_set = void(*)(JNIEnv*, jobject, double);
+static fn_Location_set orig_Location_setLatitude = nullptr;
+static fn_Location_set orig_Location_setLongitude = nullptr;
+
+static void my_Location_setLatitude(JNIEnv* env, jobject thiz, double lat) {
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    if (latBits != 0) {
+        double fakeLat;
+        memcpy(&fakeLat, &latBits, 8);
+        LOGD("[PR116] Spoofing Latitude: %.6f -> %.6f", lat, fakeLat);
+        lat = fakeLat;
+    }
+    if (orig_Location_setLatitude) orig_Location_setLatitude(env, thiz, lat);
+}
+
+static void my_Location_setLongitude(JNIEnv* env, jobject thiz, double lon) {
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+    if (lonBits != 0) {
+        double fakeLon;
+        memcpy(&fakeLon, &lonBits, 8);
+        LOGD("[PR116] Spoofing Longitude: %.6f -> %.6f", lon, fakeLon);
+        lon = fakeLon;
+    }
+    if (orig_Location_setLongitude) orig_Location_setLongitude(env, thiz, lon);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PR105b: Cálculo dinámico de campos opcionales de Location.writeToParcel()
 //
@@ -4856,6 +4883,18 @@ static void applyBBinderHook() {
         LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p", target_fn);
     } else {
         LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
+    }
+
+    // PR116: Interceptación en el núcleo de libandroid_runtime.so
+    void* setLat = resolveRuntimeSymbol("_ZN7android18Location_setLatitudeEP7_JNIEnvP8_jobjectd");
+    void* setLon = resolveRuntimeSymbol("_ZN7android19Location_setLongitudeEP7_JNIEnvP8_jobjectd");
+
+    if (setLat && setLon) {
+        DobbyHook(setLat, (void*)my_Location_setLatitude, (void**)&orig_Location_setLatitude);
+        DobbyHook(setLon, (void*)my_Location_setLongitude, (void**)&orig_Location_setLongitude);
+        LOGE("[PR116] Native Location Setters hooked OK");
+    } else {
+        LOGE("[PR116] Native Location Setters UNRESOLVED");
     }
 }
 
