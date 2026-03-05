@@ -4403,31 +4403,30 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
                   LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
 }
 
-// PR116: Hooks maestros para los setters nativos de Location
-using fn_Location_set = void(*)(JNIEnv*, jobject, double);
-static fn_Location_set orig_Location_setLatitude = nullptr;
-static fn_Location_set orig_Location_setLongitude = nullptr;
+// PR117: Hook para la lectura de doubles en el Parcel
+using fn_Parcel_readDouble = double(*)(const void*);
+static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
 
-static void my_Location_setLatitude(JNIEnv* env, jobject thiz, double lat) {
+static double my_Parcel_readDouble(const void* self) {
+    double val = orig_Parcel_readDouble(self);
+
+    // Solo falseamos si el valor parece una coordenada real y estamos en el scope
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-    if (latBits != 0) {
-        double fakeLat;
+    if (latBits != 0 && val != 0.0) {
+        double fakeLat, fakeLon;
+        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
         memcpy(&fakeLat, &latBits, 8);
-        LOGD("[PR116] Spoofing Latitude: %.6f -> %.6f", lat, fakeLat);
-        lat = fakeLat;
-    }
-    if (orig_Location_setLatitude) orig_Location_setLatitude(env, thiz, lat);
-}
-
-static void my_Location_setLongitude(JNIEnv* env, jobject thiz, double lon) {
-    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-    if (lonBits != 0) {
-        double fakeLon;
         memcpy(&fakeLon, &lonBits, 8);
-        LOGD("[PR116] Spoofing Longitude: %.6f -> %.6f", lon, fakeLon);
-        lon = fakeLon;
+
+        // Si el valor leído coincide con un rango plausible de tu zona, lo cambiamos
+        // (Esto es un 'envenenamiento por proximidad')
+        if (std::abs(val - fakeLat) > 0.0001 || std::abs(val - fakeLon) > 0.0001) {
+             // Aquí podrías añadir lógica de filtrado extra, pero por ahora
+             // probemos el pulso del log.
+             LOGD("[PR117-PULSE] readDouble intercepted: %.6f", val);
+        }
     }
-    if (orig_Location_setLongitude) orig_Location_setLongitude(env, thiz, lon);
+    return val;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4885,16 +4884,13 @@ static void applyBBinderHook() {
         LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
     }
 
-    // PR116: Interceptación en el núcleo de libandroid_runtime.so
-    void* setLat = resolveRuntimeSymbol("_ZN7android18Location_setLatitudeEP7_JNIEnvP8_jobjectd");
-    void* setLon = resolveRuntimeSymbol("_ZN7android19Location_setLongitudeEP7_JNIEnvP8_jobjectd");
-
-    if (setLat && setLon) {
-        DobbyHook(setLat, (void*)my_Location_setLatitude, (void**)&orig_Location_setLatitude);
-        DobbyHook(setLon, (void*)my_Location_setLongitude, (void**)&orig_Location_setLongitude);
-        LOGE("[PR116] Native Location Setters hooked OK");
+    // PR117: Interceptación en el motor de datos (libbinder.so / libandroid_runtime.so)
+    void* readDouble = resolveLibbinderSymbol("_ZNK7android6Parcel10readDoubleEv");
+    if (readDouble) {
+        DobbyHook(readDouble, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
+        LOGE("[PR117] Parcel::readDouble hooked OK");
     } else {
-        LOGE("[PR116] Native Location Setters UNRESOLVED");
+        LOGE("[PR117] Parcel::readDouble UNRESOLVED");
     }
 }
 
