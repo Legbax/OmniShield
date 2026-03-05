@@ -4392,6 +4392,116 @@ public:
             // immediately at line 3914), consuming ~0 CPU.
         }
     }
+
+// ----------------------------------------------------------------------------
+// Motor Seguro de Parcheo de ArtMethod (con Bypass de Memoria y Sincronización)
+// ----------------------------------------------------------------------------
+void patchArtMethodToNative(JNIEnv* env, jmethodID methodId) {
+    if (!methodId) return;
+
+    // En ART moderno, access_flags_ está en el offset 4.
+    uint32_t* access_flags = (uint32_t*)((uint8_t*)methodId + 4);
+
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    void* page_start = (void*)((uintptr_t)access_flags & ~(page_size - 1));
+
+    // Quitar el seguro de escritura
+    if (mprotect(page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        mprotect(page_start, page_size, PROT_READ | PROT_WRITE);
+    }
+
+    // Inyectar el flag kAccNative (0x0100)
+    *access_flags |= 0x0100;
+
+    // Memory Barrier para evitar Race Conditions en ARM
+    __sync_synchronize();
+
+    // Restaurar protecciones
+    mprotect(page_start, page_size, PROT_READ | PROT_EXEC);
+}
+
+// ----------------------------------------------------------------------------
+// Implementaciones Nativas de Ubicación
+// ----------------------------------------------------------------------------
+static jdouble hooked_getLatitude(JNIEnv* env, jobject thiz) {
+    return g_cachedLat != 0.0 ? g_cachedLat : -33.4489;
+}
+
+static jdouble hooked_getLongitude(JNIEnv* env, jobject thiz) {
+    return g_cachedLon != 0.0 ? g_cachedLon : -70.6693;
+}
+
+static jobject hooked_getLastKnownLocation(JNIEnv* env, jobject mgr, jstring provider) {
+    if (g_cachedLat == 0.0 && g_cachedLon == 0.0) return nullptr;
+
+    jclass cls = env->FindClass("android/location/Location");
+    if (!cls) return nullptr;
+
+    jmethodID ctor = env->GetMethodID(cls, "<init>", "(Ljava/lang/String;)V");
+    if (!ctor) { env->DeleteLocalRef(cls); return nullptr; }
+
+    jstring prov = env->NewStringUTF("gps");
+    jobject loc = env->NewObject(cls, ctor, prov);
+    env->DeleteLocalRef(prov);
+
+    if (!loc) { env->DeleteLocalRef(cls); return nullptr; }
+
+    auto call = [&](const char* name, const char* sig, auto val) {
+        jmethodID m = env->GetMethodID(cls, name, sig);
+        if (m) env->CallVoidMethod(loc, m, val);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    };
+
+    call("setLatitude",  "(D)V", (jdouble)g_cachedLat);
+    call("setLongitude", "(D)V", (jdouble)g_cachedLon);
+    call("setAccuracy",  "(F)V", (jfloat)5.0f);
+
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    call("setTime", "(J)V", (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL));
+
+    env->DeleteLocalRef(cls);
+    return loc;
+}
+
+void applyInvisibleLocationHooks(JNIEnv* env) {
+    // Hookeando Location
+    jclass locClass = env->FindClass("android/location/Location");
+    if (locClass) {
+        jmethodID getLatId = env->GetMethodID(locClass, "getLatitude", "()D");
+        jmethodID getLonId = env->GetMethodID(locClass, "getLongitude", "()D");
+
+        if (getLatId && getLonId) {
+            patchArtMethodToNative(env, getLatId);
+            patchArtMethodToNative(env, getLonId);
+
+            JNINativeMethod locHooks[] = {
+                {"getLatitude", "()D", (void*)hooked_getLatitude},
+                {"getLongitude", "()D", (void*)hooked_getLongitude}
+            };
+
+            if (env->RegisterNatives(locClass, locHooks, 2) != 0) env->ExceptionClear();
+        }
+        env->DeleteLocalRef(locClass);
+    }
+
+    // Hookeando LocationManager
+    jclass mgrClass = env->FindClass("android/location/LocationManager");
+    if (mgrClass) {
+        jmethodID getLastKnownId = env->GetMethodID(mgrClass, "getLastKnownLocation", "(Ljava/lang/String;)Landroid/location/Location;");
+
+        if (getLastKnownId) {
+            patchArtMethodToNative(env, getLastKnownId);
+
+            JNINativeMethod mgrHooks[] = {
+                {"getLastKnownLocation", "(Ljava/lang/String;)Landroid/location/Location;", (void*)hooked_getLastKnownLocation}
+            };
+
+            if (env->RegisterNatives(mgrClass, mgrHooks, 1) != 0) env->ExceptionClear();
+        }
+        env->DeleteLocalRef(mgrClass);
+    }
+}
+
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (!g_isTargetApp) return;
 
@@ -5251,93 +5361,8 @@ public:
             }
         }
 
-        // PR38+39: Location spoofing hooks
-        // Location.get*() ejecutan EN el proceso de la app (el objeto llega via Binder,
-        // pero los getters son métodos Java locales sobre el Parcel deserializado).
-        // isFromMockProvider DEBE ser false — Snapchat lo verifica explícitamente.
-        // Coordenadas coherentes con región del perfil → MCC/timezone/locale alineados.
-        {
-            struct LocationHook {
-                static jdouble getLatitude(JNIEnv*, jobject)  { return g_cachedLat; }
-                static jdouble getLongitude(JNIEnv*, jobject) { return g_cachedLon; }
-                static jdouble getAltitude(JNIEnv*, jobject)  { return g_cachedAlt; }
-                static jfloat  getAccuracy(JNIEnv*, jobject) {
-                    // Precisión GPS realista: 4-12 metros (buen fix satelital)
-                    return 4.0f + (float)(g_masterSeed % 8);
-                }
-                static jfloat  getVerticalAccuracyMeters(JNIEnv*, jobject) {
-                    return 8.0f + (float)(g_masterSeed % 6);
-                }
-                static jboolean isFromMockProvider(JNIEnv*, jobject) {
-                    return JNI_FALSE;  // CRÍTICO: nunca revelar que la location es mock
-                }
-                static jfloat  getSpeed(JNIEnv*, jobject)   { return 0.0f; }
-                static jfloat  getBearing(JNIEnv*, jobject) { return 0.0f; }
-                static jlong   getTime(JNIEnv*, jobject) {
-                    struct timespec ts;
-                    clock_gettime(CLOCK_REALTIME, &ts);
-                    return (jlong)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
-                }
-            };
-            JNINativeMethod locationMethods[] = {
-                {"getLatitude",               "()D", (void*)LocationHook::getLatitude},
-                {"getLongitude",              "()D", (void*)LocationHook::getLongitude},
-                {"getAltitude",               "()D", (void*)LocationHook::getAltitude},
-                {"getAccuracy",               "()F", (void*)LocationHook::getAccuracy},
-                {"getVerticalAccuracyMeters", "()F", (void*)LocationHook::getVerticalAccuracyMeters},
-                {"isFromMockProvider",        "()Z", (void*)LocationHook::isFromMockProvider},
-                {"getSpeed",                  "()F", (void*)LocationHook::getSpeed},
-                {"getBearing",                "()F", (void*)LocationHook::getBearing},
-                {"getTime",                   "()J", (void*)LocationHook::getTime},
-            };
-            g_api->hookJniNativeMethods(env, "android/location/Location", locationMethods, 9);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        }
-
-        // PR-LOC2: Hook LocationManager.getLastKnownLocation to inject synthetic
-        // location even when GPS is off. The existing Location getter hooks only
-        // fire when a real Location object is delivered by the system; if GPS is
-        // off no object is created and those hooks never run. This hook intercepts
-        // BEFORE the system returns null and constructs the object ourselves.
-        // Covers all providers: "gps", "network", "fused" (Google's provider
-        // internally calls getLastKnownLocation("fused")).
-        {
-            struct LocationManagerHook {
-                static jobject getLastKnownLocation(JNIEnv* env, jobject /*mgr*/, jstring /*provider*/) {
-                    if (g_cachedLat == 0.0 && g_cachedLon == 0.0) return nullptr;
-                    jclass cls = env->FindClass("android/location/Location");
-                    if (!cls) return nullptr;
-                    jmethodID ctor = env->GetMethodID(cls, "<init>", "(Ljava/lang/String;)V");
-                    if (!ctor) { env->DeleteLocalRef(cls); return nullptr; }
-                    jstring prov = env->NewStringUTF("gps");
-                    if (!prov) { env->DeleteLocalRef(cls); return nullptr; }
-                    jobject loc = env->NewObject(cls, ctor, prov);
-                    env->DeleteLocalRef(prov);
-                    if (!loc) { env->DeleteLocalRef(cls); return nullptr; }
-                    auto call = [&](const char* name, const char* sig, auto val) {
-                        jmethodID m = env->GetMethodID(cls, name, sig);
-                        if (m) env->CallVoidMethod(loc, m, val);
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                    };
-                    call("setLatitude",  "(D)V", (jdouble)g_cachedLat);
-                    call("setLongitude", "(D)V", (jdouble)g_cachedLon);
-                    call("setAltitude",  "(D)V", (jdouble)g_cachedAlt);
-                    call("setAccuracy",  "(F)V", (jfloat)(4.0f + (float)(g_masterSeed % 8)));
-                    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-                    call("setTime", "(J)V", (jlong)(ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL));
-                    env->DeleteLocalRef(cls);
-                    return loc;
-                }
-            };
-            JNINativeMethod lmMethods[] = {
-                {"getLastKnownLocation",
-                 "(Ljava/lang/String;)Landroid/location/Location;",
-                 (void*)LocationManagerHook::getLastKnownLocation},
-            };
-            g_api->hookJniNativeMethods(env, "android/location/LocationManager", lmMethods, 1);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            LOGD("[loc] LocationManager.getLastKnownLocation hooked");
-        }
+        // PR38+39: Location spoofing hooks (Actualizado a Motor Seguro de Parcheo)
+        applyInvisibleLocationHooks(env);
 
         // PR38+39: ConnectivityManager — NetworkInfo getters
         // El objeto NetworkInfo llega via Binder pero sus getters ejecutan localmente.
