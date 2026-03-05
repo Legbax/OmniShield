@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.8
-versionCode=13800
+version=v14.0
+versionCode=14000
 author=Legba
-description=PR113 — JavaBBinder::onTransact hook (libandroid_runtime.so)
+description=PR115 — JavaBBinder vtable hook (dynamic scan + static fallback)

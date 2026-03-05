@@ -4769,9 +4769,9 @@ static void* resolveRuntimeSymbol(const char* mangled) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void applyBBinderHook() {
-    // PR106 original: BBinder::transact en libbinder.so
-    // Confirmado inactivo en MIUI 12.5 (función inlined en hot path).
-    // Se conserva como fallback pero no es el hook primario.
+    // ─────────────────────────────────────────────────────────────────────────
+    // PR106: BBinder::transact fallback (inlined en MIUI, conservado por compatibilidad)
+    // ─────────────────────────────────────────────────────────────────────────
     void* sym106 = resolveLibbinderSymbol(
         "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
     if (sym106) {
@@ -4779,17 +4779,83 @@ static void applyBBinderHook() {
         LOGE("[PR106] BBinder::transact hooked @ %p (fallback)", sym106);
     }
 
-    // PR113: JavaBBinder::onTransact en libandroid_runtime.so
-    // Esta función llama a la JVM → NO puede ser inlined → siempre es un CALL real.
-    // Captura el 100% de transacciones Binder a Java stubs.
-    void* sym113 = resolveRuntimeSymbol(
-        "_ZN7android13JavaBBinder9onTransactEjRKNS_6ParcelEPS1_j");
-    if (sym113) {
-        DobbyHook(sym113, (void*)my_jbbinder_ontransact,
-                  (void**)&orig_jbbinder_ontransact);
-        LOGE("[PR113] JavaBBinder::onTransact hooked OK @ %p", sym113);
+    // ─────────────────────────────────────────────────────────────────────────
+    // PR115: VTable hook de JavaBBinder::onTransact
+    //
+    // JavaBBinder::onTransact no tiene símbolo exportado en MIUI 12.5.
+    // Solución: localizar su dirección via el vtable exportado _ZTV11JavaBBinder.
+    //
+    // Estrategia A (dinámica): comparar vtable de BBinder contra onTransact
+    //   para hallar el índice, luego leer mismo índice en vtable de JavaBBinder.
+    //   Robusto a actualizaciones de ROM.
+    //
+    // Estrategia B (estática): fallback al índice 19 del vtable de JavaBBinder,
+    //   confirmado por análisis binario offline del dispositivo.
+    //   (vtable[19] = +0x98 desde _ZTV11JavaBBinder = función de 488 bytes / 8 BL calls)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    void* target_fn = nullptr;
+
+    // ── Estrategia A: Scan dinámico del vtable de BBinder ────────────────────
+    void* base_vtable    = resolveLibbinderSymbol("_ZTV7android7BBinder");
+    void* base_ontransact = resolveLibbinderSymbol(
+        "_ZN7android7BBinder10onTransactEjRKNS_6ParcelEPS1_j");
+    void* java_vtable    = resolveRuntimeSymbol("_ZTV11JavaBBinder");
+
+    if (base_vtable && base_ontransact && java_vtable) {
+        void** b_vt = reinterpret_cast<void**>(base_vtable);
+        void** j_vt = reinterpret_cast<void**>(java_vtable);
+
+        int found_idx = -1;
+        // El vtable incluye [0]=offset_to_top, [1]=RTTI antes de las funciones.
+        // Escanear las primeras 32 entradas (256 bytes) para encontrar onTransact.
+        for (int i = 0; i < 32; i++) {
+            if (b_vt[i] == base_ontransact) {
+                found_idx = i;
+                break;
+            }
+        }
+
+        if (found_idx != -1) {
+            void* candidate = j_vt[found_idx];
+            if (candidate) {
+                LOGD("[PR115] Dynamic scan: onTransact at vtable[%d] = %p", found_idx, candidate);
+                target_fn = candidate;
+            } else {
+                LOGE("[PR115] Dynamic scan: vtable[%d] is null in JavaBBinder", found_idx);
+            }
+        } else {
+            LOGE("[PR115] Dynamic scan: BBinder::onTransact NOT found in vtable (checked 32 entries)");
+        }
     } else {
-        LOGE("[PR113] JavaBBinder::onTransact UNRESOLVED");
+        LOGE("[PR115] Dynamic scan: missing symbols base_vt=%p ontransact=%p java_vt=%p",
+             base_vtable, base_ontransact, java_vtable);
+    }
+
+    // ── Estrategia B: Fallback estático al índice 19 ─────────────────────────
+    if (!target_fn && java_vtable) {
+        // Índice 19 confirmado por análisis offline del binario de este dispositivo.
+        // vtable[19] @ +0x98 desde _ZTV11JavaBBinder:
+        // - 488 bytes de tamaño (función más grande de JavaBBinder)
+        // - 8 instrucciones BL (más llamadas externas = llama a la JVM)
+        constexpr int STATIC_ONTRANSACT_IDX = 19;
+        void** j_vt = reinterpret_cast<void**>(java_vtable);
+        void* candidate = j_vt[STATIC_ONTRANSACT_IDX];
+        if (candidate) {
+            LOGD("[PR115] Static fallback: vtable[%d] = %p", STATIC_ONTRANSACT_IDX, candidate);
+            target_fn = candidate;
+        } else {
+            LOGE("[PR115] Static fallback: vtable[%d] is null", STATIC_ONTRANSACT_IDX);
+        }
+    }
+
+    // ── Hook final ────────────────────────────────────────────────────────────
+    if (target_fn) {
+        DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
+                  (void**)&orig_jbbinder_ontransact);
+        LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p", target_fn);
+    } else {
+        LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
     }
 }
 
