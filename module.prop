@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v20.0
-versionCode=20000
+version=v21.0
+versionCode=21000
 author=Legba
-description=PR131 — Check DobbyHook return values + verify hook patching
+description=PR132 — Integrate real Dobby library (replace stub)
