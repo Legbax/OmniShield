@@ -6622,6 +6622,14 @@ public:
         // All hooks are installed above — now make the .so invisible in maps.
         remapModuleMemory();
 
+        // PR136: Invalidate Zygisk Api pointer — KernelSU's Zygisk unmaps
+        // its vtable after postAppSpecialize returns. Without this, dlopen
+        // hooks calling g_api->pltHookRegister() crash via dangling vtable.
+        // Both installPltHooks() and reapplyPltHooksForNewLibraries() already
+        // guard with `if (!g_api) return;`.  pltHookCommit() returns false
+        // on this KernelSU version anyway, so the reapply is a no-op.
+        g_api = nullptr;
+
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
         // PR58: DLCLOSE removido — causa pc=0x0 en forkSystemServer.
