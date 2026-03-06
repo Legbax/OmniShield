@@ -47,5 +47,5 @@ Expected indicators:
 - `[PR120-PULSE] mmap/mmap64 hook active ...` (confirms mmap hooks are executing even before ashmem classification logs)
 
 If startup shows `PR120: mmap symbol unresolved` / `mmap64 symbol unresolved`, PR120 now tries a resolver chain (`DobbySymbolResolver` → `dlsym(RTLD_DEFAULT)` → `dlopen(libc)+dlsym`, plus `__mmap2` alias fallback for mmap64-compatible paths).
-If logs show identical addresses for both hooks (e.g. `mmap` and `mmap64` at the same pointer), PR120 uses **single-hook mode** to avoid double-hooking the same symbol.
+
 If PR119 logs never appear in Maps/GMS/producer processes, verify that the module is loaded in those processes and that `debug_mode=true` in config.

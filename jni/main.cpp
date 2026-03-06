@@ -2620,7 +2620,7 @@ void* my_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offs
     void* ret = orig_mmap(addr, length, prot, flags, fd, offset);
     bool expected = false;
     if (g_pr120MmapPulseLogged.compare_exchange_strong(expected, true)) {
-        LOGE("[PR120-PULSE] mmap hook active: fd=%d len=%zu flags=0x%x", fd, length, flags);
+        LOGD("[PR120-PULSE] mmap hook active: fd=%d len=%zu flags=0x%x", fd, length, flags);
     }
     if (ret != MAP_FAILED && fd >= 0) {
         maybeLogAshmemFd(fd, "mmap");
@@ -2636,7 +2636,7 @@ void* my_mmap64(void* addr, size_t length, int prot, int flags, int fd, off64_t 
     void* ret = orig_mmap64(addr, length, prot, flags, fd, offset);
     bool expected = false;
     if (g_pr120Mmap64PulseLogged.compare_exchange_strong(expected, true)) {
-        LOGE("[PR120-PULSE] mmap64 hook active: fd=%d len=%zu flags=0x%x", fd, length, flags);
+        LOGD("[PR120-PULSE] mmap64 hook active: fd=%d len=%zu flags=0x%x", fd, length, flags);
     }
     if (ret != MAP_FAILED && fd >= 0) {
         maybeLogAshmemFd(fd, "mmap64");
