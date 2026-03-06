@@ -5234,8 +5234,15 @@ public:
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         g_isTargetApp = false;
+        if (!env || !args->nice_name) {
+            LOGE("[scope] preAppSpecialize: SKIP — env=%p nice_name=%p (JNI failure?)",
+                 (void*)env, args ? (void*)args->nice_name : nullptr);
+        }
         if (env && args->nice_name) {
             const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
+            if (!p) {
+                LOGE("[scope] preAppSpecialize: GetStringUTFChars returned NULL");
+            }
             if (p) {
                 std::string proc(p);
                 LOGD("[scope] process='%s' config_keys=%zu", proc.c_str(), g_config.size());

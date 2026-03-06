@@ -184,3 +184,32 @@ fi
 # ============================================================
 # FIN PR86
 # ============================================================
+
+# ============================================================
+# PR123: Force-restart Maps/GMS after boot to ensure Zygisk hooks
+# ============================================================
+# KernelSU's Zygisk may load the module AFTER Maps/GMS have already
+# started during early boot. By killing them after boot_completed,
+# Android restarts them and the new processes get the Zygisk module
+# injected via Zygote (which by this point has the module loaded).
+# This complements the companion-based restartLocationRuntime()
+# (PR121) which only triggers on config changes.
+(
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        sleep 2
+    done
+    # Extra delay to ensure Zygisk module is fully loaded into Zygote
+    sleep 5
+    am force-stop com.google.android.apps.maps 2>/dev/null
+    killall com.google.android.gms 2>/dev/null
+    killall com.google.android.gms.unstable 2>/dev/null
+    killall com.google.android.gms.persistent 2>/dev/null
+    killall com.android.location.fused 2>/dev/null
+    killall com.xiaomi.location.fused 2>/dev/null
+    killall com.mediatek.location.lppe.main 2>/dev/null
+    killall com.mediatek.location.ppe.main 2>/dev/null
+    log -t OmniShield "[PR123] Boot-time restart of Maps/GMS for Zygisk hooks"
+) &
+# ============================================================
+# FIN PR123
+# ============================================================
