@@ -325,10 +325,8 @@ typedef unsigned int cl_device_info;
 #define CL_DEVICE_VERSION 0x102F
 static cl_int (*orig_clGetDeviceInfo)(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret);
 
-// Vulkan & Sensors
+// Vulkan
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
-static const char* (*orig_Sensor_getName)(void* sensor);
-static const char* (*orig_Sensor_getVendor)(void* sensor);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
@@ -2856,46 +2854,12 @@ void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysica
 }
 
 // -----------------------------------------------------------------------------
-// Hooks: SensorManager (Limpieza de firmas MTK/Xiaomi)
-// -----------------------------------------------------------------------------
-const char* my_Sensor_getName(void* sensor) {
-    if (!orig_Sensor_getName) return nullptr;
-    const char* orig_name = orig_Sensor_getName(sensor);
-    if (!orig_name) return nullptr;
-
-    static thread_local std::string name_cache;
-    name_cache = orig_name;
-
-    std::string lower_name = toLowerStr(orig_name);
-    if (lower_name.find("mtk") != std::string::npos ||
-        lower_name.find("mediatek") != std::string::npos ||
-        lower_name.find("xiaomi") != std::string::npos) {
-
-        size_t pos;
-        while ((pos = name_cache.find("MTK")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
-        while ((pos = name_cache.find("mtk")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
-        while ((pos = name_cache.find("MediaTek")) != std::string::npos) name_cache.replace(pos, 8, "AOSP");
-        while ((pos = name_cache.find("Xiaomi")) != std::string::npos) name_cache.replace(pos, 6, "AOSP");
-    }
-    return name_cache.c_str();
-}
-
-const char* my_Sensor_getVendor(void* sensor) {
-    if (!orig_Sensor_getVendor) return nullptr;
-    const char* orig_vendor = orig_Sensor_getVendor(sensor);
-    if (!orig_vendor) return nullptr;
-
-    static thread_local std::string vendor_cache;
-    vendor_cache = orig_vendor;
-
-    std::string lower_vendor = toLowerStr(orig_vendor);
-    if (lower_vendor.find("mtk") != std::string::npos ||
-        lower_vendor.find("mediatek") != std::string::npos ||
-        lower_vendor.find("xiaomi") != std::string::npos) {
-        vendor_cache = "AOSP Framework"; // Vendor genérico y seguro
-    }
-    return vendor_cache.c_str();
-}
+// PR38+39 Sensor name/vendor Dobby hooks REMOVED.
+// Reason: android::Sensor::getName() returns const String8& (pointer to object),
+// but the hooks returned const char* (pointer to chars).  The caller
+// (translateNativeSensorToJavaSensor in libandroid_runtime.so) reads the first
+// 8 bytes of the char data as String8::mString pointer → wild pointer → SIGBUS.
+// Sensor metadata (range, resolution, etc.) is still spoofed via JNI hooks below.
 
 // -----------------------------------------------------------------------------
 // Hooks: sysinfo (Uptime Paradox Fix)
@@ -6129,16 +6093,9 @@ public:
         void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
         if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
-        // Sensores (Mangled names en libandroid.so o libsensors.so)
-        // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
-        // _ZNK7android6Sensor9getVendorEv -> android::Sensor::getVendor() const
-        void* sensor_name_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor7getNameEv");
-        if (!sensor_name_func) sensor_name_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor7getNameEv");
-        if (sensor_name_func) DobbyHook(sensor_name_func, (void*)my_Sensor_getName, (void**)&orig_Sensor_getName);
-
-        void* sensor_vendor_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor9getVendorEv");
-        if (!sensor_vendor_func) sensor_vendor_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor9getVendorEv");
-        if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
+        // Sensor::getName()/getVendor() Dobby hooks REMOVED — ABI mismatch
+        // (returns const String8&, not const char*) caused SIGBUS in GMS.
+        // Sensor metadata spoofing is handled by JNI hooks on android/hardware/Sensor.
 
         // Force-load libandroid_runtime — on some ROMs (MIUI, etc.) the Settings JNI
         // bridge symbols are only available after explicit dlopen, similar to Fix11
