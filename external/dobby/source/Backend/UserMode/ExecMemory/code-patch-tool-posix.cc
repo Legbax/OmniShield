@@ -1,6 +1,8 @@
 
 #include "dobby/dobby_internal.h"
-#include "core/arch/Cpu.h"
+// PR132: core/arch/Cpu.h doesn't exist in this Dobby tree; ClearCache is
+// declared in clear-cache-tool-all.c and available via extern C.
+extern "C" void ClearCache(void *start, void *end);
 
 #include <unistd.h>
 #include <sys/mman.h>
