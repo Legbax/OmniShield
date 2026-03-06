@@ -4770,6 +4770,25 @@ static constexpr size_t  GMS_ILOCLISTENER_MIN_SIZE = 188;
 static constexpr uint8_t GMS_TOKEN_PREFIX[8] = {
     0x63,0x00, 0x6F,0x00, 0x6D,0x00, 0x2E,0x00  // 'com.'
 };
+// PR139: Exact UTF-16LE descriptor for "com.google.android.gms.location.internal.ILocationListener"
+// 58 chars × 2 = 116 bytes. Replaces GMS_TOKEN_PREFIX heuristic to eliminate false positives.
+static constexpr uint8_t GMS_ILOCLISTENER_DESCRIPTOR[] = {
+    0x63,0x00, 0x6F,0x00, 0x6D,0x00, 0x2E,0x00,  // com.
+    0x67,0x00, 0x6F,0x00, 0x6F,0x00, 0x67,0x00,  // goog
+    0x6C,0x00, 0x65,0x00, 0x2E,0x00, 0x61,0x00,  // le.a
+    0x6E,0x00, 0x64,0x00, 0x72,0x00, 0x6F,0x00,  // ndro
+    0x69,0x00, 0x64,0x00, 0x2E,0x00, 0x67,0x00,  // id.g
+    0x6D,0x00, 0x73,0x00, 0x2E,0x00, 0x6C,0x00,  // ms.l
+    0x6F,0x00, 0x63,0x00, 0x61,0x00, 0x74,0x00,  // ocat
+    0x69,0x00, 0x6F,0x00, 0x6E,0x00, 0x2E,0x00,  // ion.
+    0x69,0x00, 0x6E,0x00, 0x74,0x00, 0x65,0x00,  // inte
+    0x72,0x00, 0x6E,0x00, 0x61,0x00, 0x6C,0x00,  // rnal
+    0x2E,0x00, 0x49,0x00, 0x4C,0x00, 0x6F,0x00,  // .ILo
+    0x63,0x00, 0x61,0x00, 0x74,0x00, 0x69,0x00,  // cati
+    0x6F,0x00, 0x6E,0x00, 0x4C,0x00, 0x69,0x00,  // onLi
+    0x73,0x00, 0x74,0x00, 0x65,0x00, 0x6E,0x00,  // sten
+    0x65,0x00, 0x72,0x00                           // er
+};
 
 static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
     // PR109-DBG: filtro de código eliminado para diagnóstico.
@@ -4782,7 +4801,10 @@ static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
     int32_t strLen = 0;
     memcpy(&strLen, raw + 8, 4);
     if (strLen != GMS_ILOCLISTENER_STR_LEN) return false;
-    bool match = (memcmp(raw + 12, GMS_TOKEN_PREFIX, sizeof(GMS_TOKEN_PREFIX)) == 0);
+    // PR139: Exact full-descriptor match (not just "com." prefix) to eliminate false positives
+    if (sz < 12 + sizeof(GMS_ILOCLISTENER_DESCRIPTOR)) return false;
+    bool match = (memcmp(raw + 12, GMS_ILOCLISTENER_DESCRIPTOR,
+                         sizeof(GMS_ILOCLISTENER_DESCRIPTOR)) == 0);
     if (match) {
         LOGD("[PR109-DBG] GMS token MATCH code=%u sz=%zu", code, sz);
     }
@@ -4807,13 +4829,57 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
              handle, code, parcel_dataSize(data));
     }
 
-    // PR134: PR107 GMS in-place mutation DISABLED — caused SIGSEGV in
-    // com.google.android.gms.persistent. isGmsLocationOutgoing() has
-    // false positives on any 58-char "com.*" Binder interface; writes
-    // into wrong offsets of non-location parcels → fault in mData buffer.
-    // PR105 REPLY mutation covers Maps location requests.
+    // PR139: Re-enable PR107 outgoing mutation with shadow buffer (safe copy pattern).
+    // PR134 disabled in-place mutation due to false positives in isGmsLocationOutgoing().
+    // Now safe: exact descriptor match (PR139 Change B) eliminates false positives,
+    // and shadow buffer avoids writing into kernel-mapped Parcel memory.
+    bool isGmsLoc = isGmsLocationOutgoing(data, code);
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+    bool outMutated = false;
+    uint8_t* outSavedMData = nullptr;
+    uint8_t* outShadowBuf = nullptr;
+
+    if (isGmsLoc && (latBits != 0 || lonBits != 0)) {
+        size_t sz = parcel_dataSize(data);
+        const uint8_t* raw = parcel_data(data);
+        if (sz >= GMS_ILOCLISTENER_MIN_SIZE && raw) {
+            outShadowBuf = new uint8_t[sz];
+            memcpy(outShadowBuf, raw, sz);
+
+            double lat, lon;
+            memcpy(&lat, &latBits, 8);
+            memcpy(&lon, &lonBits, 8);
+
+            outMutated = mutateLocationInBuffer(outShadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon);
+            size_t dopplerOff = 0;
+            if (!outMutated)
+                outMutated = mutateLocationByDopplerScan(outShadowBuf, sz, lat, lon, dopplerOff);
+
+            if (outMutated) {
+                // PR137-style mData swap at Parcel+0x08 (after mError+pad)
+                uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+                    const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+                outSavedMData = *mDataField;
+                *mDataField = outShadowBuf;
+                LOGE("[PR139] outgoing GMS location mutated: handle=%d code=%u sz=%zu lat=%.6f lon=%.6f",
+                     handle, code, sz, lat, lon);
+            } else {
+                delete[] outShadowBuf;
+                outShadowBuf = nullptr;
+            }
+        }
+    }
 
     int32_t status = orig_ipc_transact(self, handle, code, data, reply, flags);
+
+    // Restore mData pointer after original transact call
+    if (outMutated && outSavedMData) {
+        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+            const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+        *mDataField = outSavedMData;
+    }
+    delete[] outShadowBuf;
 
     // PR105: mutar REPLY de AOSP ILocationManager
     if (isAospLoc && status == 0 && reply) {
@@ -4879,6 +4945,10 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
+            // PR139: Payload-size fallback — if token didn't match but parcel is large
+            // enough to contain a Location object (>256 bytes), try Doppler scan anyway.
+            // Catches vendor wrappers (Samsung, Xiaomi) using non-standard interfaces.
+            bool tryDopplerFallback = !looksLocation && sz > 256;
 
             // PR130: Log first 3 location-looking tokens
             static std::atomic<int> s_locTokenCount{0};
@@ -4899,7 +4969,7 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 }
             }
 
-            if (looksLocation && (latBits != 0 || lonBits != 0)) {
+            if ((looksLocation || tryDopplerFallback) && (latBits != 0 || lonBits != 0)) {
                 // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
                 // Copiamos, mutamos, redirigimos mData ANTES del handler original.
                 shadowBuf = new uint8_t[sz];
@@ -4909,12 +4979,14 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119: offsets preferidos conocidos (AOSP/GMS + header dinámico).
-                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                // PR119/PR139: For known location interfaces, try known offsets first.
+                // For Doppler fallback (unknown token), skip known offsets — go straight to scan.
+                if (looksLocation) {
+                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                }
 
-                // PR119: fallback "Radar Doppler" — ignorar code/layout fijo.
                 size_t dopplerOffset = 0;
                 if (!mutated) {
                     mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
@@ -4979,8 +5051,10 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
+            // PR139: Payload-size fallback for unknown-token interfaces
+            bool tryDopplerFallback = !looksLocation && sz > 256;
 
-            if (looksLocation) {
+            if (looksLocation || tryDopplerFallback) {
                 shadowBuf = new uint8_t[sz];
                 memcpy(shadowBuf, raw, sz);
 
@@ -4988,10 +5062,12 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // Try known Location offsets then Doppler scan
-                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                // PR139: Known offsets only for known location interfaces
+                if (looksLocation) {
+                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                }
 
                 size_t dopplerOffset = 0;
                 if (!mutated) {
@@ -5306,8 +5382,13 @@ static void applyBinderHooks() {
     // at <anonymous> region). GMS is a location provider, not consumer;
     // PR105 REPLY mutation only benefits Maps.
     if (g_currentProcessName.find("com.google.android.gms") != std::string::npos) {
-        LOGE("[PR135] Skipping ALL Binder hooks in GMS process '%s'",
+        // PR139: Only skip IPCThreadState::transact in GMS (PR135 crash was specific to
+        // that symbol's Dobby trampoline). BBinder/JavaBBinder hooks are safe and needed
+        // for intercepting incoming location callbacks in GMS sub-processes.
+        LOGE("[PR139] GMS process '%s' — skipping IPCThreadState::transact (PR135 crash), "
+             "but applying BBinder/JavaBBinder hooks for location callback coverage",
              g_currentProcessName.c_str());
+        applyBBinderHook();
         return;
     }
 
