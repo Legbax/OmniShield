@@ -44,7 +44,6 @@
 #include <set>              // Fix8: deduplicar ELFs en PLT hooks
 #include <unordered_map>   // PR84: fake prop_info map
 #include <sys/sysmacros.h>  // Fix8: makedev()
-#include <pwd.h>            // PR122: getpwuid for UID resolution
 
 #include "zygisk.hpp"
 #include "dobby.h"
@@ -113,68 +112,6 @@ static int32_t g_camFrontPixWidth   = 6528;
 static int32_t g_camFrontPixHeight  = 4896;
 static float   g_camFrontFocLen     = 2.20f;
 static float   g_camFrontAperture   = 2.2f;
-
-// PR122: system_server location interception — globals
-// When Zygisk fails to inject the module into the main Maps process,
-// system_server hooks intercept location delivery at the source.
-static bool g_isSystemServer = false;
-static std::set<uid_t> g_scopedUids;
-
-// PR122: IPCThreadState::self() and getCallingUid() for UID-filtered mutation
-typedef void* (*fn_IPCThreadState_self)();
-typedef uid_t (*fn_IPCThreadState_getCallingUid)(void*);
-static fn_IPCThreadState_self      g_ipc_self       = nullptr;
-static fn_IPCThreadState_getCallingUid g_ipc_getUid = nullptr;
-
-static uid_t getIPCCallingUid() {
-    if (g_ipc_self && g_ipc_getUid) {
-        void* ts = g_ipc_self();
-        if (ts) return g_ipc_getUid(ts);
-    }
-    return (uid_t)-1;
-}
-
-// PR122: Build a set of UIDs for scoped apps by parsing /data/system/packages.list.
-// Called in preServerSpecialize (system_server has read access to this file).
-static void buildScopedUidSet() {
-    g_scopedUids.clear();
-    if (!g_config.count("scoped_apps")) return;
-
-    // Parse comma-separated scoped_apps into a set of package names
-    std::set<std::string> packages;
-    {
-        std::istringstream ss(g_config["scoped_apps"]);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            token.erase(0, token.find_first_not_of(" \t"));
-            token.erase(token.find_last_not_of(" \t") + 1);
-            if (!token.empty()) packages.insert(token);
-        }
-    }
-    if (packages.empty()) return;
-
-    // Parse /data/system/packages.list: "pkgname uid ..."
-    std::ifstream pkgFile("/data/system/packages.list");
-    if (!pkgFile.is_open()) {
-        LOGE("[PR122] Cannot open /data/system/packages.list");
-        return;
-    }
-
-    std::string line;
-    while (std::getline(pkgFile, line)) {
-        std::istringstream ls(line);
-        std::string pkg;
-        uid_t uid = 0;
-        if (ls >> pkg >> uid) {
-            if (packages.count(pkg)) {
-                g_scopedUids.insert(uid);
-                LOGD("[PR122] Scoped UID: %s → %d", pkg.c_str(), uid);
-            }
-        }
-    }
-    LOGE("[PR122] Built scoped UID set: %zu UIDs from %zu packages",
-         g_scopedUids.size(), packages.size());
-}
 
 // PR38+39: Inicializar caché de GPS (llamar en postAppSpecialize tras readConfig)
 static void initLocationCache() {
@@ -4853,16 +4790,6 @@ static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
 
 static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                                 const void* data, void* reply, uint32_t flags) {
-    // PR122: system_server mode — pass-through for outgoing transactions.
-    // Outgoing location callbacks (ILocationListener.onLocationChanged) go to ALL apps
-    // with active location listeners. Without per-handle UID mapping we cannot filter
-    // to scoped apps only, so we don't mutate here. Location interception for
-    // system_server is handled on the INCOMING side (JavaBBinder::onTransact) where
-    // getCallingUid() is available.
-    if (g_isSystemServer) {
-        return orig_ipc_transact(self, handle, code, data, reply, flags);
-    }
-
     // PR105: detección AOSP getLastLocation/getCurrentLocation (muta REPLY)
     bool isAospLoc = isLocationRequest(data, code);
     if (isAospLoc) {
@@ -4925,35 +4852,6 @@ static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
 
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
-    // ── PR122: system_server mode — mutate REPLIES for scoped apps ──────────
-    // In system_server, JavaBBinder::onTransact handles incoming Binder requests
-    // from apps. After the original function processes the request and writes the
-    // response to `reply`, we check if the caller is a scoped app and the
-    // transaction is a location request (getLastLocation/getCurrentLocation).
-    // If so, we mutate the lat/lon in the reply Parcel.
-    if (g_isSystemServer) {
-        int32_t status = orig_jbbinder_ontransact(self, code, data, reply, flags);
-
-        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-
-        if (status == 0 && reply && data && (latBits != 0 || lonBits != 0)) {
-            if (isLocationRequest(data, code)) {
-                uid_t uid = getIPCCallingUid();
-                // If UID resolution works, only mutate for scoped apps.
-                // If UID resolution fails (symbols unresolved), mutate all
-                // location replies as a safe fallback — better than leaking.
-                bool shouldMutate = (uid == (uid_t)-1) || (g_scopedUids.count(uid) > 0);
-                if (shouldMutate) {
-                    mutateLocationReply(reply);
-                    LOGD("[PR122] system_server: location reply mutated (uid=%d code=%u)", uid, code);
-                }
-            }
-        }
-        return status;
-    }
-
-    // ── App process mode — existing shadow-copy DATA mutation ───────────────
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 
@@ -6653,52 +6551,9 @@ public:
 
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
-        // PR122: Read config in system_server to enable location interception.
-        // system_server mediates ALL location delivery from LocationManagerService
-        // to apps. When Zygisk fails to inject the module into a target app (like
-        // Google Maps), system_server hooks are the last line of defense.
-        if (!readConfigViaCompanion(g_api)) {
-            readConfig();
-        }
-        // Build UID set for scoped apps (needs /data/system/packages.list)
-        buildScopedUidSet();
+        // PR58: DLCLOSE removido — causa pc=0x0 en forkSystemServer.
     }
-    void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {
-        // PR122: Install Binder hooks in system_server for location interception.
-        // Only activate if we have scoped apps and valid spoofed coordinates.
-        if (g_config.empty() || g_scopedUids.empty()) return;
-
-        // Initialize location cache (needs profile name + seed from config)
-        initLocationCache();
-
-        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-        if (latBits == 0) {
-            LOGE("[PR122] system_server: no location configured, skipping hooks");
-            return;
-        }
-
-        g_isSystemServer = true;
-
-        // Resolve IPCThreadState::self() and getCallingUid() for UID filtering
-        g_ipc_self = (fn_IPCThreadState_self)dlsym(RTLD_DEFAULT,
-            "_ZN7android14IPCThreadState4selfEv");
-        g_ipc_getUid = (fn_IPCThreadState_getCallingUid)dlsym(RTLD_DEFAULT,
-            "_ZNK7android14IPCThreadState13getCallingUidEv");
-
-        if (!g_ipc_self || !g_ipc_getUid) {
-            LOGE("[PR122] system_server: cannot resolve IPCThreadState symbols (self=%p getUid=%p)",
-                 (void*)g_ipc_self, (void*)g_ipc_getUid);
-            // Still install hooks — they just won't filter by UID (all location replies mutated)
-        }
-
-        // Install the same Binder hooks used in app processes.
-        // my_ipc_transact is pass-through in system_server mode.
-        // my_jbbinder_ontransact mutates REPLIES for scoped app UIDs.
-        applyBinderHooks();
-
-        LOGE("[PR122] system_server: location hooks installed | %zu scoped UIDs | GPS: %.4f,%.4f",
-             g_scopedUids.size(), g_cachedLat, g_cachedLon);
-    }
+    void postServerSpecialize(const zygisk::ServerSpecializeArgs *args) override {}
 private:
     zygisk::Api *api;
     JNIEnv *env;
