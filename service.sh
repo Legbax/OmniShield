@@ -42,8 +42,8 @@ if [ -f "$OMNI_CONFIG" ]; then
     MASTER_SEED=$(grep "^master_seed=" "$OMNI_CONFIG" | cut -d'=' -f2 | tr -d ' \r\n')
 fi
 
-# Si no hay seed definido no modificar
-[ -z "$MASTER_SEED" ] && exit 0
+# Si no hay seed definido, saltar SSAID (pero NO exit — PR86/PR125/PR126 van después)
+if [ -n "$MASTER_SEED" ] && [ -f "$SSAID_FILE" ]; then
 
 # Implementación Python (precisión 64-bit completa)
 derive_ssaid_python() {
@@ -90,10 +90,6 @@ if [ -n "$SCOPED_APPS" ]; then
     IFS="$OLDIFS"
 else
     set --
-fi
-
-if [ ! -f "$SSAID_FILE" ]; then
-    exit 0
 fi
 
 # Hacer backup del archivo original si no existe ya
@@ -148,6 +144,7 @@ if [ "$MODIFIED" -eq 1 ]; then
     am force-stop com.android.providers.settings 2>/dev/null
 fi
 
+fi  # end of: if [ -n "$MASTER_SEED" ] && [ -f "$SSAID_FILE" ]
 # ============================================================
 # FIN PR37/PR40 SSAID Injection
 # ============================================================
