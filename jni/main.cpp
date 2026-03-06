@@ -5365,8 +5365,14 @@ public:
             mmap64_func = resolveLibcSymbol("__mmap2");
         }
         if (mmap64_func) {
-            int ret = DobbyHook(mmap64_func, (void*)my_mmap64, (void**)&orig_mmap64);
-            LOGE("PR120: mmap64 hook %s at %p (ret=%d)", ret == 0 ? "SUCCESS" : "FAILED", mmap64_func, ret);
+            if (mmap_func && mmap64_func == mmap_func) {
+                // PR120g: en varios builds ARM64 mmap/mmap64 son el mismo símbolo.
+                // Evitar double-hook sobre la misma dirección (puede anular trampolines).
+                LOGE("PR120: mmap64 shares mmap symbol (%p) — single-hook mode", mmap64_func);
+            } else {
+                int ret = DobbyHook(mmap64_func, (void*)my_mmap64, (void**)&orig_mmap64);
+                LOGE("PR120: mmap64 hook %s at %p (ret=%d)", ret == 0 ? "SUCCESS" : "FAILED", mmap64_func, ret);
+            }
         } else {
             LOGE("PR120: mmap64 symbol unresolved (resolver chain exhausted)");
         }
