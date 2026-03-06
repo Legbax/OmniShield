@@ -4790,6 +4790,13 @@ static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
 
 static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                                 const void* data, void* reply, uint32_t flags) {
+    // PR130: Verify outgoing hook fires (first 5 invocations only)
+    static std::atomic<int> s_ipcCount{0};
+    int _pr130_ipc = s_ipcCount.fetch_add(1, std::memory_order_relaxed);
+    if (_pr130_ipc < 5) {
+        LOGE("[PR130] ipc_transact called: handle=%d code=%u call#%d", handle, code, _pr130_ipc);
+    }
+
     // PR105: detección AOSP getLastLocation/getCurrentLocation (muta REPLY)
     bool isAospLoc = isLocationRequest(data, code);
     if (isAospLoc) {
@@ -4852,6 +4859,14 @@ static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
 
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
+    // PR130: Verify hook is being called (first 5 invocations only)
+    static std::atomic<int> s_callCount{0};
+    int _pr130_n = s_callCount.fetch_add(1, std::memory_order_relaxed);
+    if (_pr130_n < 5) {
+        size_t _pr130_sz = data ? parcel_dataSize(data) : 0;
+        LOGE("[PR130] jbbinder_ontransact called: code=%u sz=%zu call#%d", code, _pr130_sz, _pr130_n);
+    }
+
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 
@@ -4859,7 +4874,8 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
     uint8_t* savedMData = nullptr;
     uint8_t* shadowBuf  = nullptr;
 
-    if ((latBits != 0 || lonBits != 0) && data) {
+    // PR130: Parse token unconditionally (outside latBits guard) for diagnostics
+    if (data) {
         size_t sz         = parcel_dataSize(data);
         const uint8_t* raw = parcel_data(data);
 
@@ -4871,7 +4887,26 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
 
+            // PR130: Log first 3 location-looking tokens
+            static std::atomic<int> s_locTokenCount{0};
             if (looksLocation) {
+                int _lt = s_locTokenCount.fetch_add(1, std::memory_order_relaxed);
+                if (_lt < 3) {
+                    LOGE("[PR130] location token detected: '%s' code=%u sz=%zu hdr=%zu",
+                         token.c_str(), code, sz, parsedHdr);
+                }
+            }
+
+            // PR130: Log first 10 tokens to see what interfaces pass through
+            static std::atomic<int> s_tokenLog{0};
+            if (hasToken && !token.empty()) {
+                int _tl = s_tokenLog.fetch_add(1, std::memory_order_relaxed);
+                if (_tl < 10) {
+                    LOGE("[PR130] binder token: '%s' code=%u sz=%zu", token.c_str(), code, sz);
+                }
+            }
+
+            if (looksLocation && (latBits != 0 || lonBits != 0)) {
                 // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
                 // Copiamos, mutamos, redirigimos mData ANTES del handler original.
                 shadowBuf = new uint8_t[sz];
@@ -5390,6 +5425,16 @@ public:
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
+        // PR130: Diagnostic — verify coordinates are loaded into atomic cache
+        {
+            int64_t lb = g_cachedLatBits.load(std::memory_order_acquire);
+            int64_t lob = g_cachedLonBits.load(std::memory_order_acquire);
+            double lat, lon;
+            memcpy(&lat, &lb, 8);
+            memcpy(&lon, &lob, 8);
+            LOGE("[PR130] Location cache: lat=%.6f lon=%.6f cached=%d profile='%s' seed=%ld",
+                 lat, lon, (int)g_locationCached, g_currentProfileName.c_str(), g_masterSeed);
+        }
         const DeviceFingerprint* sp_ptr = findProfile(g_currentProfileName);
         if (sp_ptr) {
             const auto& sp = *sp_ptr;

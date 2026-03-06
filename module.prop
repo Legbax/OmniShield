@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v18.0
-versionCode=18000
+version=v19.0
+versionCode=19000
 author=Legba
-description=PR129 — Auto-scope GMS main process + Maps for location hooks
+description=PR130 — Diagnostic logging for Binder location hooks
