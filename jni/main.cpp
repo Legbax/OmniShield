@@ -483,13 +483,18 @@ static void restartLocationRuntime() {
     system("sh -c '"
            "am force-stop com.google.android.apps.maps 2>/dev/null; "
            "am force-stop com.google.android.gms 2>/dev/null; "
+           "killall com.google.android.gms 2>/dev/null; "
            "killall com.google.android.gms.unstable 2>/dev/null; "
            "killall com.google.android.gms.persistent 2>/dev/null; "
            "killall com.google.android.gms.location.history 2>/dev/null; "
+           "killall com.google.process.location 2>/dev/null; "
            "killall com.android.location.fused 2>/dev/null; "
            "killall com.xiaomi.location.fused 2>/dev/null; "
            "killall com.mediatek.location.lppe.main 2>/dev/null; "
-           "killall com.mediatek.location.ppe.main 2>/dev/null"
+           "killall com.mediatek.location.ppe.main 2>/dev/null; "
+           "pkill -f com.google.android.gms 2>/dev/null; "
+           "pkill -f com.google.process.location 2>/dev/null; "
+           "pkill -f location.fused 2>/dev/null"
            "' &");
     LOGE("[PR121] Restarted Maps/GMS location stack after identity/location change");
 }
@@ -5225,23 +5230,24 @@ public:
                     LOGD("[scope] NO scoped_apps key in config");
                 }
 
-                // PR119: Productores tempranos de ubicación (MTK/Xiaomi/AOSP fused).
-                // Se fuerzan en scope para interceptar coordenadas antes de que
-                // lleguen a GMS/Maps, incluso si el usuario olvidó agregarlos.
+                // PR122: Scope obligatorio para toda la cadena Maps/GMS/location.
+                // Evita depender sólo de scoped_apps cuando hay procesos persistentes
+                // (p.ej. gms/unstable o location daemons) que sobreviven cambios de perfil.
                 if (!g_isTargetApp) {
-                    static const char* kLocationProducers[] = {
+                    static const char* kHardLocationScope[] = {
+                        "com.google.android.apps.maps",
+                        "com.google.android.gms",
+                        "com.google.process.location",
                         "com.mediatek.location.lppe.main",
                         "com.mediatek.location.ppe.main",
                         "com.xiaomi.location.fused",
                         "com.android.location.fused",
-                        "com.google.android.gms.unstable",
-                        "com.google.android.gms.persistent",
                         nullptr
                     };
-                    for (int i = 0; kLocationProducers[i]; ++i) {
-                        if (proc.find(kLocationProducers[i]) != std::string::npos) {
+                    for (int i = 0; kHardLocationScope[i]; ++i) {
+                        if (proc.find(kHardLocationScope[i]) != std::string::npos) {
                             g_isTargetApp = true;
-                            LOGD("[PR119][scope] producer auto-scope: '%s'", kLocationProducers[i]);
+                            LOGD("[PR122][scope] hard location scope match: '%s'", kHardLocationScope[i]);
                             break;
                         }
                     }
