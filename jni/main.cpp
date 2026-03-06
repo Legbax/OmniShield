@@ -5276,8 +5276,8 @@ public:
                         "com.mediatek.location.ppe.main",
                         "com.xiaomi.location.fused",
                         "com.android.location.fused",
-                        "com.google.android.gms.unstable",
-                        "com.google.android.gms.persistent",
+                        "com.google.android.gms",          // PR129: matches main, .unstable, .persistent
+                        "com.google.android.apps.maps",    // PR129: always hook Maps for location
                         nullptr
                     };
                     for (int i = 0; kLocationProducers[i]; ++i) {

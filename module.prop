@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v17.0
-versionCode=17000
+version=v18.0
+versionCode=18000
 author=Legba
-description=PR128 — Fix PR125/PR126 timing race: wait for location_mode=0 before killing Maps/GMS
+description=PR129 — Auto-scope GMS main process + Maps for location hooks
