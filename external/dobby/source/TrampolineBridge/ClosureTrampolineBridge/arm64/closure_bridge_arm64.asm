@@ -54,8 +54,10 @@ ldr x1, [sp, #(2 * 8 + 2 * 8 + 30 * 8 + 8 * 16)]
 adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE
 add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF
 #else
-adrp TMP_REG_0, cdecl(common_closure_bridge_handler)
-add TMP_REG_0, TMP_REG_0, :lo12:cdecl(common_closure_bridge_handler)
+// PR132: Load via .data pointer to avoid R_AARCH64_ADR_PREL_PG_HI21
+// relocation error with -fvisibility=hidden in shared libraries.
+adrp TMP_REG_0, common_closure_bridge_handler_addr
+ldr TMP_REG_0, [TMP_REG_0, :lo12:common_closure_bridge_handler_addr]
 #endif
 blr TMP_REG_0
 
