@@ -4403,6 +4403,32 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
                   LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
 }
 
+// PR117: Hook para la lectura de doubles en el Parcel
+using fn_Parcel_readDouble = double(*)(const void*);
+static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
+
+static double my_Parcel_readDouble(const void* self) {
+    double val = orig_Parcel_readDouble(self);
+
+    // Solo falseamos si el valor parece una coordenada real y estamos en el scope
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    if (latBits != 0 && val != 0.0) {
+        double fakeLat, fakeLon;
+        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+        memcpy(&fakeLat, &latBits, 8);
+        memcpy(&fakeLon, &lonBits, 8);
+
+        // Si el valor leído coincide con un rango plausible de tu zona, lo cambiamos
+        // (Esto es un 'envenenamiento por proximidad')
+        if (std::abs(val - fakeLat) > 0.0001 || std::abs(val - fakeLon) > 0.0001) {
+             // Aquí podrías añadir lógica de filtrado extra, pero por ahora
+             // probemos el pulso del log.
+             LOGD("[PR117-PULSE] readDouble intercepted: %.6f", val);
+        }
+    }
+    return val;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PR105b: Cálculo dinámico de campos opcionales de Location.writeToParcel()
 //
@@ -4584,35 +4610,102 @@ static bool isLocationCallback(const void* data_parcel, uint32_t code) {
     return (strLen == ILOCLISTENER_STR_LEN && memcmp(raw + 12, LOC_TOKEN_PREFIX, 8) == 0);
 }
 
-static int32_t my_bbinder_transact(void* self, uint32_t code, const void* data, void* reply, uint32_t flags) {
-    if (!isLocationCallback(data, code)) return orig_bbinder_transact(self, code, data, reply, flags);
+// Tipo de función para JavaBBinder::onTransact
+// Firma: status_t onTransact(uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
+// En términos de puntero de función C: (void* self, uint32_t code, void* data, void* reply, uint32_t flags)
+using fn_jbbinder_ontransact = int32_t(*)(void*, uint32_t, const void*, void*, uint32_t);
+static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
+
+static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
+                                      const void* data, void* reply, uint32_t flags) {
+    // PR113-PULSE: confirmar ejecución. Log para cada llamada. ELIMINAR después del diagnóstico.
+    LOGD("[PR113-PULSE] code=%u sz=%zu", code, parcel_dataSize(data));
 
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-    if (latBits == 0 && lonBits == 0) return orig_bbinder_transact(self, code, data, reply, flags);
 
-    size_t sz = parcel_dataSize(data);
-    if (sz > LOC_COPY_MAX) return orig_bbinder_transact(self, code, data, reply, flags);
+    bool mutated  = false;
+    uint8_t* savedMData = nullptr;
+    uint8_t* shadowBuf  = nullptr;
 
-    uint8_t stackBuf[LOC_COPY_MAX];
-    memcpy(stackBuf, parcel_data(data), sz);
+    if ((latBits != 0 || lonBits != 0) && data) {
+        size_t sz         = parcel_dataSize(data);
+        const uint8_t* raw = parcel_data(data);
 
-    double lat, lon;
-    memcpy(&lat, &latBits, 8);
-    memcpy(&lon, &lonBits, 8);
+        if (sz >= 16 && raw) {
+            int32_t strLen = 0;
+            memcpy(&strLen, raw + 8, 4);
 
-    // Mutar en la copia del stack (Location empieza en offset 84 para el DATA de este listener)
-    mutateLocationInBuffer(stackBuf, sz, ILOCLISTENER_HDR, lat, lon);
+            // Detección AOSP ILocationListener: token 34 chars, prefix 'andr' UTF16LE
+            static constexpr int32_t AOSP_LOC_LEN  = 34;
+            static constexpr size_t  AOSP_LOC_HDR   = 84;
+            static constexpr uint8_t AOSP_PFX[8]    =
+                {0x61,0x00,0x6E,0x00,0x64,0x00,0x72,0x00};
 
-    // Redirección de mData: Shadow Copy
-    uint8_t** mDataField = reinterpret_cast<uint8_t**>(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
-    uint8_t* savedMData = *mDataField;
-    *mDataField = stackBuf;
+            // Detección GMS ILocationListener: token 58 chars, prefix 'com.' UTF16LE
+            bool isAosp = (sz >= AOSP_LOC_HDR + 48 &&
+                           strLen == AOSP_LOC_LEN &&
+                           memcmp(raw + 12, AOSP_PFX, 8) == 0);
+            bool isGms  = (sz >= GMS_ILOCLISTENER_MIN_SIZE &&
+                           strLen == GMS_ILOCLISTENER_STR_LEN &&
+                           memcmp(raw + 12, GMS_TOKEN_PREFIX, 8) == 0);
 
-    int32_t status = orig_bbinder_transact(self, code, data, reply, flags);
-    *mDataField = savedMData; // Restauración crítica
+            // Log diagnóstico: strLen de cualquier Binder con rango plausible de token
+            if (strLen >= 10 && strLen <= 80) {
+                LOGD("[PR113-DBG] code=%u sz=%zu strLen=%d isAosp=%d isGms=%d",
+                     code, sz, strLen, (int)isAosp, (int)isGms);
+            }
+
+            size_t hdr = 0;
+            const char* tag = nullptr;
+            if (isAosp)      { hdr = AOSP_LOC_HDR;         tag = "AOSP"; }
+            else if (isGms)  { hdr = GMS_ILOCLISTENER_HDR; tag = "GMS";  }
+
+            if (tag) {
+                // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
+                // Copiamos, mutamos, redirigimos mData ANTES del handler original.
+                shadowBuf = new uint8_t[sz];
+                memcpy(shadowBuf, raw, sz);
+
+                double lat, lon;
+                memcpy(&lat, &latBits, 8);
+                memcpy(&lon, &lonBits, 8);
+
+                mutated = mutateLocationInBuffer(shadowBuf, sz, hdr, lat, lon);
+
+                if (mutated) {
+                    uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+                        const_cast<void*>(data));
+                    savedMData   = *mDataField;
+                    *mDataField  = shadowBuf;
+                    LOGD("[PR113] %s mutated BEFORE orig: lat=%.6f lon=%.6f",
+                         tag, lat, lon);
+                } else {
+                    LOGD("[PR113] %s detected but mutate FAILED (bad layout)", tag);
+                    delete[] shadowBuf;
+                    shadowBuf = nullptr;
+                }
+            }
+        }
+    }
+
+    int32_t status = orig_jbbinder_ontransact(self, code, data, reply, flags);
+
+    if (mutated && savedMData) {
+        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+            const_cast<void*>(data));
+        *mDataField = savedMData;
+    }
+    if (shadowBuf) { delete[] shadowBuf; shadowBuf = nullptr; }
 
     return status;
+}
+
+// ── Conservar my_bbinder_transact como stub vacío para que el linker no rompa.
+// applyBBinderHook() ya no lo usará.
+static int32_t my_bbinder_transact(void* self, uint32_t code,
+                                   const void* data, void* reply, uint32_t flags) {
+    return orig_bbinder_transact(self, code, data, reply, flags);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4663,14 +4756,173 @@ static void* resolveLibbinderSymbol(const char* mangled) {
     return nullptr;
 }
 
-static void applyBBinderHook() {
-    void* sym = resolveLibbinderSymbol(
-        "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
+// ─────────────────────────────────────────────────────────────────────────────
+// PR113: Resolución de símbolos en libandroid_runtime.so
+// Misma cadena de 3 intentos que resolveLibbinderSymbol pero para la librería
+// que contiene JavaBBinder::onTransact — el único punto de entrega Binder
+// a Java stubs que NO puede ser inlined (requiere llamada a la JVM).
+// ─────────────────────────────────────────────────────────────────────────────
+static void* resolveRuntimeSymbol(const char* mangled) {
+    void* sym = nullptr;
+
+    sym = DobbySymbolResolver("libandroid_runtime.so", mangled);
     if (sym) {
-        DobbyHook(sym, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
-        LOGE("[PR106] BBinder::transact hooked OK @ %p", sym);
+        LOGD("[PR113] via DobbySymbolResolver: %s @ %p", mangled, sym);
+        return sym;
+    }
+
+    sym = dlsym(RTLD_DEFAULT, mangled);
+    if (sym) {
+        LOGD("[PR113] via dlsym(RTLD_DEFAULT): %s @ %p", mangled, sym);
+        return sym;
+    }
+
+    void* lib = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) {
+        lib = dlopen("/system/lib64/libandroid_runtime.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (lib) {
+        sym = dlsym(lib, mangled);
+        if (sym) {
+            LOGD("[PR113] via dlopen+dlsym: %s @ %p", mangled, sym);
+            return sym;
+        }
+    }
+
+    LOGE("[PR113] UNRESOLVED: %s", mangled);
+    return nullptr;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PR118: Hook para la reconstrucción nativa del objeto Location
+// Firma: void android_location_Location_readFromParcel(JNIEnv* env, jobject clazz, jobject parcelObj)
+using fn_Location_readFromParcel = void(*)(JNIEnv*, jobject, jobject);
+static fn_Location_readFromParcel orig_Location_readFromParcel = nullptr;
+
+static void my_Location_readFromParcel(JNIEnv* env, jobject thiz, jobject parcel) {
+    // 1. Dejamos que el sistema reconstruya el objeto originalmente
+    orig_Location_readFromParcel(env, thiz, parcel);
+
+    // 2. Inmediatamente después, sobreescribimos los campos de Java usando JNI
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+
+    if (latBits != 0 || lonBits != 0) {
+        double fakeLat, fakeLon;
+        memcpy(&fakeLat, &latBits, 8);
+        memcpy(&fakeLon, &lonBits, 8);
+
+        jclass locClass = env->GetObjectClass(thiz);
+        // Buscamos los métodos setter de la clase Location en Java
+        jmethodID setLat = env->GetMethodID(locClass, "setLatitude", "(D)V");
+        jmethodID setLon = env->GetMethodID(locClass, "setLongitude", "(D)V");
+
+        if (setLat && setLon) {
+            env->CallVoidMethod(thiz, setLat, fakeLat);
+            env->CallVoidMethod(thiz, setLon, fakeLon);
+            LOGD("[PR118] Location object mutated after readFromParcel: %.6f, %.6f", fakeLat, fakeLon);
+        }
+        env->DeleteLocalRef(locClass);
+    }
+}
+
+static void applyBBinderHook() {
+    // ─────────────────────────────────────────────────────────────────────────
+    // PR106: BBinder::transact fallback (inlined en MIUI, conservado por compatibilidad)
+    // ─────────────────────────────────────────────────────────────────────────
+    void* sym106 = resolveLibbinderSymbol(
+        "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
+    if (sym106) {
+        DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
+        LOGE("[PR106] BBinder::transact hooked @ %p (fallback)", sym106);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PR115: VTable hook de JavaBBinder::onTransact
+    //
+    // JavaBBinder::onTransact no tiene símbolo exportado en MIUI 12.5.
+    // Solución: localizar su dirección via el vtable exportado _ZTV11JavaBBinder.
+    //
+    // Estrategia A (dinámica): comparar vtable de BBinder contra onTransact
+    //   para hallar el índice, luego leer mismo índice en vtable de JavaBBinder.
+    //   Robusto a actualizaciones de ROM.
+    //
+    // Estrategia B (estática): fallback al índice 19 del vtable de JavaBBinder,
+    //   confirmado por análisis binario offline del dispositivo.
+    //   (vtable[19] = +0x98 desde _ZTV11JavaBBinder = función de 488 bytes / 8 BL calls)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    void* target_fn = nullptr;
+
+    // ── Estrategia A: Scan dinámico del vtable de BBinder ────────────────────
+    void* base_vtable    = resolveLibbinderSymbol("_ZTV7android7BBinder");
+    void* base_ontransact = resolveLibbinderSymbol(
+        "_ZN7android7BBinder10onTransactEjRKNS_6ParcelEPS1_j");
+    void* java_vtable    = resolveRuntimeSymbol("_ZTV11JavaBBinder");
+
+    if (base_vtable && base_ontransact && java_vtable) {
+        void** b_vt = reinterpret_cast<void**>(base_vtable);
+        void** j_vt = reinterpret_cast<void**>(java_vtable);
+
+        int found_idx = -1;
+        // El vtable incluye [0]=offset_to_top, [1]=RTTI antes de las funciones.
+        // Escanear las primeras 32 entradas (256 bytes) para encontrar onTransact.
+        for (int i = 0; i < 32; i++) {
+            if (b_vt[i] == base_ontransact) {
+                found_idx = i;
+                break;
+            }
+        }
+
+        if (found_idx != -1) {
+            void* candidate = j_vt[found_idx];
+            if (candidate) {
+                LOGD("[PR115] Dynamic scan: onTransact at vtable[%d] = %p", found_idx, candidate);
+                target_fn = candidate;
+            } else {
+                LOGE("[PR115] Dynamic scan: vtable[%d] is null in JavaBBinder", found_idx);
+            }
+        } else {
+            LOGE("[PR115] Dynamic scan: BBinder::onTransact NOT found in vtable (checked 32 entries)");
+        }
     } else {
-        LOGE("[PR106] BBinder::transact UNRESOLVED");
+        LOGE("[PR115] Dynamic scan: missing symbols base_vt=%p ontransact=%p java_vt=%p",
+             base_vtable, base_ontransact, java_vtable);
+    }
+
+    // ── Estrategia B: Fallback estático al índice 19 ─────────────────────────
+    if (!target_fn && java_vtable) {
+        // Índice 19 confirmado por análisis offline del binario de este dispositivo.
+        // vtable[19] @ +0x98 desde _ZTV11JavaBBinder:
+        // - 488 bytes de tamaño (función más grande de JavaBBinder)
+        // - 8 instrucciones BL (más llamadas externas = llama a la JVM)
+        constexpr int STATIC_ONTRANSACT_IDX = 19;
+        void** j_vt = reinterpret_cast<void**>(java_vtable);
+        void* candidate = j_vt[STATIC_ONTRANSACT_IDX];
+        if (candidate) {
+            LOGD("[PR115] Static fallback: vtable[%d] = %p", STATIC_ONTRANSACT_IDX, candidate);
+            target_fn = candidate;
+        } else {
+            LOGE("[PR115] Static fallback: vtable[%d] is null", STATIC_ONTRANSACT_IDX);
+        }
+    }
+
+    // ── Hook final ────────────────────────────────────────────────────────────
+    if (target_fn) {
+        DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
+                  (void**)&orig_jbbinder_ontransact);
+        LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p", target_fn);
+    } else {
+        LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
+    }
+
+    // PR118: El punto de entrada de todos los objetos Location vía Binder
+    void* readFromParcel = resolveRuntimeSymbol("_ZN7android16Location_readFromParcelEP7_JNIEnvP8_jobjectS3_");
+    if (readFromParcel) {
+        DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
+        LOGE("[PR118] Location::readFromParcel hooked OK");
+    } else {
+        LOGE("[PR118] Location::readFromParcel UNRESOLVED");
     }
 }
 

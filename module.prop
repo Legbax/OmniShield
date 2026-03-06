@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v13.5
-versionCode=13500
+version=v16.0
+versionCode=16000
 author=Legba
-description=PR108 — dlsym fallback simbolos privados MIUI + PR105b offset fix + PR107 GMS hook
+description=PR118 — Location Parcel Unmarshaler (Deep Intercept)
