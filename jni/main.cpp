@@ -4430,18 +4430,7 @@ static void* my_android_dlopen_ext(const char* filename, int flags, const void* 
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
         LOGE("PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
-
-        // PR138: One-time diagnostic — verify Binder hooks are installed.
-        // Fires during Maps runtime (when Maps loads native libs), guaranteed to be in logcat.
-        static std::atomic<bool> s_binderDiagDone{false};
-        if (!s_binderDiagDone.exchange(true)) {
-            LOGE("[PR138-DIAG] Binder hooks: ipc_transact orig=%p, bbinder orig=%p, "
-                 "jbbinder orig=%p, latBits=%lld, lonBits=%lld, pagesPatched=%d, proc='%s'",
-                 (void*)orig_ipc_transact, (void*)orig_bbinder_transact,
-                 (void*)orig_jbbinder_ontransact,
-                 (long long)g_cachedLatBits.load(), (long long)g_cachedLonBits.load(),
-                 (int)g_pagesPatched, g_currentProcessName.c_str());
-        }
+        logBinderDiag();
     }
 
     g_dlopenReapplyDepth--;
@@ -4462,6 +4451,7 @@ static void* my_dlopen_hook(const char* filename, int flags) {
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
         LOGE("PR87: Re-applied PLT hooks after dlopen(%s)", filename ? filename : "(null)");
+        logBinderDiag();
     }
 
     g_dlopenReapplyDepth--;
@@ -4912,6 +4902,21 @@ static bool isLocationCallback(const void* data_parcel, uint32_t code) {
 // En términos de puntero de función C: (void* self, uint32_t code, void* data, void* reply, uint32_t flags)
 using fn_jbbinder_ontransact = int32_t(*)(void*, uint32_t, const void*, void*, uint32_t);
 static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
+
+// PR138: One-time diagnostic — verify Binder hooks are installed.
+// Called from dlopen hooks (fires during Maps runtime, guaranteed in logcat).
+// Defined here so all orig_* variables above are already in scope.
+static void logBinderDiag() {
+    static std::atomic<bool> s_binderDiagDone{false};
+    if (!s_binderDiagDone.exchange(true)) {
+        LOGE("[PR138-DIAG] Binder hooks: ipc_transact orig=%p, bbinder orig=%p, "
+             "jbbinder orig=%p, latBits=%lld, lonBits=%lld, pagesPatched=%d, proc='%s'",
+             (void*)orig_ipc_transact, (void*)orig_bbinder_transact,
+             (void*)orig_jbbinder_ontransact,
+             (long long)g_cachedLatBits.load(), (long long)g_cachedLonBits.load(),
+             (int)g_pagesPatched, g_currentProcessName.c_str());
+    }
+}
 
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
