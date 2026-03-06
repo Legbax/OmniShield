@@ -92,6 +92,11 @@ static long   g_seedVersion        = 0;
 static bool   g_sensorHasHeartRate = false;
 static bool   g_sensorHasBarometer = false;
 
+// PR121: Firma runtime de identidad/ubicación aplicada a procesos persistentes.
+// Si cambia (perfil, seed o pin de ubicación), reiniciamos stack de ubicación
+// para forzar que Maps/GMS relancen procesos con el config nuevo.
+static std::string g_lastRuntimeIdentitySig;
+
 // PR44: Camera2 — globals ópticos cargados desde findProfile() en postAppSpecialize
 // Rear camera (siempre activo)
 static float   g_camPhysicalWidth   = 6.40f;
@@ -447,6 +452,46 @@ static bool readConfigViaCompanion(zygisk::Api *api) {
          g_config.size(),
          g_config.count("scoped_apps") ? g_config["scoped_apps"].c_str() : "(none)");
     return true;
+}
+
+// PR121: Construye una firma de los campos que afectan spoof de ubicación.
+static std::string buildRuntimeIdentitySignature(const std::map<std::string, std::string>& cfg) {
+    static const char* kKeys[] = {
+        "profile",
+        "master_seed",
+        "seed_version",
+        "location_lat",
+        "location_lon",
+        "location_alt",
+        "jitter",
+        nullptr
+    };
+    std::ostringstream oss;
+    for (int i = 0; kKeys[i]; ++i) {
+        const char* key = kKeys[i];
+        auto it = cfg.find(key);
+        oss << key << '=';
+        if (it != cfg.end()) oss << it->second;
+        oss << ';';
+    }
+    return oss.str();
+}
+
+// PR121: Reinicia procesos críticos de ubicación para evitar coordenadas stale
+// en procesos persistentes de GMS/Maps (que pueden seguir vivos tras cambios).
+static void restartLocationRuntime() {
+    system("sh -c '"
+           "am force-stop com.google.android.apps.maps 2>/dev/null; "
+           "am force-stop com.google.android.gms 2>/dev/null; "
+           "killall com.google.android.gms.unstable 2>/dev/null; "
+           "killall com.google.android.gms.persistent 2>/dev/null; "
+           "killall com.google.android.gms.location.history 2>/dev/null; "
+           "killall com.android.location.fused 2>/dev/null; "
+           "killall com.xiaomi.location.fused 2>/dev/null; "
+           "killall com.mediatek.location.lppe.main 2>/dev/null; "
+           "killall com.mediatek.location.ppe.main 2>/dev/null"
+           "' &");
+    LOGE("[PR121] Restarted Maps/GMS location stack after identity/location change");
 }
 
 bool shouldHide(const char* key) {
@@ -5185,9 +5230,12 @@ public:
                 // lleguen a GMS/Maps, incluso si el usuario olvidó agregarlos.
                 if (!g_isTargetApp) {
                     static const char* kLocationProducers[] = {
+                        "com.mediatek.location.lppe.main",
                         "com.mediatek.location.ppe.main",
                         "com.xiaomi.location.fused",
                         "com.android.location.fused",
+                        "com.google.android.gms.unstable",
+                        "com.google.android.gms.persistent",
                         nullptr
                     };
                     for (int i = 0; kLocationProducers[i]; ++i) {
@@ -6849,6 +6897,12 @@ static void companion_handler(int client) {
         }
 
         if (!profileName.empty()) {
+            std::string runtimeSig = buildRuntimeIdentitySignature(localConfig);
+            if (runtimeSig != g_lastRuntimeIdentitySig) {
+                g_lastRuntimeIdentitySig = runtimeSig;
+                restartLocationRuntime();
+            }
+
             static std::string s_lastWrittenProfile;
             if (profileName != s_lastWrittenProfile) {
                 s_lastWrittenProfile = profileName;
