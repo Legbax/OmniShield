@@ -4953,10 +4953,9 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
-            // PR139: Payload-size fallback — if token didn't match but parcel is large
-            // enough to contain a Location object (>256 bytes), try Doppler scan anyway.
-            // Catches vendor wrappers (Samsung, Xiaomi) using non-standard interfaces.
-            bool tryDopplerFallback = !looksLocation && sz > 256;
+            // PR140: Removed tryDopplerFallback — blind Doppler scan on non-location
+            // parcels (sz>256) was corrupting Binder data system-wide, causing
+            // "Bundle length not aligned by 4" / "Unknown URI type" crashes.
 
             // PR130: Log first 3 location-looking tokens
             static std::atomic<int> s_locTokenCount{0};
@@ -4977,7 +4976,7 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 }
             }
 
-            if ((looksLocation || tryDopplerFallback) && (latBits != 0 || lonBits != 0)) {
+            if (looksLocation && (latBits != 0 || lonBits != 0)) {
                 // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
                 // Copiamos, mutamos, redirigimos mData ANTES del handler original.
                 shadowBuf = new uint8_t[sz];
@@ -4987,13 +4986,10 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119/PR139: For known location interfaces, try known offsets first.
-                // For Doppler fallback (unknown token), skip known offsets — go straight to scan.
-                if (looksLocation) {
-                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
-                }
+                // PR119: Try known offsets first, then Doppler scan as last resort.
+                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
 
                 size_t dopplerOffset = 0;
                 if (!mutated) {
@@ -5059,10 +5055,10 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
-            // PR139: Payload-size fallback for unknown-token interfaces
-            bool tryDopplerFallback = !looksLocation && sz > 256;
+            // PR140: Removed tryDopplerFallback — blind Doppler scan on non-location
+            // parcels was corrupting Binder data system-wide.
 
-            if (looksLocation || tryDopplerFallback) {
+            if (looksLocation) {
                 shadowBuf = new uint8_t[sz];
                 memcpy(shadowBuf, raw, sz);
 
@@ -5070,12 +5066,10 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR139: Known offsets only for known location interfaces
-                if (looksLocation) {
-                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
-                }
+                // PR119: Try known offsets first, then Doppler scan as last resort.
+                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
 
                 size_t dopplerOffset = 0;
                 if (!mutated) {
