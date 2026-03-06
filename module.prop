@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v19.0
-versionCode=19000
+version=v20.0
+versionCode=20000
 author=Legba
-description=PR130 — Diagnostic logging for Binder location hooks
+description=PR131 — Check DobbyHook return values + verify hook patching

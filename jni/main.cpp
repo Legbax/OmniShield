@@ -5111,8 +5111,8 @@ static void applyBBinderHook() {
     void* sym106 = resolveLibbinderSymbol(
         "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
     if (sym106) {
-        DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
-        LOGE("[PR106] BBinder::transact hooked @ %p (fallback)", sym106);
+        int rc106 = DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
+        LOGE("[PR106] BBinder::transact hook rc=%d @ %p (orig=%p)", rc106, sym106, (void*)orig_bbinder_transact);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -5187,9 +5187,19 @@ static void applyBBinderHook() {
 
     // ── Hook final ────────────────────────────────────────────────────────────
     if (target_fn) {
-        DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
+        int rc115 = DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
                   (void**)&orig_jbbinder_ontransact);
-        LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p", target_fn);
+        if (rc115 == 0) {
+            LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p (orig=%p)", target_fn, (void*)orig_jbbinder_ontransact);
+        } else {
+            LOGE("[PR115] JavaBBinder::onTransact DobbyHook FAILED rc=%d @ %p", rc115, target_fn);
+        }
+        // PR131: Verify patch
+        {
+            uint32_t insn = 0;
+            memcpy(&insn, target_fn, 4);
+            LOGE("[PR131] JavaBBinder verify: first_insn=0x%08x orig_ptr=%p", insn, (void*)orig_jbbinder_ontransact);
+        }
     } else {
         LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
     }
@@ -5219,8 +5229,8 @@ static void applyBBinderHook() {
         // Fallback: search for any symbol containing "Location" and "readFromParcel"
         // via dlopen + iteration (future enhancement)
         if (readFromParcel) {
-            DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
-            LOGE("[PR118] Location::readFromParcel hooked OK @ %p", readFromParcel);
+            int rc118 = DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
+            LOGE("[PR118] Location::readFromParcel hook rc=%d @ %p (orig=%p)", rc118, readFromParcel, (void*)orig_Location_readFromParcel);
         } else {
             // Not an error on most ROMs — readFromParcel is pure Java on Android 11.
             // Location interception relies on Binder hooks (PR105/119) instead.
@@ -5233,8 +5243,18 @@ static void applyBinderHooks() {
     void* sym = resolveLibbinderSymbol(
         "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
     if (sym) {
-        DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
-        LOGE("[PR105] IPCThreadState::transact hooked OK @ %p", sym);
+        int rc105 = DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
+        if (rc105 == 0) {
+            LOGE("[PR105] IPCThreadState::transact hooked OK @ %p (orig=%p)", sym, (void*)orig_ipc_transact);
+        } else {
+            LOGE("[PR105] IPCThreadState::transact DobbyHook FAILED rc=%d @ %p", rc105, sym);
+        }
+        // PR131: Verify patch — read first 4 bytes at hooked address
+        {
+            uint32_t insn = 0;
+            memcpy(&insn, sym, 4);
+            LOGE("[PR131] IPCThreadState verify: first_insn=0x%08x orig_ptr=%p", insn, (void*)orig_ipc_transact);
+        }
     } else {
         LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
     }
