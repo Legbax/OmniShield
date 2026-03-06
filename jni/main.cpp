@@ -4478,20 +4478,21 @@ static void* my_dlopen_hook(const char* filename, int flags) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Acceso al Parcel via offsets del struct (arm64, Android 11).
-// Parcel NO tiene vtable. mData es el primer campo en offset 0x00.
+// Layout: mError(int32 @0x00) + pad(4) + mData(ptr @0x08) + mDataSize(size_t @0x10)
+// Parcel NO tiene vtable, pero mData NO es el primer campo — mError lo es.
 static inline const uint8_t* parcel_data(const void* p) {
     return *reinterpret_cast<const uint8_t* const*>(
-        static_cast<const uint8_t*>(p) + 0x00);
+        static_cast<const uint8_t*>(p) + 0x08);
 }
 static inline size_t parcel_dataSize(const void* p) {
     return *reinterpret_cast<const size_t*>(
-        static_cast<const uint8_t*>(p) + 0x08);
+        static_cast<const uint8_t*>(p) + 0x10);
 }
 // Escritura in-place en el buffer mData del reply (buffer privado del caller,
 // PROT_READ|PROT_WRITE — distinto del buffer PROT_READ de BBinder::transact).
 static inline void parcel_write_double_at(void* p, size_t offset, double val) {
     uint8_t* data = *reinterpret_cast<uint8_t**>(
-        static_cast<uint8_t*>(p) + 0x00);
+        static_cast<uint8_t*>(p) + 0x08);
     memcpy(data + offset, &val, sizeof(double));
 }
 
@@ -5504,14 +5505,29 @@ public:
         // PR85 removed this because DobbySymbolResolver("libc.so") may have returned
         // a PLT thunk or wrong address, causing SIGABRT. Now using dlsym(RTLD_DEFAULT)
         // for reliable resolution of the actual bionic function address.
-        // __system_property_find is NOT a thin syscall wrapper — it traverses the property
-        // trie in shared memory (~15-25 ARM64 instructions, 60-100 bytes), well above
-        // Dobby's 12-byte trampoline requirement.
         // This inline hook intercepts ALL callers including late-loaded .so files
         // (VDInfo's native lib, Snapchat's native lib) that aren't covered by PLT hooks.
+        //
+        // SAFETY: If __system_property_read_callback is too close (< 64 bytes),
+        // another module (PIF) may have already Dobby-hooked it, overwriting
+        // instructions in __system_property_find's body.  The Dobby orig-trampoline
+        // for _find would then execute corrupted code → SIGILL.
+        // In that case we fall back to PLT-only hooks.
         {
             void* find_func = dlsym(RTLD_DEFAULT, "__system_property_find");
-            if (find_func) {
+            void* cb_func   = dlsym(RTLD_DEFAULT, "__system_property_read_callback");
+            bool tooClose = false;
+            if (find_func && cb_func) {
+                ptrdiff_t gap = (uint8_t*)cb_func - (uint8_t*)find_func;
+                if (gap > 0 && gap < 64) {
+                    tooClose = true;
+                    LOGE("PR86: __system_property_find (%p) too close to "
+                         "__system_property_read_callback (%p) (gap=%td bytes) — "
+                         "skipping Dobby hook to avoid SIGILL conflict with PIF",
+                         find_func, cb_func, gap);
+                }
+            }
+            if (find_func && !tooClose) {
                 int ret = DobbyHook(find_func, (void*)my_system_property_find,
                                     (void**)&orig_system_property_find);
                 if (ret == 0) {
@@ -5520,7 +5536,7 @@ public:
                 } else {
                     LOGE("PR86: Dobby inline hook on __system_property_find FAILED (ret=%d) at %p, falling back to PLT only", ret, find_func);
                 }
-            } else {
+            } else if (!find_func) {
                 LOGE("PR86: dlsym(RTLD_DEFAULT, __system_property_find) returned NULL");
             }
         }
