@@ -4307,7 +4307,8 @@ static bool installPltHooks() {
 
     // Dummy vars for pltHookRegister oldFunc — we don't use these values.
     // The real originals were already set above via dlsym.
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr,
+         *d7 = nullptr, *d8 = nullptr;
 
     // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
     // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
@@ -4346,6 +4347,12 @@ static bool installPltHooks() {
             g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
                                    (void*)my_system_property_foreach, &d6);
         }
+        // PR138: PLT hooks for __system_property_get and __system_property_read_callback.
+        // These are NOT Dobby-hooked (PIF conflict), so PLT hooks are always safe here.
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get",
+                               (void*)my_system_property_get, &d7);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback",
+                               (void*)my_system_property_read_callback, &d8);
     }
 
     bool ok = g_api->pltHookCommit();
@@ -4370,7 +4377,8 @@ static void reapplyPltHooksForNewLibraries() {
     if (elfs.empty()) return;
 
     void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr,
-         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
+         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr,
+         *d7 = nullptr, *d8 = nullptr;
 
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
@@ -4393,6 +4401,11 @@ static void reapplyPltHooksForNewLibraries() {
             g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
                                    (void*)my_posix_spawnp, &d6);
         }
+        // PR138: PLT hooks for __system_property_get and __system_property_read_callback.
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get",
+                               (void*)my_system_property_get, &d7);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback",
+                               (void*)my_system_property_read_callback, &d8);
     }
 
     bool ok = g_api->pltHookCommit();
@@ -4417,6 +4430,18 @@ static void* my_android_dlopen_ext(const char* filename, int flags, const void* 
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
         LOGE("PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
+
+        // PR138: One-time diagnostic — verify Binder hooks are installed.
+        // Fires during Maps runtime (when Maps loads native libs), guaranteed to be in logcat.
+        static std::atomic<bool> s_binderDiagDone{false};
+        if (!s_binderDiagDone.exchange(true)) {
+            LOGE("[PR138-DIAG] Binder hooks: ipc_transact orig=%p, bbinder orig=%p, "
+                 "jbbinder orig=%p, latBits=%lld, lonBits=%lld, pagesPatched=%d, proc='%s'",
+                 (void*)orig_ipc_transact, (void*)orig_bbinder_transact,
+                 (void*)orig_jbbinder_ontransact,
+                 (long long)g_cachedLatBits.load(), (long long)g_cachedLonBits.load(),
+                 (int)g_pagesPatched, g_currentProcessName.c_str());
+        }
     }
 
     g_dlopenReapplyDepth--;
@@ -5579,39 +5604,29 @@ public:
             LOGE("PR120: mmap64 symbol unresolved (resolver chain exhausted)");
         }
 
-        void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
-        if (sysprop_func) {
-            uint32_t first_insn = *reinterpret_cast<uint32_t*>(sysprop_func);
-            if (first_insn == 0x58000051) {
-                LOGE("PR86: __system_property_get already Dobby-hooked "
-                     "(first_insn=0x%08x @ %p) — skipping to avoid double-hook SIGILL",
-                     first_insn, sysprop_func);
+        // PR138: NEVER Dobby-hook __system_property_get or __system_property_read_callback.
+        // PIF also Dobby-hooks these functions. Module ordering is unpredictable:
+        // if OmniShield hooks first and PIF hooks second, PIF's trampoline overwrites
+        // OmniShield's, and OmniShield's orig trampoline jumps to corrupted data → SIGILL.
+        // patchPropertyPages() + PLT hooks provide sufficient coverage without Dobby.
+        {
+            void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
+            LOGE("PR138: __system_property_get @ %p — skipping Dobby hook (PIF conflict avoidance)",
+                 sysprop_func);
+            if (!orig_system_property_get) {
                 orig_system_property_get =
                     reinterpret_cast<decltype(orig_system_property_get)>(
                         dlsym(RTLD_DEFAULT, "__system_property_get"));
-            } else {
-                DobbyHook(sysprop_func, (void*)my_system_property_get,
-                          (void**)&orig_system_property_get);
             }
         }
-
-        void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
-        if (sysprop_cb_func) {
-            // Detect if another module (PIF) already Dobby-hooked this function.
-            // Dobby's ARM64 trampoline starts with ldr x17, #8 (0x58000051).
-            // Double-hooking with Dobby corrupts the orig trampoline → SIGILL.
-            uint32_t first_insn = *reinterpret_cast<uint32_t*>(sysprop_cb_func);
-            if (first_insn == 0x58000051) {
-                LOGE("PR86: __system_property_read_callback already Dobby-hooked "
-                     "(first_insn=0x%08x @ %p) — skipping to avoid double-hook SIGILL",
-                     first_insn, sysprop_cb_func);
-                // Fallback: set orig via dlsym (calls through PIF's hook → real function)
+        {
+            void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
+            LOGE("PR138: __system_property_read_callback @ %p — skipping Dobby hook (PIF conflict avoidance)",
+                 sysprop_cb_func);
+            if (!orig_system_property_read_callback) {
                 orig_system_property_read_callback =
                     reinterpret_cast<decltype(orig_system_property_read_callback)>(
                         dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
-            } else {
-                DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback,
-                          (void**)&orig_system_property_read_callback);
             }
         }
 
