@@ -10,6 +10,17 @@ chcon u:object_r:system_data_file:s0 /data/adb/.omni_data 2>/dev/null
 chcon u:object_r:system_data_file:s0 /data/adb/.omni_data/.identity.cfg 2>/dev/null
 
 # ============================================================
+# PR126 safety net: restore location if disabled from previous boot crash
+# ============================================================
+# If service.sh crashed between location_mode=0 and restore, the device
+# reboots with location disabled. This checks for the flag and restores.
+LOC_BLOCKED_FLAG="/data/adb/.omni_data/.location_blocked"
+if [ -f "$LOC_BLOCKED_FLAG" ]; then
+    settings put secure location_mode 3 2>/dev/null
+    rm -f "$LOC_BLOCKED_FLAG"
+fi
+
+# ============================================================
 # PR37: SSAID Injection — OmniShield
 # ============================================================
 # El SSAID (Settings.Secure "android_id") en Android 8+ es
@@ -186,6 +197,29 @@ fi
 # ============================================================
 
 # ============================================================
+# PR126: Block location globally until Zygisk is ready
+# ============================================================
+# On Xiaomi/KernelSU, Zygisk loads ~40s after boot. Maps/GMS start
+# much earlier and receive real GPS during that window.
+# We disable location_mode at boot_completed (before Maps can get a fix),
+# then PR125 restores it after Zygisk is confirmed ready.
+#
+# location_mode: 0=off, 3=high_accuracy
+# Unlike appops, this is a global toggle (not per-app persistent),
+# and the user can recover manually from Quick Settings if needed.
+(
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        sleep 1
+    done
+    touch "$LOC_BLOCKED_FLAG"
+    settings put secure location_mode 0 2>/dev/null
+    log -t OmniShield "[PR126] Location disabled globally — waiting for Zygisk"
+) &
+# ============================================================
+# FIN PR126
+# ============================================================
+
+# ============================================================
 # PR125: Signal-based Maps/GMS restart after Zygisk is confirmed ready
 # ============================================================
 # PR123's fixed 5s delay was insufficient — logcat showed a 31-second
@@ -213,7 +247,8 @@ fi
     done
 
     if [ -f "$READY_FLAG" ]; then
-        log -t OmniShield "[PR125] Zygisk ready (waited ${_waited}s). Killing Maps/GMS..."
+        log -t OmniShield "[PR125] Zygisk ready (waited ${_waited}s). Killing location stack..."
+        # Kill all location-related processes so they restart with Zygisk hooks
         am force-stop com.google.android.apps.maps 2>/dev/null
         killall com.google.android.gms 2>/dev/null
         killall com.google.android.gms.unstable 2>/dev/null
@@ -222,9 +257,18 @@ fi
         killall com.xiaomi.location.fused 2>/dev/null
         killall com.mediatek.location.lppe.main 2>/dev/null
         killall com.mediatek.location.ppe.main 2>/dev/null
-        log -t OmniShield "[PR125] Maps/GMS killed — will restart with Zygisk hooks"
+        # Small delay to let processes die before re-enabling location
+        sleep 1
+        # PR126: Restore location — processes will restart with hooks active
+        settings put secure location_mode 3 2>/dev/null
+        rm -f "$LOC_BLOCKED_FLAG"
+        log -t OmniShield "[PR125] Location restored + Maps/GMS killed → restart with hooks"
     else
-        log -t OmniShield "[PR125] TIMEOUT: Zygisk not ready after 60s — hooks may not work"
+        log -t OmniShield "[PR125] TIMEOUT: Zygisk not ready after 60s"
+        # Restore location anyway to not leave the device broken
+        settings put secure location_mode 3 2>/dev/null
+        rm -f "$LOC_BLOCKED_FLAG"
+        log -t OmniShield "[PR125] Location restored (timeout fallback)"
     fi
 ) &
 # ============================================================
