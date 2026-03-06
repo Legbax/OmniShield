@@ -97,6 +97,9 @@ static bool   g_sensorHasBarometer = false;
 // para forzar que Maps/GMS relancen procesos con el config nuevo.
 static std::string g_lastRuntimeIdentitySig;
 
+// PR134: Current process name for per-process hook decisions.
+static std::string g_currentProcessName;
+
 // PR44: Camera2 — globals ópticos cargados desde findProfile() en postAppSpecialize
 // Rear camera (siempre activo)
 static float   g_camPhysicalWidth   = 6.40f;
@@ -4794,7 +4797,8 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
     static std::atomic<int> s_ipcCount{0};
     int _pr130_ipc = s_ipcCount.fetch_add(1, std::memory_order_relaxed);
     if (_pr130_ipc < 10) {
-        LOGE("[PR130] ipc_transact called: handle=%d code=%u call#%d", handle, code, _pr130_ipc);
+        LOGE("[PR130] ipc_transact called: handle=%d code=%u call#%d proc='%s'",
+             handle, code, _pr130_ipc, g_currentProcessName.c_str());
     }
 
     // PR105: detección AOSP getLastLocation/getCurrentLocation (muta REPLY)
@@ -5241,6 +5245,13 @@ static void applyBinderHooks() {
     } else {
         LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
     }
+    // PR134: Skip BBinder vtable hooks in GMS persistent — fragile process,
+    // PR105 IPCThreadState::transact is sufficient for location spoofing.
+    if (g_currentProcessName.find("com.google.android.gms") != std::string::npos) {
+        LOGE("[PR134] Skipping BBinder hooks in GMS process '%s'",
+             g_currentProcessName.c_str());
+        return;
+    }
     applyBBinderHook();
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5283,6 +5294,7 @@ public:
             }
             if (p) {
                 std::string proc(p);
+                g_currentProcessName = proc;
                 LOGD("[scope] process='%s' config_keys=%zu", proc.c_str(), g_config.size());
                 if (g_config.count("scoped_apps")) {
                     std::string scopedRaw = g_config["scoped_apps"];
