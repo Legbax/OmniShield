@@ -4193,6 +4193,37 @@ static void patchPropertyPages() {
     int patched = 0;
     int remap_ok = 0, remap_fail = 0;
 
+    // PR143: Build a set of valid property page ranges from /proc/self/maps.
+    // Only remap pages that belong to __properties__ mappings — never touch
+    // library pages (libcutils, libc, etc.) even if a corrupted prop_info*
+    // points there. Without this guard, a stale/wrong pointer causes
+    // mremap+mprotect(PROT_READ) on a library data page → SEGV_ACCERR
+    // when another thread (JIT, GC) writes to a global on that page.
+    std::set<uintptr_t> propPages;
+    {
+        int maps_fd = (int)syscall(__NR_openat, AT_FDCWD, "/proc/self/maps",
+                                   O_RDONLY | O_CLOEXEC);
+        FILE* mfp = maps_fd >= 0 ? fdopen(maps_fd, "re") : nullptr;
+        if (mfp) {
+            char mline[512];
+            while (fgets(mline, sizeof(mline), mfp)) {
+                if (!strstr(mline, "__properties__")) continue;
+                uintptr_t mstart = 0, mend = 0;
+                if (sscanf(mline, "%lx-%lx", &mstart, &mend) == 2 && mstart < mend) {
+                    for (uintptr_t pg = mstart & ~((uintptr_t)ps - 1);
+                         pg < mend; pg += ps) {
+                        propPages.insert(pg);
+                    }
+                }
+            }
+            fclose(mfp);
+        } else {
+            if (maps_fd >= 0) close(maps_fd);
+        }
+        LOGE("PR143: property page whitelist: %zu pages from __properties__ mappings",
+             propPages.size());
+    }
+
     LOGE("PR91: Phase 2 — remapping property pages (pagesize=%ld)", ps);
 
     for (const auto& e : patches) {
@@ -4206,6 +4237,13 @@ static void patchPropertyPages() {
 
         for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
             if (remapped.count(pg)) continue;
+
+            // PR143: Validate page belongs to __properties__ area.
+            if (!propPages.empty() && !propPages.count(pg)) {
+                LOGE("PR143: SKIPPING page %p — NOT in __properties__ area (prop_info=%p)",
+                     (void*)pg, (void*)pi_addr);
+                continue;
+            }
 
             // Step 1: Allocate a temporary private page at any address
             void* tmp = mmap(nullptr, ps, PROT_READ | PROT_WRITE,
