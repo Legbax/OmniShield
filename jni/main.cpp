@@ -4682,6 +4682,8 @@ static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
 // ─────────────────────────────────────────────────────────────────────────────
 
 // 3. Adaptador para respuestas síncronas (IPCThreadState::transact)
+// PR137: Added Doppler scan fallback for GMS FusedLocation replies
+// (SafeParcelable-wrapped Location objects with different header layout).
 static void mutateLocationReply(void* reply) {
     if (!reply) return;
     size_t sz = parcel_dataSize(reply);
@@ -4691,36 +4693,43 @@ static void mutateLocationReply(void* reply) {
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
     if (latBits == 0 && lonBits == 0) return;
 
-    const uint8_t* raw = parcel_data(reply);
-    int32_t providerLen = 0;
-    memcpy(&providerLen, raw + 12, 4);
-    if (providerLen < 0 || providerLen > 64) return;
-
-    // Calcular bytes del proveedor con padding
-    size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
-
-    // PR105b: Leer mFieldsMask para calcular bytes opcionales antes de mLatitude.
-    // offset de mFieldsMask = 12 + providerBytes + 24 (mTime + mElapsedRtNs + mElapsedRtUncNs)
-    size_t maskOffset = 12 + providerBytes + 24;
-
-    if (sz < maskOffset + 4) return;
-    int32_t fieldsMask = 0;
-    memcpy(&fieldsMask, raw + maskOffset, 4);
-
-    size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
-    size_t lonOffset = latOffset + 8;
-
-    if (sz < lonOffset + 8) return; // reply demasiado corto
-
     double lat, lon;
     memcpy(&lat, &latBits, 8);
     memcpy(&lon, &lonBits, 8);
 
-    parcel_write_double_at(reply, latOffset, lat);
-    parcel_write_double_at(reply, lonOffset, lon);
+    // Get raw mData pointer for reading and Doppler scan
+    uint8_t* raw = *reinterpret_cast<uint8_t**>(
+        static_cast<uint8_t*>(reply) + 0x08);
+    if (!raw) return;
 
-    LOGD("[PR105b] Location reply mutated: lat=%.6f lon=%.6f (mask=0x%02x)",
-         lat, lon, (uint32_t)fieldsMask);
+    // 1) Try AOSP ILocationManager fixed-offset format
+    int32_t providerLen = 0;
+    memcpy(&providerLen, raw + 12, 4);
+    if (providerLen >= 0 && providerLen <= 64) {
+        size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+        size_t maskOffset = 12 + providerBytes + 24;
+        if (sz >= maskOffset + 4) {
+            int32_t fieldsMask = 0;
+            memcpy(&fieldsMask, raw + maskOffset, 4);
+            size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
+            size_t lonOffset = latOffset + 8;
+            if (sz >= lonOffset + 8) {
+                parcel_write_double_at(reply, latOffset, lat);
+                parcel_write_double_at(reply, lonOffset, lon);
+                LOGD("[PR105b] Location reply mutated (AOSP): lat=%.6f lon=%.6f (mask=0x%02x)",
+                     lat, lon, (uint32_t)fieldsMask);
+                return;
+            }
+        }
+    }
+
+    // 2) PR137: Doppler scan fallback — handles GMS SafeParcelable-wrapped
+    //    Location replies where the fixed AOSP offsets don't match.
+    size_t dopplerOffset = 0;
+    if (mutateLocationByDopplerScan(raw, sz, lat, lon, dopplerOffset)) {
+        LOGD("[PR137] Location reply mutated (Doppler@%zu): lat=%.6f lon=%.6f",
+             dopplerOffset, lat, lon);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4758,10 +4767,10 @@ static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
 
 static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                                 const void* data, void* reply, uint32_t flags) {
-    // PR130: Verify outgoing hook fires (first 5 invocations only)
+    // PR130: Verify outgoing hook fires (first 25 invocations for diagnostics)
     static std::atomic<int> s_ipcCount{0};
     int _pr130_ipc = s_ipcCount.fetch_add(1, std::memory_order_relaxed);
-    if (_pr130_ipc < 10) {
+    if (_pr130_ipc < 25) {
         LOGE("[PR130] ipc_transact called: handle=%d code=%u call#%d proc='%s'",
              handle, code, _pr130_ipc, g_currentProcessName.c_str());
     }
@@ -4887,8 +4896,9 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 }
 
                 if (mutated) {
+                    // PR137: mData is at Parcel+0x08 (after mError+pad), not +0x00
                     uint8_t** mDataField = reinterpret_cast<uint8_t**>(
-                        const_cast<void*>(data));
+                        const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
                     LOGD("[PR119] mutated BEFORE orig: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f",
@@ -4906,20 +4916,90 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
     int32_t status = orig_jbbinder_ontransact(self, code, data, reply, flags);
 
     if (mutated && savedMData) {
+        // PR137: mData at Parcel+0x08
         uint8_t** mDataField = reinterpret_cast<uint8_t**>(
-            const_cast<void*>(data));
+            const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
         *mDataField = savedMData;
     }
-    if (shadowBuf) { delete[] shadowBuf; shadowBuf = nullptr; }
+    delete[] shadowBuf;
 
     return status;
 }
 
-// ── Conservar my_bbinder_transact como stub vacío para que el linker no rompa.
-// applyBBinderHook() ya no lo usará.
+// PR137: BBinder::transact now intercepts incoming location callbacks.
+// PR115 (JavaBBinder vtable hook) fails on this ROM (_ZTV7android7BBinder=0x0),
+// so we catch incoming Binder calls here instead.  BBinder::transact dispatches
+// to JavaBBinder::onTransact internally, so hooking here catches everything.
+// Incoming location callbacks (e.g. ILocationCallback.onLocationResult from GMS)
+// carry the Location in the DATA parcel.  We shadow-copy + mutate before dispatch.
 static int32_t my_bbinder_transact(void* self, uint32_t code,
                                    const void* data, void* reply, uint32_t flags) {
-    return orig_bbinder_transact(self, code, data, reply, flags);
+    if (!orig_bbinder_transact) return 0;
+
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+
+    bool mutated = false;
+    uint8_t* savedMData = nullptr;
+    uint8_t* shadowBuf = nullptr;
+
+    if (data && (latBits != 0 || lonBits != 0)) {
+        size_t sz = parcel_dataSize(data);
+        const uint8_t* raw = parcel_data(data);
+
+        if (sz >= 16 && raw) {
+            std::string token;
+            size_t parsedHdr = 0;
+            bool hasToken = parseBinderInterfaceToken(raw, sz, token, parsedHdr);
+            bool looksLocation = hasToken &&
+                (token.find("location") != std::string::npos ||
+                 token.find("fused") != std::string::npos);
+
+            if (looksLocation) {
+                shadowBuf = new uint8_t[sz];
+                memcpy(shadowBuf, raw, sz);
+
+                double lat, lon;
+                memcpy(&lat, &latBits, 8);
+                memcpy(&lon, &lonBits, 8);
+
+                // Try known Location offsets then Doppler scan
+                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+
+                size_t dopplerOffset = 0;
+                if (!mutated) {
+                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                }
+
+                if (mutated) {
+                    // Swap mData pointer — mData is at Parcel+0x08 (after mError+pad)
+                    uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+                        const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+                    savedMData = *mDataField;
+                    *mDataField = shadowBuf;
+                    LOGD("[PR137] bbinder location mutated: code=%u token='%s' lat=%.6f lon=%.6f",
+                         code, token.c_str(), lat, lon);
+                } else {
+                    delete[] shadowBuf;
+                    shadowBuf = nullptr;
+                }
+            }
+        }
+    }
+
+    int32_t status = orig_bbinder_transact(self, code, data, reply, flags);
+
+    // Restore original mData pointer
+    if (mutated && savedMData) {
+        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+            const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+        *mDataField = savedMData;
+    }
+    delete[] shadowBuf;
+
+    return status;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
