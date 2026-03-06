@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v23.0
-versionCode=23000
+version=v24.0
+versionCode=24000
 author=Legba
-description=PR134 — Disable PR107 GMS parcel mutation (SIGSEGV fix)
+description=PR135 — Skip all Binder hooks in GMS (Dobby trampoline SIGSEGV fix)

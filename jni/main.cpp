@@ -5227,6 +5227,16 @@ static void applyBBinderHook() {
 }
 
 static void applyBinderHooks() {
+    // PR135: Skip ALL Binder hooks in GMS — Dobby can't safely relocate
+    // IPCThreadState::transact's prologue on this ROM (SIGSEGV in trampoline
+    // at <anonymous> region). GMS is a location provider, not consumer;
+    // PR105 REPLY mutation only benefits Maps.
+    if (g_currentProcessName.find("com.google.android.gms") != std::string::npos) {
+        LOGE("[PR135] Skipping ALL Binder hooks in GMS process '%s'",
+             g_currentProcessName.c_str());
+        return;
+    }
+
     void* sym = resolveLibbinderSymbol(
         "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
     if (sym) {
@@ -5244,13 +5254,6 @@ static void applyBinderHooks() {
         }
     } else {
         LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
-    }
-    // PR134: Skip BBinder vtable hooks in GMS persistent — fragile process,
-    // PR105 IPCThreadState::transact is sufficient for location spoofing.
-    if (g_currentProcessName.find("com.google.android.gms") != std::string::npos) {
-        LOGE("[PR134] Skipping BBinder hooks in GMS process '%s'",
-             g_currentProcessName.c_str());
-        return;
     }
     applyBBinderHook();
 }
