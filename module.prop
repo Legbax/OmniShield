@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v21.0
-versionCode=21000
+version=v22.0
+versionCode=22000
 author=Legba
-description=PR132 — Integrate real Dobby library (replace stub)
+description=PR133 — Disable PR115 static vtable fallback (crash loop fix)

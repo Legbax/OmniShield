@@ -4859,6 +4859,9 @@ static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
 
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
+    // PR133: Safety guard — orig must be set (hook installed correctly).
+    if (!orig_jbbinder_ontransact) return 0;
+
     // PR130: Verify hook is being called (first 5 invocations only)
     static std::atomic<int> s_callCount{0};
     int _pr130_n = s_callCount.fetch_add(1, std::memory_order_relaxed);
@@ -5168,21 +5171,14 @@ static void applyBBinderHook() {
              base_vtable, base_ontransact, java_vtable);
     }
 
-    // ── Estrategia B: Fallback estático al índice 19 ─────────────────────────
+    // ── Estrategia B: Fallback estático DESHABILITADO (PR133) ────────────────
     if (!target_fn && java_vtable) {
-        // Índice 19 confirmado por análisis offline del binario de este dispositivo.
-        // vtable[19] @ +0x98 desde _ZTV11JavaBBinder:
-        // - 488 bytes de tamaño (función más grande de JavaBBinder)
-        // - 8 instrucciones BL (más llamadas externas = llama a la JVM)
-        constexpr int STATIC_ONTRANSACT_IDX = 19;
-        void** j_vt = reinterpret_cast<void**>(java_vtable);
-        void* candidate = j_vt[STATIC_ONTRANSACT_IDX];
-        if (candidate) {
-            LOGD("[PR115] Static fallback: vtable[%d] = %p", STATIC_ONTRANSACT_IDX, candidate);
-            target_fn = candidate;
-        } else {
-            LOGE("[PR115] Static fallback: vtable[%d] is null", STATIC_ONTRANSACT_IDX);
-        }
+        // PR133: Static fallback at index 19 is ROM-specific and caused a Maps
+        // crash loop on MIUI (vtable[19] was the wrong function; my_jbbinder_ontransact
+        // received wrong arguments → crash → respawn loop, hooks never fired).
+        // Dynamic scan requires _ZTV7android7BBinder which is 0x0 on this ROM.
+        // Disabling static fallback; PR105 IPCThreadState::transact is sufficient.
+        LOGE("[PR115] Static fallback DISABLED — dynamic scan failed (base_vt=0x0). Skipping PR115.");
     }
 
     // ── Hook final ────────────────────────────────────────────────────────────
