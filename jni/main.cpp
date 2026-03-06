@@ -161,6 +161,9 @@ static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
 static std::map<int, CachedContent> g_fdContentCache; // Cache content for stable reads
 static std::mutex g_fdMutex;
+static std::set<int> g_ashmemLoggedFds;
+static std::set<int> g_ashmemFds;
+static std::set<int> g_nonAshmemFds;
 
 // Original Pointers
 static int (*orig_system_property_get)(const char *key, char *value);
@@ -175,6 +178,8 @@ static off_t (*orig_lseek)(int fd, off_t offset, int whence);
 static off64_t (*orig_lseek64)(int fd, off64_t offset, int whence);
 static ssize_t (*orig_pread)(int fd, void* buf, size_t count, off_t offset);
 static ssize_t (*orig_pread64)(int fd, void* buf, size_t count, off64_t offset);
+static void* (*orig_mmap)(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
+static void* (*orig_mmap64)(void* addr, size_t length, int prot, int flags, int fd, off64_t offset);
 static int (*orig_stat)(const char*, struct stat*);
 static int (*orig_lstat)(const char*, struct stat*);
 static int (*orig_fstatat)(int dirfd, const char *pathname, struct stat *statbuf, int flags);
@@ -1690,6 +1695,63 @@ int my_system_property_get(const char *key, char *value) {
 // -----------------------------------------------------------------------------
 // Hooks: File I/O
 // -----------------------------------------------------------------------------
+static bool isAshmemFd(int fd, std::string* outPath = nullptr) {
+    if (fd < 0) return false;
+    char fdlink[64];
+    char target[512] = {};
+    snprintf(fdlink, sizeof(fdlink), "/proc/self/fd/%d", fd);
+    ssize_t n = (ssize_t)syscall(__NR_readlinkat, AT_FDCWD, fdlink, target, sizeof(target) - 1);
+    if (n <= 0) return false;
+    target[n] = '\0';
+    std::string t(target);
+    if (outPath) *outPath = t;
+    return t.find("/dev/ashmem") != std::string::npos;
+}
+
+static bool isAshmemFdCached(int fd) {
+    if (fd < 0) return false;
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        if (g_ashmemFds.count(fd)) return true;
+        if (g_nonAshmemFds.count(fd)) return false;
+    }
+
+    // Primera vez que vemos este FD: una sola sonda readlinkat.
+    // Esto evita el costo masivo por read()/pread() hot path.
+    bool ash = isAshmemFd(fd, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        if (ash) g_ashmemFds.insert(fd);
+        else g_nonAshmemFds.insert(fd);
+    }
+    return ash;
+}
+
+static void inheritAshmemCache(int oldfd, int newfd) {
+    if (oldfd < 0 || newfd < 0) return;
+    std::lock_guard<std::mutex> lock(g_fdMutex);
+    if (g_ashmemFds.count(oldfd)) {
+        g_ashmemFds.insert(newfd);
+        g_nonAshmemFds.erase(newfd);
+    } else if (g_nonAshmemFds.count(oldfd)) {
+        g_nonAshmemFds.insert(newfd);
+        g_ashmemFds.erase(newfd);
+    }
+}
+
+static void maybeLogAshmemFd(int fd, const char* from) {
+    if (!isAshmemFdCached(fd)) return;
+    {
+        std::lock_guard<std::mutex> lock(g_fdMutex);
+        if (g_ashmemLoggedFds.count(fd)) return;
+        g_ashmemLoggedFds.insert(fd);
+    }
+    std::string path;
+    (void)isAshmemFd(fd, &path); // una sola vez por fd (después del guard de g_ashmemLoggedFds)
+    LOGD("[PR120] ashmem fd observed via %s: fd=%d target='%s'",
+         from ? from : "?", fd, path.c_str());
+}
+
 int my_open(const char *pathname, int flags, mode_t mode) {
     // PR51: NO hookeamos open directamente — su body en Bionic llama openat()
     // que está hooked, creando recursión infinita. my_open se usa como helper
@@ -1740,6 +1802,7 @@ int my_open(const char *pathname, int flags, mode_t mode) {
     }
     int fd = orig_openat(AT_FDCWD, pathname, flags, mode);
     if (fd >= 0 && pathname) {
+        maybeLogAshmemFd(fd, "openat->open");
         FileType type = NONE;
         if (strstr(pathname, "/proc/version")) type = PROC_VERSION;
         else if (strstr(pathname, "/proc/cpuinfo")) type = PROC_CPUINFO;
@@ -2460,12 +2523,16 @@ int my_close(int fd) {
         g_fdMap.erase(fd);
         g_fdOffsetMap.erase(fd);
         g_fdContentCache.erase(fd);
+        g_ashmemLoggedFds.erase(fd);
+        g_ashmemFds.erase(fd);
+        g_nonAshmemFds.erase(fd);
     }
     return orig_close ? orig_close(fd) : close(fd);
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
     if (!orig_read) { errno = ENOSYS; return -1; }
+    maybeLogAshmemFd(fd, "read");
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -2521,6 +2588,7 @@ off64_t my_lseek64(int fd, off64_t offset, int whence) {
 
 ssize_t my_pread(int fd, void* buf, size_t count, off_t offset) {
     if (!orig_pread) { errno = ENOSYS; return -1; }
+    maybeLogAshmemFd(fd, "pread");
     {
         std::lock_guard<std::mutex> lock(g_fdMutex);
         if (g_fdContentCache.count(fd)) {
@@ -2542,6 +2610,30 @@ ssize_t my_pread64(int fd, void* buf, size_t count, off64_t offset) {
     return my_pread(fd, buf, count, (off_t)offset);
 }
 
+void* my_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (!orig_mmap) {
+        errno = ENOSYS;
+        return MAP_FAILED;
+    }
+    void* ret = orig_mmap(addr, length, prot, flags, fd, offset);
+    if (ret != MAP_FAILED && fd >= 0) {
+        maybeLogAshmemFd(fd, "mmap");
+    }
+    return ret;
+}
+
+void* my_mmap64(void* addr, size_t length, int prot, int flags, int fd, off64_t offset) {
+    if (!orig_mmap64) {
+        errno = ENOSYS;
+        return MAP_FAILED;
+    }
+    void* ret = orig_mmap64(addr, length, prot, flags, fd, offset);
+    if (ret != MAP_FAILED && fd >= 0) {
+        maybeLogAshmemFd(fd, "mmap64");
+    }
+    return ret;
+}
+
 // -----------------------------------------------------------------------------
 // PR41: Hooks: dup family (VFS cache bypass prevention)
 // Si un SDK clona un FD virtualizado con dup(), el nuevo FD debe heredar la caché.
@@ -2551,6 +2643,7 @@ int my_dup(int oldfd) {
     if (!orig_dup) return -1;
     int newfd = orig_dup(oldfd);
     if (newfd >= 0) {
+        inheritAshmemCache(oldfd, newfd);
         std::lock_guard<std::mutex> lock(g_fdMutex);
         auto it = g_fdMap.find(oldfd);
         if (it != g_fdMap.end()) {
@@ -2572,9 +2665,13 @@ int my_dup2(int oldfd, int newfd) {
         g_fdMap.erase(newfd);
         g_fdOffsetMap.erase(newfd);
         g_fdContentCache.erase(newfd);
+        g_ashmemLoggedFds.erase(newfd);
+        g_ashmemFds.erase(newfd);
+        g_nonAshmemFds.erase(newfd);
     }
     int ret = orig_dup2(oldfd, newfd);
     if (ret >= 0) {
+        inheritAshmemCache(oldfd, ret);
         std::lock_guard<std::mutex> lock(g_fdMutex);
         auto it = g_fdMap.find(oldfd);
         if (it != g_fdMap.end()) {
@@ -2595,9 +2692,13 @@ int my_dup3(int oldfd, int newfd, int flags) {
         g_fdMap.erase(newfd);
         g_fdOffsetMap.erase(newfd);
         g_fdContentCache.erase(newfd);
+        g_ashmemLoggedFds.erase(newfd);
+        g_ashmemFds.erase(newfd);
+        g_nonAshmemFds.erase(newfd);
     }
     int ret = orig_dup3(oldfd, newfd, flags);
     if (ret >= 0) {
+        inheritAshmemCache(oldfd, ret);
         std::lock_guard<std::mutex> lock(g_fdMutex);
         auto it = g_fdMap.find(oldfd);
         if (it != g_fdMap.end()) {
@@ -4392,15 +4493,42 @@ typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t,
 static ipc_transact_fn orig_ipc_transact = nullptr;
 
 static bool isLocationRequest(const void* data_parcel, uint32_t code) {
-    // Filtro O(1): transaction code exacto
-    if (code != TRANSACTION_getLastLocation &&
-        code != TRANSACTION_getCurrentLocation) return false;
     if (!data_parcel) return false;
-    // Guard de tamaño mínimo para leer el token completo
-    if (parcel_dataSize(data_parcel) < LOC_TOKEN_MIN_SIZE) return false;
-    // Confirmar interface token (guard contra colisión de codes entre servicios)
-    return memcmp(parcel_data(data_parcel) + LOC_TOKEN_OFFSET,
-                  LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
+
+    const uint8_t* raw = parcel_data(data_parcel);
+    size_t sz = parcel_dataSize(data_parcel);
+    if (!raw || sz < LOC_TOKEN_MIN_SIZE) return false;
+
+    // PR119b: evitar dependencia fuerte de transaction codes.
+    // En algunos builds GMS/ROM cambian code para ILocationManager.
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+    if (strLen <= 0 || strLen > 256) return false;
+
+    size_t utf16Bytes = (size_t)strLen * 2 + 2;
+    size_t padded = (utf16Bytes + 3) & ~3u;
+    if (12 + padded > sz) return false;
+
+    std::string token;
+    token.reserve((size_t)strLen);
+    for (int32_t i = 0; i < strLen; ++i) {
+        uint16_t ch = 0;
+        memcpy(&ch, raw + 12 + (size_t)i * 2, 2);
+        char c = (ch <= 0x7F) ? (char)ch : '?';
+        token.push_back((char)std::tolower((unsigned char)c));
+    }
+
+    // Fast path antiguo (codes esperados + prefijo "andr").
+    bool codeLikely = (code == TRANSACTION_getLastLocation ||
+                       code == TRANSACTION_getCurrentLocation);
+    bool prefixLikely = memcmp(raw + LOC_TOKEN_OFFSET,
+                               LOC_TOKEN_PREFIX, sizeof(LOC_TOKEN_PREFIX)) == 0;
+
+    if (codeLikely && prefixLikely) return true;
+
+    // Fallback robusto por descriptor Binder.
+    return token.find("android.location.ilocationmanager") != std::string::npos ||
+           token.find("google.android.gms.location") != std::string::npos;
 }
 
 // PR117: Hook para la lectura de doubles en el Parcel
@@ -4480,6 +4608,53 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
     memcpy(buf + latOffset, &lat, 8);
     memcpy(buf + lonOffset, &lon, 8);
     return true;
+}
+
+// PR119: Radar Doppler de payload Location.
+// No depende de transaction code fijo. Inspecciona el descriptor Binder
+// y, si contiene "location", intenta mutar lat/lon con offsets conocidos
+// y finalmente con escaneo heurístico del payload.
+static bool parseBinderInterfaceToken(const uint8_t* raw, size_t sz,
+                                      std::string& outToken,
+                                      size_t& outHeaderBytes) {
+    outToken.clear();
+    outHeaderBytes = 0;
+    if (!raw || sz < 16) return false;
+
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+    if (strLen <= 0 || strLen > 256) return false;
+
+    size_t utf16Bytes = (size_t)strLen * 2 + 2;  // incluye NUL UTF-16
+    size_t padded = (utf16Bytes + 3) & ~3u;
+    size_t hdr = 12 + padded;
+    if (hdr > sz) return false;
+
+    outToken.reserve((size_t)strLen);
+    for (int32_t i = 0; i < strLen; ++i) {
+        uint16_t ch = 0;
+        memcpy(&ch, raw + 12 + (size_t)i * 2, 2);
+        char c = (ch <= 0x7F) ? (char)ch : '?';
+        outToken.push_back((char)std::tolower((unsigned char)c));
+    }
+    outHeaderBytes = hdr;
+    return true;
+}
+
+static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
+                                        double lat, double lon,
+                                        size_t& outBaseOffset) {
+    outBaseOffset = 0;
+    if (!buf || sz < 64) return false;
+
+    // Escaneo 4-byte aligned para mantener coste bajo y respetar alineación Parcel.
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        if (mutateLocationInBuffer(buf, sz, base, lat, lon)) {
+            outBaseOffset = base;
+            return true;
+        }
+    }
+    return false;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4562,6 +4737,10 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                                 const void* data, void* reply, uint32_t flags) {
     // PR105: detección AOSP getLastLocation/getCurrentLocation (muta REPLY)
     bool isAospLoc = isLocationRequest(data, code);
+    if (isAospLoc) {
+        LOGD("[PR105c] location request candidate: handle=%d code=%u sz=%zu",
+             handle, code, parcel_dataSize(data));
+    }
 
     // PR107: detección GMS outgoing ILocationListener (muta DATA in-place antes del envío)
     // El DATA Parcel en IPCThreadState es heap local de GMS — PROT_READ|PROT_WRITE.
@@ -4618,9 +4797,6 @@ static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
 
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
-    // PR113-PULSE: confirmar ejecución. Log para cada llamada. ELIMINAR después del diagnóstico.
-    LOGD("[PR113-PULSE] code=%u sz=%zu", code, parcel_dataSize(data));
-
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 
@@ -4633,35 +4809,14 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
         const uint8_t* raw = parcel_data(data);
 
         if (sz >= 16 && raw) {
-            int32_t strLen = 0;
-            memcpy(&strLen, raw + 8, 4);
+            size_t parsedHdr = 0;
+            std::string token;
+            bool hasToken = parseBinderInterfaceToken(raw, sz, token, parsedHdr);
+            bool looksLocation = hasToken &&
+                (token.find("location") != std::string::npos ||
+                 token.find("fused") != std::string::npos);
 
-            // Detección AOSP ILocationListener: token 34 chars, prefix 'andr' UTF16LE
-            static constexpr int32_t AOSP_LOC_LEN  = 34;
-            static constexpr size_t  AOSP_LOC_HDR   = 84;
-            static constexpr uint8_t AOSP_PFX[8]    =
-                {0x61,0x00,0x6E,0x00,0x64,0x00,0x72,0x00};
-
-            // Detección GMS ILocationListener: token 58 chars, prefix 'com.' UTF16LE
-            bool isAosp = (sz >= AOSP_LOC_HDR + 48 &&
-                           strLen == AOSP_LOC_LEN &&
-                           memcmp(raw + 12, AOSP_PFX, 8) == 0);
-            bool isGms  = (sz >= GMS_ILOCLISTENER_MIN_SIZE &&
-                           strLen == GMS_ILOCLISTENER_STR_LEN &&
-                           memcmp(raw + 12, GMS_TOKEN_PREFIX, 8) == 0);
-
-            // Log diagnóstico: strLen de cualquier Binder con rango plausible de token
-            if (strLen >= 10 && strLen <= 80) {
-                LOGD("[PR113-DBG] code=%u sz=%zu strLen=%d isAosp=%d isGms=%d",
-                     code, sz, strLen, (int)isAosp, (int)isGms);
-            }
-
-            size_t hdr = 0;
-            const char* tag = nullptr;
-            if (isAosp)      { hdr = AOSP_LOC_HDR;         tag = "AOSP"; }
-            else if (isGms)  { hdr = GMS_ILOCLISTENER_HDR; tag = "GMS";  }
-
-            if (tag) {
+            if (looksLocation) {
                 // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
                 // Copiamos, mutamos, redirigimos mData ANTES del handler original.
                 shadowBuf = new uint8_t[sz];
@@ -4671,17 +4826,27 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                mutated = mutateLocationInBuffer(shadowBuf, sz, hdr, lat, lon);
+                // PR119: offsets preferidos conocidos (AOSP/GMS + header dinámico).
+                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+
+                // PR119: fallback "Radar Doppler" — ignorar code/layout fijo.
+                size_t dopplerOffset = 0;
+                if (!mutated) {
+                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                }
 
                 if (mutated) {
                     uint8_t** mDataField = reinterpret_cast<uint8_t**>(
                         const_cast<void*>(data));
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
-                    LOGD("[PR113] %s mutated BEFORE orig: lat=%.6f lon=%.6f",
-                         tag, lat, lon);
+                    LOGD("[PR119] mutated BEFORE orig: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f",
+                         code, token.c_str(), parsedHdr, dopplerOffset, lat, lon);
                 } else {
-                    LOGD("[PR113] %s detected but mutate FAILED (bad layout)", tag);
+                    LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
+                         token.c_str());
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
                 }
@@ -4981,6 +5146,26 @@ public:
                 } else {
                     LOGD("[scope] NO scoped_apps key in config");
                 }
+
+                // PR119: Productores tempranos de ubicación (MTK/Xiaomi/AOSP fused).
+                // Se fuerzan en scope para interceptar coordenadas antes de que
+                // lleguen a GMS/Maps, incluso si el usuario olvidó agregarlos.
+                if (!g_isTargetApp) {
+                    static const char* kLocationProducers[] = {
+                        "com.mediatek.location.ppe.main",
+                        "com.xiaomi.location.fused",
+                        "com.android.location.fused",
+                        nullptr
+                    };
+                    for (int i = 0; kLocationProducers[i]; ++i) {
+                        if (proc.find(kLocationProducers[i]) != std::string::npos) {
+                            g_isTargetApp = true;
+                            LOGD("[PR119][scope] producer auto-scope: '%s'", kLocationProducers[i]);
+                            break;
+                        }
+                    }
+                }
+
                 // PR71g: WebView spoof toggle — hook WebView processes without
                 // them being in scoped_apps. This avoids the Destroy Identity
                 // crash (which force-stops + wipes all scoped_apps, killing the
@@ -5132,6 +5317,12 @@ public:
 
         void* pread64_func = DobbySymbolResolver("libc.so", "pread64");
         if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
+
+        void* mmap_func = DobbySymbolResolver("libc.so", "mmap");
+        if (mmap_func) DobbyHook(mmap_func, (void*)my_mmap, (void**)&orig_mmap);
+
+        void* mmap64_func = DobbySymbolResolver("libc.so", "mmap64");
+        if (mmap64_func) DobbyHook(mmap64_func, (void*)my_mmap64, (void**)&orig_mmap64);
 
         void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
         if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
