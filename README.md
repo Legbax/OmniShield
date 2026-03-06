@@ -51,6 +51,10 @@ To ensure maximum stealth effectiveness, OmniShield requires the following techn
 
 ---
 
+## 🧪 Location Debugging
+
+If Google Maps still shows real coordinates, see `docs/LOCATION_DEBUG.md` for a hook-by-hook troubleshooting flow and targeted logcat filters.
+
 ## 📄 License & Disclaimer
 OmniShield is intended for educational and cybersecurity research purposes only. The use of this software to manipulate third-party applications must comply with local laws and the respective platforms' terms of service.
 

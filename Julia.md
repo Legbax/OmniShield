@@ -621,3 +621,18 @@ for the iptables bypass rule (traffic to the proxy itself must not be rerouted t
 tunnel). That rule was using `84` as the exempt IP instead of the real proxy address.
 
 **Files changed:** `proxy_manager.sh` (`resolve_host()` — one line)
+
+
+---
+
+## 14. PR119/PR120 Current Status (2026-03)
+
+- **PR120 mmap resolver chain active**: `mmap`/`mmap64` now use robust libc symbol resolution (`DobbySymbolResolver` → `dlsym(RTLD_DEFAULT)` → `dlopen(libc)+dlsym`), with `__mmap2` fallback for ROM variants.
+- **Single-hook mode for alias symbols (PR120g)**: if `mmap` and `mmap64` resolve to the same address, OmniShield hooks only once to avoid double-hook corruption of trampolines.
+- **PR120 pulse logs are elevated**: one-shot `[PR120-PULSE]` logs now use error channel to make hook activity visible even in narrow log filters.
+
+### Practical interpretation
+
+1. `PR120: mmap hook SUCCESS ...` + `PR120: mmap64 shares mmap symbol (...) — single-hook mode` is **expected on some ARM64 builds**.
+2. If no `[PR120] ashmem fd observed ...` appears after pulses, hooks are active but the scoped process may not be touching `/dev/ashmem` descriptors in the observed path.
+3. Location leakage can still occur via non-Binder/non-ashmem channels (vendor/system-server pipelines) despite successful app-process hooks.
