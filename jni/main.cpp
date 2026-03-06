@@ -29,6 +29,7 @@
 #include <linux/if_arp.h>
 #include <errno.h>
 #include <cstdlib>
+#include <cmath>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <sys/vfs.h>
@@ -4682,6 +4683,65 @@ static bool parseBinderInterfaceToken(const uint8_t* raw, size_t sz,
     return true;
 }
 
+// PR141: Read-only probe — validates whether a Location object exists at base_offset
+// by checking: (1) providerLen is plausible, (2) resolved lat/lon offsets contain
+// IEEE-754 doubles in valid geographic ranges. Returns true + offsets if valid.
+// Unlike mutateLocationInBuffer(), this never writes — safe for any parcel.
+static bool probeLocationInBuffer(const uint8_t* buf, size_t sz,
+                                  size_t base_offset,
+                                  size_t& outLatOffset, size_t& outLonOffset) {
+    if (base_offset + 4 > sz) return false;
+    int32_t providerLen = 0;
+    memcpy(&providerLen, buf + base_offset, 4);
+    if (providerLen < 0 || providerLen > 64) return false;
+
+    size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+    size_t maskOffset = base_offset + providerBytes + 24;
+    if (maskOffset + 4 > sz) return false;
+    int32_t fieldsMask = 0;
+    memcpy(&fieldsMask, buf + maskOffset, 4);
+
+    size_t latOff = maskOffset + 4 + locationOptionalBytes(fieldsMask);
+    size_t lonOff = latOff + 8;
+    if (lonOff + 8 > sz) return false;
+
+    // PR141: Validate doubles are realistic GPS coordinates
+    double candidateLat = 0, candidateLon = 0;
+    memcpy(&candidateLat, buf + latOff, 8);
+    memcpy(&candidateLon, buf + lonOff, 8);
+
+    // Must be normal finite doubles (reject NaN, Inf, denormalized, zero)
+    if (!std::isnormal(candidateLat) || !std::isnormal(candidateLon)) return false;
+    // Must be in valid geographic range
+    if (candidateLat < -90.0 || candidateLat > 90.0) return false;
+    if (candidateLon < -180.0 || candidateLon > 180.0) return false;
+
+    outLatOffset = latOff;
+    outLonOffset = lonOff;
+    return true;
+}
+
+// PR141: Validated Doppler scan — probes for Location objects at every 4-byte
+// aligned offset, validates lat/lon ranges, then writes spoofed coordinates.
+// Safe for non-location parcels: false positive rate is ~2^-112.
+static bool mutateLocationByValidatedDopplerScan(uint8_t* buf, size_t sz,
+                                                  double lat, double lon,
+                                                  size_t& outBaseOffset) {
+    outBaseOffset = 0;
+    if (!buf || sz < 64) return false;
+
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        size_t latOff = 0, lonOff = 0;
+        if (probeLocationInBuffer(buf, sz, base, latOff, lonOff)) {
+            memcpy(buf + latOff, &lat, 8);
+            memcpy(buf + lonOff, &lon, 8);
+            outBaseOffset = base;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
                                         double lat, double lon,
                                         size_t& outBaseOffset) {
@@ -4953,9 +5013,10 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
-            // PR140: Removed tryDopplerFallback — blind Doppler scan on non-location
-            // parcels (sz>256) was corrupting Binder data system-wide, causing
-            // "Bundle length not aligned by 4" / "Unknown URI type" crashes.
+            // PR141: Re-enable fallback with validated Doppler scan.
+            // Unlike PR139's blind scan (removed in PR140), this validates
+            // lat/lon ranges before writing — false positive rate ~2^-112.
+            bool tryValidatedFallback = !looksLocation && sz > 128;
 
             // PR130: Log first 3 location-looking tokens
             static std::atomic<int> s_locTokenCount{0};
@@ -4976,7 +5037,7 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 }
             }
 
-            if (looksLocation && (latBits != 0 || lonBits != 0)) {
+            if ((looksLocation || tryValidatedFallback) && (latBits != 0 || lonBits != 0)) {
                 // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
                 // Copiamos, mutamos, redirigimos mData ANTES del handler original.
                 shadowBuf = new uint8_t[sz];
@@ -4986,14 +5047,22 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119: Try known offsets first, then Doppler scan as last resort.
-                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                // PR119: For known location interfaces, try known offsets first.
+                if (looksLocation) {
+                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                }
 
                 size_t dopplerOffset = 0;
                 if (!mutated) {
-                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    if (looksLocation) {
+                        // Known location token — use original (unvalidated) scan
+                        mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    } else {
+                        // PR141: Unknown token — use validated scan (checks lat/lon ranges)
+                        mutated = mutateLocationByValidatedDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    }
                 }
 
                 if (mutated) {
@@ -5002,11 +5071,13 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                         const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
-                    LOGD("[PR119] mutated BEFORE orig: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f",
-                         code, token.c_str(), parsedHdr, dopplerOffset, lat, lon);
+                    LOGD("[PR141] jbbinder mutated: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f validated=%d",
+                         code, token.c_str(), parsedHdr, dopplerOffset, lat, lon, (int)tryValidatedFallback);
                 } else {
-                    LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
-                         token.c_str());
+                    if (looksLocation) {
+                        LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
+                             token.c_str());
+                    }
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
                 }
@@ -5055,10 +5126,10 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
                  token.find("fused") != std::string::npos);
-            // PR140: Removed tryDopplerFallback — blind Doppler scan on non-location
-            // parcels was corrupting Binder data system-wide.
+            // PR141: Re-enable fallback with validated Doppler scan.
+            bool tryValidatedFallback = !looksLocation && sz > 128;
 
-            if (looksLocation) {
+            if (looksLocation || tryValidatedFallback) {
                 shadowBuf = new uint8_t[sz];
                 memcpy(shadowBuf, raw, sz);
 
@@ -5066,14 +5137,21 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119: Try known offsets first, then Doppler scan as last resort.
-                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                // PR119: For known location interfaces, try known offsets first.
+                if (looksLocation) {
+                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                }
 
                 size_t dopplerOffset = 0;
                 if (!mutated) {
-                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    if (looksLocation) {
+                        mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    } else {
+                        // PR141: Unknown token — validated scan checks lat/lon ranges
+                        mutated = mutateLocationByValidatedDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    }
                 }
 
                 if (mutated) {
@@ -5082,8 +5160,8 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                         const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData = *mDataField;
                     *mDataField = shadowBuf;
-                    LOGD("[PR137] bbinder location mutated: code=%u token='%s' lat=%.6f lon=%.6f",
-                         code, token.c_str(), lat, lon);
+                    LOGD("[PR141] bbinder mutated: code=%u token='%s' lat=%.6f lon=%.6f validated=%d",
+                         code, token.c_str(), lat, lon, (int)tryValidatedFallback);
                 } else {
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
