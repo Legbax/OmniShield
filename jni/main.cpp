@@ -5260,20 +5260,9 @@ public:
                             break;
                         }
                     }
-                    // PR125: Signal readiness AFTER config parsed with scoped_apps.
-                    // Proves: Zygisk active + config readable + scoped_apps present.
-                    // service.sh polls this flag before killing Maps/GMS.
-                    static bool s_zygiskReadySignaled = false;
-                    if (!s_zygiskReadySignaled) {
-                        s_zygiskReadySignaled = true;
-                        int fd = open("/data/adb/.omni_data/.zygisk_ready",
-                                      O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                        if (fd >= 0) {
-                            close(fd);
-                            LOGD("[PR125] Zygisk ready flag written (config OK, scoped_apps present, proc='%s')",
-                                 proc.c_str());
-                        }
-                    }
+                    // PR125: Flag is written by companion_handler (root, SELinux-safe).
+                    // Writing from the app process fails silently (SELinux blocks open()
+                    // from forked Zygote child to /data/adb/). See companion_handler.
                 } else {
                     LOGD("[scope] NO scoped_apps key in config");
                 }
@@ -6930,6 +6919,25 @@ static void companion_handler(int client) {
     write(client, &len, sizeof(len));
     if (len > 0) {
         write(client, content.c_str(), len);
+    }
+
+    // PR125: Write ready flag from companion (runs as root — no SELinux restriction).
+    // The app process open() fails silently due to SELinux context after fork().
+    // The companion is invoked once per process that loads the module, so the first
+    // invocation with a non-empty config signals that Zygisk + config are both ready.
+    if (!content.empty()) {
+        static bool s_readyFlagWritten = false;
+        if (!s_readyFlagWritten) {
+            s_readyFlagWritten = true;
+            int fd = open("/data/adb/.omni_data/.zygisk_ready",
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                close(fd);
+                LOGE("[PR125] companion: zygisk_ready flag written (root, SELinux-safe)");
+            } else {
+                LOGE("[PR125] companion: zygisk_ready write FAILED errno=%d", errno);
+            }
+        }
     }
 
     // One-time per profile: set_uname backup + generate .profile_props + apply resetprop
