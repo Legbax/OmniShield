@@ -186,30 +186,47 @@ fi
 # ============================================================
 
 # ============================================================
-# PR123: Force-restart Maps/GMS after boot to ensure Zygisk hooks
+# PR125: Signal-based Maps/GMS restart after Zygisk is confirmed ready
 # ============================================================
-# KernelSU's Zygisk may load the module AFTER Maps/GMS have already
-# started during early boot. By killing them after boot_completed,
-# Android restarts them and the new processes get the Zygisk module
-# injected via Zygote (which by this point has the module loaded).
-# This complements the companion-based restartLocationRuntime()
-# (PR121) which only triggers on config changes.
+# PR123's fixed 5s delay was insufficient — logcat showed a 31-second
+# gap between Maps start and the first Zygisk onLoad on Xiaomi/KernelSU.
+# Maps restarted before Zygisk was in Zygote, so it ran without hooks.
+#
+# New approach: the native module writes .zygisk_ready on its first
+# onLoad (proving Zygisk is active). We poll for that file, THEN kill
+# Maps/GMS so Android restarts them with the module injected.
 (
+    READY_FLAG="/data/adb/.omni_data/.zygisk_ready"
+    # Clean stale flag from previous boot
+    rm -f "$READY_FLAG"
+
+    # Wait for boot_completed first (prerequisite)
     until [ "$(getprop sys.boot_completed)" = "1" ]; do
         sleep 2
     done
-    # Extra delay to ensure Zygisk module is fully loaded into Zygote
-    sleep 5
-    am force-stop com.google.android.apps.maps 2>/dev/null
-    killall com.google.android.gms 2>/dev/null
-    killall com.google.android.gms.unstable 2>/dev/null
-    killall com.google.android.gms.persistent 2>/dev/null
-    killall com.android.location.fused 2>/dev/null
-    killall com.xiaomi.location.fused 2>/dev/null
-    killall com.mediatek.location.lppe.main 2>/dev/null
-    killall com.mediatek.location.ppe.main 2>/dev/null
-    log -t OmniShield "[PR123] Boot-time restart of Maps/GMS for Zygisk hooks"
+
+    # Poll for Zygisk readiness (max 60s after boot_completed)
+    _waited=0
+    while [ ! -f "$READY_FLAG" ] && [ "$_waited" -lt 60 ]; do
+        sleep 2
+        _waited=$((_waited + 2))
+    done
+
+    if [ -f "$READY_FLAG" ]; then
+        log -t OmniShield "[PR125] Zygisk ready (waited ${_waited}s). Killing Maps/GMS..."
+        am force-stop com.google.android.apps.maps 2>/dev/null
+        killall com.google.android.gms 2>/dev/null
+        killall com.google.android.gms.unstable 2>/dev/null
+        killall com.google.android.gms.persistent 2>/dev/null
+        killall com.android.location.fused 2>/dev/null
+        killall com.xiaomi.location.fused 2>/dev/null
+        killall com.mediatek.location.lppe.main 2>/dev/null
+        killall com.mediatek.location.ppe.main 2>/dev/null
+        log -t OmniShield "[PR125] Maps/GMS killed — will restart with Zygisk hooks"
+    else
+        log -t OmniShield "[PR125] TIMEOUT: Zygisk not ready after 60s — hooks may not work"
+    fi
 ) &
 # ============================================================
-# FIN PR123
+# FIN PR125
 # ============================================================

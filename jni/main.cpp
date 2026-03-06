@@ -5223,6 +5223,20 @@ public:
         this->api = api;
         this->env = env;
         LOGD("[scope] onLoad: api=%p jvm=%p", (void*)api, (void*)g_jvm);
+
+        // PR125: Signal to service.sh that Zygisk is active in Zygote.
+        // service.sh polls for this file before killing Maps/GMS, ensuring
+        // the restarted processes will get the module injected.
+        static bool s_zygiskReadySignaled = false;
+        if (!s_zygiskReadySignaled) {
+            s_zygiskReadySignaled = true;
+            int fd = open("/data/adb/.omni_data/.zygisk_ready",
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                close(fd);
+                LOGD("[PR125] Zygisk ready flag written");
+            }
+        }
     }
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         // PR70c: Try companion first (root daemon, bypasses SELinux), fall back to direct read

@@ -3,4 +3,4 @@ name=OMNI-Shield
 version=v16.0
 versionCode=16000
 author=Legba
-description=PR123 — Boot-time Maps/GMS restart for Zygisk late-load fix
+description=PR125 — Signal-based Maps/GMS restart (replaces fixed-delay PR123)
