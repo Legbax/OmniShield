@@ -4937,21 +4937,14 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
 static void* resolveLibbinderSymbol(const char* mangled) {
     void* sym = nullptr;
 
-    // Intento 1: DobbySymbolResolver
-    sym = DobbySymbolResolver("libbinder.so", mangled);
-    if (sym) {
-        LOGD("[PR108] via DobbySymbolResolver: %s @ %p", mangled, sym);
-        return sym;
-    }
-
-    // Intento 2: dlsym(RTLD_DEFAULT) — busca en todos los símbolos del proceso
+    // Intento 1: dlsym(RTLD_DEFAULT) — fast hash lookup across all loaded libs
     sym = dlsym(RTLD_DEFAULT, mangled);
     if (sym) {
         LOGD("[PR108] via dlsym(RTLD_DEFAULT): %s @ %p", mangled, sym);
         return sym;
     }
 
-    // Intento 3: dlopen explícito
+    // Intento 2: dlopen + dlsym — explicit library handle
     // RTLD_NOLOAD: no carga si no está mapeada (evita double-load)
     void* lib = dlopen("libbinder.so", RTLD_NOW | RTLD_NOLOAD);
     if (!lib) {
@@ -4964,6 +4957,13 @@ static void* resolveLibbinderSymbol(const char* mangled) {
             LOGD("[PR108] via dlopen+dlsym: %s @ %p", mangled, sym);
             return sym;
         }
+    }
+
+    // Intento 3: DobbySymbolResolver — linear ELF scan, slow but finds hidden symbols
+    sym = DobbySymbolResolver("libbinder.so", mangled);
+    if (sym) {
+        LOGD("[PR108] via DobbySymbolResolver: %s @ %p", mangled, sym);
+        return sym;
     }
 
     LOGE("[PR108] UNRESOLVED: %s", mangled);
@@ -4979,12 +4979,7 @@ static void* resolveLibbinderSymbol(const char* mangled) {
 static void* resolveRuntimeSymbol(const char* mangled) {
     void* sym = nullptr;
 
-    sym = DobbySymbolResolver("libandroid_runtime.so", mangled);
-    if (sym) {
-        LOGD("[PR113] via DobbySymbolResolver: %s @ %p", mangled, sym);
-        return sym;
-    }
-
+    // Fast path: dlsym hash lookup first
     sym = dlsym(RTLD_DEFAULT, mangled);
     if (sym) {
         LOGD("[PR113] via dlsym(RTLD_DEFAULT): %s @ %p", mangled, sym);
@@ -5003,6 +4998,13 @@ static void* resolveRuntimeSymbol(const char* mangled) {
         }
     }
 
+    // Slow fallback: linear ELF scan for hidden-visibility symbols
+    sym = DobbySymbolResolver("libandroid_runtime.so", mangled);
+    if (sym) {
+        LOGD("[PR113] via DobbySymbolResolver: %s @ %p", mangled, sym);
+        return sym;
+    }
+
     LOGE("[PR113] UNRESOLVED: %s", mangled);
     return nullptr;
 }
@@ -5013,10 +5015,8 @@ static void* resolveRuntimeSymbol(const char* mangled) {
 static void* resolveLibcSymbol(const char* name) {
     if (!name || !*name) return nullptr;
 
-    void* sym = DobbySymbolResolver("libc.so", name);
-    if (sym) return sym;
-
-    sym = dlsym(RTLD_DEFAULT, name);
+    // Fast path: dlsym hash lookup
+    void* sym = dlsym(RTLD_DEFAULT, name);
     if (sym) return sym;
 
     void* lib = dlopen("libc.so", RTLD_NOW | RTLD_NOLOAD);
@@ -5027,6 +5027,10 @@ static void* resolveLibcSymbol(const char* name) {
         sym = dlsym(lib, name);
         if (sym) return sym;
     }
+
+    // Slow fallback: linear ELF scan
+    sym = DobbySymbolResolver("libc.so", name);
+    if (sym) return sym;
 
     return nullptr;
 }
@@ -6161,12 +6165,13 @@ public:
         };
         void* settings_func = nullptr;
         int settings_variant = -1;
-        // PR122: Try DobbySymbolResolver first, then dlsym(RTLD_DEFAULT) as fallback.
-        // On MIUI ROMs, the Settings JNI bridge may use different symbol visibility
-        // or be loaded from a different .so than libandroid_runtime.
+        // Settings JNI symbols have default visibility (called from Java/JNI).
+        // Use dlsym only — DobbySymbolResolver does a linear ELF scan (~600ms/miss)
+        // and can't find these symbols either if dlsym fails.
+        void* rt_lib = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
         for (int si = 0; SETTINGS_SYMBOLS[si] && !settings_func; ++si) {
-            settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
-            if (!settings_func) settings_func = dlsym(RTLD_DEFAULT, SETTINGS_SYMBOLS[si]);
+            settings_func = dlsym(RTLD_DEFAULT, SETTINGS_SYMBOLS[si]);
+            if (!settings_func && rt_lib) settings_func = dlsym(rt_lib, SETTINGS_SYMBOLS[si]);
             if (settings_func) settings_variant = si;
         }
         if (settings_func) {
@@ -6192,8 +6197,8 @@ public:
         void* settings_user_func = nullptr;
         int settings_user_variant = -1;
         for (int si = 0; SECURE_USER_SYMBOLS[si] && !settings_user_func; ++si) {
-            settings_user_func = DobbySymbolResolver("libandroid_runtime.so", SECURE_USER_SYMBOLS[si]);
-            if (!settings_user_func) settings_user_func = dlsym(RTLD_DEFAULT, SECURE_USER_SYMBOLS[si]);
+            settings_user_func = dlsym(RTLD_DEFAULT, SECURE_USER_SYMBOLS[si]);
+            if (!settings_user_func && rt_lib) settings_user_func = dlsym(rt_lib, SECURE_USER_SYMBOLS[si]);
             if (settings_user_func) settings_user_variant = si;
         }
         if (settings_user_func) {
@@ -6216,8 +6221,8 @@ public:
         void* global_func = nullptr;
         int global_variant = -1;
         for (int gi = 0; GLOBAL_SYMBOLS[gi] && !global_func; ++gi) {
-            global_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_SYMBOLS[gi]);
-            if (!global_func) global_func = dlsym(RTLD_DEFAULT, GLOBAL_SYMBOLS[gi]);
+            global_func = dlsym(RTLD_DEFAULT, GLOBAL_SYMBOLS[gi]);
+            if (!global_func && rt_lib) global_func = dlsym(rt_lib, GLOBAL_SYMBOLS[gi]);
             if (global_func) global_variant = gi;
         }
         if (global_func) {
@@ -6240,8 +6245,8 @@ public:
         void* global_user_func = nullptr;
         int global_user_variant = -1;
         for (int gi = 0; GLOBAL_USER_SYMBOLS[gi] && !global_user_func; ++gi) {
-            global_user_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_USER_SYMBOLS[gi]);
-            if (!global_user_func) global_user_func = dlsym(RTLD_DEFAULT, GLOBAL_USER_SYMBOLS[gi]);
+            global_user_func = dlsym(RTLD_DEFAULT, GLOBAL_USER_SYMBOLS[gi]);
+            if (!global_user_func && rt_lib) global_user_func = dlsym(rt_lib, GLOBAL_USER_SYMBOLS[gi]);
             if (global_user_func) global_user_variant = gi;
         }
         if (global_user_func) {
