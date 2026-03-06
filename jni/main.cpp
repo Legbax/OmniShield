@@ -4413,6 +4413,9 @@ static void reapplyPltHooksForNewLibraries() {
          elfs.size(), ok ? "true" : "false");
 }
 
+// PR138: Forward declaration — defined after orig_* Binder variables.
+static void logBinderDiag();
+
 // PR87: Intercept android_dlopen_ext — called by System.loadLibrary() via JNI.
 // After the linker loads the new .so and resolves its GOT with real libc addresses,
 // we re-apply PLT hooks so the new library's calls go through our spoofing functions.
