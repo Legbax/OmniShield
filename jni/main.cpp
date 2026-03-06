@@ -4481,6 +4481,53 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
     memcpy(buf + lonOffset, &lon, 8);
     return true;
 }
+
+// PR119: Radar Doppler de payload Location.
+// No depende de transaction code fijo. Inspecciona el descriptor Binder
+// y, si contiene "location", intenta mutar lat/lon con offsets conocidos
+// y finalmente con escaneo heurístico del payload.
+static bool parseBinderInterfaceToken(const uint8_t* raw, size_t sz,
+                                      std::string& outToken,
+                                      size_t& outHeaderBytes) {
+    outToken.clear();
+    outHeaderBytes = 0;
+    if (!raw || sz < 16) return false;
+
+    int32_t strLen = 0;
+    memcpy(&strLen, raw + 8, 4);
+    if (strLen <= 0 || strLen > 256) return false;
+
+    size_t utf16Bytes = (size_t)strLen * 2 + 2;  // incluye NUL UTF-16
+    size_t padded = (utf16Bytes + 3) & ~3u;
+    size_t hdr = 12 + padded;
+    if (hdr > sz) return false;
+
+    outToken.reserve((size_t)strLen);
+    for (int32_t i = 0; i < strLen; ++i) {
+        uint16_t ch = 0;
+        memcpy(&ch, raw + 12 + (size_t)i * 2, 2);
+        char c = (ch <= 0x7F) ? (char)ch : '?';
+        outToken.push_back((char)std::tolower((unsigned char)c));
+    }
+    outHeaderBytes = hdr;
+    return true;
+}
+
+static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
+                                        double lat, double lon,
+                                        size_t& outBaseOffset) {
+    outBaseOffset = 0;
+    if (!buf || sz < 64) return false;
+
+    // Escaneo 4-byte aligned para mantener coste bajo y respetar alineación Parcel.
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        if (mutateLocationInBuffer(buf, sz, base, lat, lon)) {
+            outBaseOffset = base;
+            return true;
+        }
+    }
+    return false;
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 // 3. Adaptador para respuestas síncronas (IPCThreadState::transact)
@@ -4618,9 +4665,6 @@ static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
 
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
-    // PR113-PULSE: confirmar ejecución. Log para cada llamada. ELIMINAR después del diagnóstico.
-    LOGD("[PR113-PULSE] code=%u sz=%zu", code, parcel_dataSize(data));
-
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 
@@ -4633,35 +4677,14 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
         const uint8_t* raw = parcel_data(data);
 
         if (sz >= 16 && raw) {
-            int32_t strLen = 0;
-            memcpy(&strLen, raw + 8, 4);
+            size_t parsedHdr = 0;
+            std::string token;
+            bool hasToken = parseBinderInterfaceToken(raw, sz, token, parsedHdr);
+            bool looksLocation = hasToken &&
+                (token.find("location") != std::string::npos ||
+                 token.find("fused") != std::string::npos);
 
-            // Detección AOSP ILocationListener: token 34 chars, prefix 'andr' UTF16LE
-            static constexpr int32_t AOSP_LOC_LEN  = 34;
-            static constexpr size_t  AOSP_LOC_HDR   = 84;
-            static constexpr uint8_t AOSP_PFX[8]    =
-                {0x61,0x00,0x6E,0x00,0x64,0x00,0x72,0x00};
-
-            // Detección GMS ILocationListener: token 58 chars, prefix 'com.' UTF16LE
-            bool isAosp = (sz >= AOSP_LOC_HDR + 48 &&
-                           strLen == AOSP_LOC_LEN &&
-                           memcmp(raw + 12, AOSP_PFX, 8) == 0);
-            bool isGms  = (sz >= GMS_ILOCLISTENER_MIN_SIZE &&
-                           strLen == GMS_ILOCLISTENER_STR_LEN &&
-                           memcmp(raw + 12, GMS_TOKEN_PREFIX, 8) == 0);
-
-            // Log diagnóstico: strLen de cualquier Binder con rango plausible de token
-            if (strLen >= 10 && strLen <= 80) {
-                LOGD("[PR113-DBG] code=%u sz=%zu strLen=%d isAosp=%d isGms=%d",
-                     code, sz, strLen, (int)isAosp, (int)isGms);
-            }
-
-            size_t hdr = 0;
-            const char* tag = nullptr;
-            if (isAosp)      { hdr = AOSP_LOC_HDR;         tag = "AOSP"; }
-            else if (isGms)  { hdr = GMS_ILOCLISTENER_HDR; tag = "GMS";  }
-
-            if (tag) {
+            if (looksLocation) {
                 // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
                 // Copiamos, mutamos, redirigimos mData ANTES del handler original.
                 shadowBuf = new uint8_t[sz];
@@ -4671,17 +4694,27 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                mutated = mutateLocationInBuffer(shadowBuf, sz, hdr, lat, lon);
+                // PR119: offsets preferidos conocidos (AOSP/GMS + header dinámico).
+                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+
+                // PR119: fallback "Radar Doppler" — ignorar code/layout fijo.
+                size_t dopplerOffset = 0;
+                if (!mutated) {
+                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                }
 
                 if (mutated) {
                     uint8_t** mDataField = reinterpret_cast<uint8_t**>(
                         const_cast<void*>(data));
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
-                    LOGD("[PR113] %s mutated BEFORE orig: lat=%.6f lon=%.6f",
-                         tag, lat, lon);
+                    LOGD("[PR119] mutated BEFORE orig: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f",
+                         code, token.c_str(), parsedHdr, dopplerOffset, lat, lon);
                 } else {
-                    LOGD("[PR113] %s detected but mutate FAILED (bad layout)", tag);
+                    LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
+                         token.c_str());
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
                 }
@@ -4981,6 +5014,26 @@ public:
                 } else {
                     LOGD("[scope] NO scoped_apps key in config");
                 }
+
+                // PR119: Productores tempranos de ubicación (MTK/Xiaomi/AOSP fused).
+                // Se fuerzan en scope para interceptar coordenadas antes de que
+                // lleguen a GMS/Maps, incluso si el usuario olvidó agregarlos.
+                if (!g_isTargetApp) {
+                    static const char* kLocationProducers[] = {
+                        "com.mediatek.location.ppe.main",
+                        "com.xiaomi.location.fused",
+                        "com.android.location.fused",
+                        nullptr
+                    };
+                    for (int i = 0; kLocationProducers[i]; ++i) {
+                        if (proc.find(kLocationProducers[i]) != std::string::npos) {
+                            g_isTargetApp = true;
+                            LOGD("[PR119][scope] producer auto-scope: '%s'", kLocationProducers[i]);
+                            break;
+                        }
+                    }
+                }
+
                 // PR71g: WebView spoof toggle — hook WebView processes without
                 // them being in scoped_apps. This avoids the Destroy Identity
                 // crash (which force-stops + wipes all scoped_apps, killing the
