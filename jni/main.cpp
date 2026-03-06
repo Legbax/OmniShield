@@ -4793,7 +4793,7 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
     // PR130: Verify outgoing hook fires (first 5 invocations only)
     static std::atomic<int> s_ipcCount{0};
     int _pr130_ipc = s_ipcCount.fetch_add(1, std::memory_order_relaxed);
-    if (_pr130_ipc < 5) {
+    if (_pr130_ipc < 10) {
         LOGE("[PR130] ipc_transact called: handle=%d code=%u call#%d", handle, code, _pr130_ipc);
     }
 
@@ -4804,24 +4804,11 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
              handle, code, parcel_dataSize(data));
     }
 
-    // PR107: detección GMS outgoing ILocationListener (muta DATA in-place antes del envío)
-    // El DATA Parcel en IPCThreadState es heap local de GMS — PROT_READ|PROT_WRITE.
-    // Modificación in-place segura, sin shadow copy.
-    if (isGmsLocationOutgoing(data, code)) {
-        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-        if (latBits != 0 || lonBits != 0) {
-            double lat, lon;
-            memcpy(&lat, &latBits, 8);
-            memcpy(&lon, &lonBits, 8);
-            uint8_t* mutableData = *reinterpret_cast<uint8_t**>(
-                const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
-            size_t sz = parcel_dataSize(data);
-            bool ok = mutateLocationInBuffer(mutableData, sz, GMS_ILOCLISTENER_HDR, lat, lon);
-            LOGD("[PR107] GMS→app location mutated: lat=%.6f lon=%.6f ok=%d (code=%u)",
-                 lat, lon, (int)ok, code);
-        }
-    }
+    // PR134: PR107 GMS in-place mutation DISABLED — caused SIGSEGV in
+    // com.google.android.gms.persistent. isGmsLocationOutgoing() has
+    // false positives on any 58-char "com.*" Binder interface; writes
+    // into wrong offsets of non-location parcels → fault in mData buffer.
+    // PR105 REPLY mutation covers Maps location requests.
 
     int32_t status = orig_ipc_transact(self, handle, code, data, reply, flags);
 

@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v22.0
-versionCode=22000
+version=v23.0
+versionCode=23000
 author=Legba
-description=PR133 — Disable PR115 static vtable fallback (crash loop fix)
+description=PR134 — Disable PR107 GMS parcel mutation (SIGSEGV fix)
