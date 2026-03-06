@@ -113,7 +113,16 @@ fi
     done
 
     if [ -f "$READY_FLAG" ]; then
-        echo "$(date) [PR125] flag found after ${_waited}s — killing Maps/GMS" >> "$OMNI_DBG" 2>/dev/null
+        echo "$(date) [PR125] flag found after ${_waited}s — waiting for location block" >> "$OMNI_DBG" 2>/dev/null
+        # PR128: Wait for PR126 to set location_mode=0 before killing (max 10s).
+        # PR126 creates LOC_BLOCKED_FLAG after settings put secure location_mode 0,
+        # guaranteeing GPS is blocked before Maps/GMS are killed.
+        _loc_wait=0
+        while [ ! -f "$LOC_BLOCKED_FLAG" ] && [ "$_loc_wait" -lt 10 ]; do
+            sleep 1
+            _loc_wait=$((_loc_wait + 1))
+        done
+        echo "$(date) [PR125] location blocked after ${_loc_wait}s — killing Maps/GMS" >> "$OMNI_DBG" 2>/dev/null
         log -t OmniShield "[PR125] Zygisk ready (waited ${_waited}s). Killing location stack..."
         # Kill all location-related processes so they restart with Zygisk hooks
         am force-stop com.google.android.apps.maps 2>/dev/null
