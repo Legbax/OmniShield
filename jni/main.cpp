@@ -5496,10 +5496,40 @@ public:
         }
 
         void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
-        if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
+        if (sysprop_func) {
+            uint32_t first_insn = *reinterpret_cast<uint32_t*>(sysprop_func);
+            if (first_insn == 0x58000051) {
+                LOGE("PR86: __system_property_get already Dobby-hooked "
+                     "(first_insn=0x%08x @ %p) — skipping to avoid double-hook SIGILL",
+                     first_insn, sysprop_func);
+                orig_system_property_get =
+                    reinterpret_cast<decltype(orig_system_property_get)>(
+                        dlsym(RTLD_DEFAULT, "__system_property_get"));
+            } else {
+                DobbyHook(sysprop_func, (void*)my_system_property_get,
+                          (void**)&orig_system_property_get);
+            }
+        }
 
         void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
-        if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
+        if (sysprop_cb_func) {
+            // Detect if another module (PIF) already Dobby-hooked this function.
+            // Dobby's ARM64 trampoline starts with ldr x17, #8 (0x58000051).
+            // Double-hooking with Dobby corrupts the orig trampoline → SIGILL.
+            uint32_t first_insn = *reinterpret_cast<uint32_t*>(sysprop_cb_func);
+            if (first_insn == 0x58000051) {
+                LOGE("PR86: __system_property_read_callback already Dobby-hooked "
+                     "(first_insn=0x%08x @ %p) — skipping to avoid double-hook SIGILL",
+                     first_insn, sysprop_cb_func);
+                // Fallback: set orig via dlsym (calls through PIF's hook → real function)
+                orig_system_property_read_callback =
+                    reinterpret_cast<decltype(orig_system_property_read_callback)>(
+                        dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
+            } else {
+                DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback,
+                          (void**)&orig_system_property_read_callback);
+            }
+        }
 
         // PR86: Re-attempt Dobby inline hook on __system_property_find.
         // PR85 removed this because DobbySymbolResolver("libc.so") may have returned
