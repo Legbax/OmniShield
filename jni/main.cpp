@@ -4396,6 +4396,18 @@ static void patchPropertyPages() {
     g_pagesPatched = true;
 }
 
+// PR141: Forward declarations for Binder/dlopen hook functions and their orig_* vars.
+// These are defined after installPltHooks() but referenced inside it.
+typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t, const void*, void*, uint32_t);
+static ipc_transact_fn orig_ipc_transact = nullptr;
+using fn_Parcel_readDouble = double(*)(const void*);
+static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
+static double my_Parcel_readDouble(const void* self);
+static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
+                                const void* data, void* reply, uint32_t flags);
+static void* my_android_dlopen_ext(const char* filename, int flags, const void* extinfo);
+static void* my_dlopen_hook(const char* filename, int flags);
+
 // Fix9: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
 // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
 // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
@@ -4768,10 +4780,6 @@ static constexpr uint8_t  LOC_TOKEN_PREFIX[8] = {
 static constexpr size_t LOC_TOKEN_OFFSET   = 12; // inicio del texto UTF-16
 static constexpr size_t LOC_TOKEN_MIN_SIZE = 80; // 4+4+4+(33*2+2) = 80 bytes exactos
 
-typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t,
-                                   const void*, void*, uint32_t);
-static ipc_transact_fn orig_ipc_transact = nullptr;
-
 static bool isLocationRequest(const void* data_parcel, uint32_t code) {
     if (!data_parcel) return false;
 
@@ -4811,9 +4819,6 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
            token.find("google.android.gms.location") != std::string::npos;
 }
 
-// PR117/PR149: Hook para la lectura de doubles en el Parcel
-using fn_Parcel_readDouble = double(*)(const void*);
-static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
 
 // PR149/PR150: Thread-local state for readDouble spoofing.
 // Set by my_ipc_transact/mutateLocationReply when reply contains a location.
