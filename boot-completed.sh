@@ -50,29 +50,11 @@ update_pif_prop() {
     fi
 }
 
-# Extract PIF properties written as comments in .profile_props
-_PIF_FINGERPRINT=$(grep "^#PIF_FINGERPRINT=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_MANUFACTURER=$(grep "^#PIF_MANUFACTURER=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_MODEL=$(grep "^#PIF_MODEL=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_BRAND=$(grep "^#PIF_BRAND=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_PRODUCT=$(grep "^#PIF_PRODUCT=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_DEVICE=$(grep "^#PIF_DEVICE=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_RELEASE=$(grep "^#PIF_RELEASE=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_ID=$(grep "^#PIF_ID=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_INCREMENTAL=$(grep "^#PIF_INCREMENTAL=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-_PIF_SECURITY_PATCH=$(grep "^#PIF_SECURITY_PATCH=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
-
-# Inject OmniShield profile data
-update_pif_prop "FINGERPRINT" "$_PIF_FINGERPRINT"
-update_pif_prop "MANUFACTURER" "$_PIF_MANUFACTURER"
-update_pif_prop "MODEL" "$_PIF_MODEL"
-update_pif_prop "BRAND" "$_PIF_BRAND"
-update_pif_prop "PRODUCT" "$_PIF_PRODUCT"
-update_pif_prop "DEVICE" "$_PIF_DEVICE"
-update_pif_prop "RELEASE" "$_PIF_RELEASE"
-update_pif_prop "ID" "$_PIF_ID"
-update_pif_prop "INCREMENTAL" "$_PIF_INCREMENTAL"
-update_pif_prop "SECURITY_PATCH" "$_PIF_SECURITY_PATCH"
+# Extract and inject PIF properties written as comments in .profile_props
+for _pif_key in FINGERPRINT MANUFACTURER MODEL BRAND PRODUCT DEVICE RELEASE ID INCREMENTAL SECURITY_PATCH; do
+    _pif_val=$(grep "^#PIF_${_pif_key}=" "$PROPS_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')
+    update_pif_prop "$_pif_key" "$_pif_val"
+done
 
 # Adjust permissions for security
 chmod 0644 "$PIF_PROP_PATH"

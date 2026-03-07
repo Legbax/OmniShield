@@ -62,7 +62,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
-static bool g_debugMode = true;  // PR53: activar con debug_mode=true en .identity.cfg
+static bool g_debugMode = false;  // PR53: activar con debug_mode=true en .identity.cfg
 
 // PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
 static double g_cachedLat       = 0.0;
@@ -4085,12 +4085,6 @@ const prop_info* my_system_property_find(const char* name);  // PR84
 static int my_system_property_foreach(                       // PR88
     void (*propfn)(const prop_info* pi, void* cookie), void* cookie);
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
-static int my_posix_spawn(pid_t *pid, const char *path,
-                          const void *file_actions, const void *attrp,
-                          char *const argv[], char *const envp[]);
-static int my_posix_spawnp(pid_t *pid, const char *file,
-                           const void *file_actions, const void *attrp,
-                           char *const argv[], char *const envp[]);
 
 // PR84b: Shadow property pages — per-process property memory patching.
 // After fork (postAppSpecialize), replaces shared property mmap pages with private
