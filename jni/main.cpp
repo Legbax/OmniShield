@@ -536,7 +536,10 @@ bool shouldHide(const char* key) {
 // Hooks: OpenCL
 // -----------------------------------------------------------------------------
 cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
-    if (!orig_clGetDeviceInfo) return -1;
+    if (!orig_clGetDeviceInfo) {
+        orig_clGetDeviceInfo = (cl_int(*)(cl_device_id,cl_device_info,size_t,void*,size_t*))dlsym(RTLD_DEFAULT, "clGetDeviceInfo");
+        if (!orig_clGetDeviceInfo) return -1;
+    }
     cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (ret == 0 && fp_ptr) {
@@ -758,7 +761,11 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 #define EGL_EXTENSIONS_ENUM 0x3055
 
 const char* my_eglQueryString(void* display, int name) {
-    if (!orig_eglQueryString) return nullptr;
+    if (!orig_eglQueryString) {
+        // Lazy resolve: DobbyHook may have raced with late dlopen of libEGL.so
+        orig_eglQueryString = (const char*(*)(void*,int))dlsym(RTLD_DEFAULT, "eglQueryString");
+        if (!orig_eglQueryString) return nullptr;
+    }
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
         const auto& fp = *fp_ptr;
@@ -798,8 +805,14 @@ const char* my_eglQueryString(void* display, int name) {
 int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
     if (!orig_clock_gettime) return -1;
     int ret = orig_clock_gettime(clockid, tp);
-    // Solo modificamos relojes de uptime de sistema
-    if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
+    // Solo modificamos CLOCK_BOOTTIME (SystemClock.elapsedRealtime()).
+    // CLOCK_MONOTONIC se usa para vsync/Choreographer — SurfaceFlinger envía
+    // timestamps reales desde su proceso sin hookear, por lo que hookear
+    // CLOCK_MONOTONIC en el proceso de la app genera un desfase de días entre
+    // el timestamp del vsync (real) y System.nanoTime() (hookeado), lo que
+    // hace que Choreographer calcule latencia de 7+ días y nunca renderice
+    // el primer frame (hang silencioso con "Launch timeout expired").
+    if (ret == 0 && clockid == CLOCK_BOOTTIME) {
         // Offset determinista: Base de 3 días (259200s) + hasta 12 días extra según semilla
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         tp->tv_sec += added_uptime_seconds;
@@ -2786,7 +2799,10 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 #define GL_EXTENSIONS 0x1F03
 
 const GLubyte* my_glGetString(GLenum name) {
-    if (!orig_glGetString) return nullptr;
+    if (!orig_glGetString) {
+        orig_glGetString = (const GLubyte*(*)(GLenum))dlsym(RTLD_DEFAULT, "glGetString");
+        if (!orig_glGetString) return nullptr;
+    }
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
         const auto& fp = *fp_ptr;
@@ -2833,7 +2849,10 @@ const GLubyte* my_glGetString(GLenum name) {
 // Hooks: Vulkan API
 // -----------------------------------------------------------------------------
 void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
-    if (!orig_vkGetPhysicalDeviceProperties) return;
+    if (!orig_vkGetPhysicalDeviceProperties) {
+        orig_vkGetPhysicalDeviceProperties = (void(*)(VkPhysicalDevice,VkPhysicalDeviceProperties*))dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceProperties");
+        if (!orig_vkGetPhysicalDeviceProperties) return;
+    }
     orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (pProperties && fp_ptr) {
