@@ -4664,6 +4664,26 @@ static double my_Parcel_readDouble(const void* self) {
 //    latOffset = base + providerBytes + 20 + (bit8 ? 8 : 0)
 //
 // Valida lat/lon antes de escribir para evitar corromper parcels que no son Location.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR147: Write to PROT_READ memory via /proc/self/mem.
+//
+// Reply Parcel data lives in the Binder mmap region (PROT_READ only).
+// The kernel marks this VMA with ~VM_MAYWRITE, so mprotect(PROT_WRITE) fails.
+// Shadow buffer pointer swap breaks Parcel lifecycle: freeBuffer() sends
+// BC_FREE_BUFFER to kernel with the swapped heap pointer → SIGABRT or leak.
+//
+// /proc/self/mem uses access_process_vm() with FOLL_FORCE, which ignores
+// page protection. This lets us write in-place without pointer swaps.
+// ─────────────────────────────────────────────────────────────────────────────
+static bool writeToReadOnly(void* dst, const void* src, size_t len) {
+    int fd = open("/proc/self/mem", O_RDWR);
+    if (fd < 0) return false;
+    ssize_t written = pwrite(fd, src, len, (off_t)(uintptr_t)dst);
+    close(fd);
+    return (written == (ssize_t)len);
+}
+
 static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
                                    size_t base_offset, double lat, double lon) {
     if (base_offset + 4 > sz) return false;
@@ -4950,47 +4970,89 @@ static void mutateLocationReply(void* reply) {
         static_cast<uint8_t*>(reply) + 0x08);
     if (!raw) return;
 
-    // Allocate writable shadow copy
-    uint8_t* shadow = new uint8_t[sz];
-    memcpy(shadow, raw, sz);
+    // PR147: Scan on a read-only copy to find lat/lon offsets,
+    // then write spoofed values via /proc/self/mem (bypasses PROT_READ).
+    // No pointer swap → no freeBuffer/BC_FREE_BUFFER conflict.
+    uint8_t* scan = new uint8_t[sz];
+    memcpy(scan, raw, sz);
 
+    // findLocationOffsets: scan the copy to find where lat/lon are,
+    // then write to original via /proc/self/mem.
     bool mutated = false;
 
     // 1) Try AOSP ILocationManager fixed-offset format (base=12)
-    if (mutateLocationInBuffer(shadow, sz, 12, lat, lon)) {
-        LOGD("[PR146] Location reply mutated (AOSP@12): lat=%.6f lon=%.6f", lat, lon);
-        mutated = true;
+    if (mutateLocationInBuffer(scan, sz, 12, lat, lon)) {
+        // mutateLocationInBuffer found and wrote lat/lon in the copy at some offsets.
+        // We need to find those offsets. Since we know the function writes lat then lon
+        // at specific locations, scan for our spoofed values in the copy.
+        for (size_t off = 0; off + 16 <= sz; off += 4) {
+            double v1, v2;
+            memcpy(&v1, scan + off, 8);
+            memcpy(&v2, scan + off + 8, 8);
+            if (v1 == lat && v2 == lon) {
+                if (writeToReadOnly(raw + off, &lat, 8) &&
+                    writeToReadOnly(raw + off + 8, &lon, 8)) {
+                    LOGD("[PR147] Location reply mutated (AOSP@12→%zu): lat=%.6f lon=%.6f",
+                         off, lat, lon);
+                    mutated = true;
+                } else {
+                    LOGE("[PR147] /proc/self/mem write FAILED for reply (AOSP@12)");
+                }
+                break;
+            }
+        }
     }
 
     // 2) Doppler scan fallback
     if (!mutated) {
+        // Reset scan copy
+        memcpy(scan, raw, sz);
         size_t dopplerOffset = 0;
-        if (mutateLocationByDopplerScan(shadow, sz, lat, lon, dopplerOffset)) {
-            LOGD("[PR146] Location reply mutated (Doppler@%zu): lat=%.6f lon=%.6f",
-                 dopplerOffset, lat, lon);
-            mutated = true;
+        if (mutateLocationByDopplerScan(scan, sz, lat, lon, dopplerOffset)) {
+            for (size_t off = 0; off + 16 <= sz; off += 4) {
+                double v1, v2;
+                memcpy(&v1, scan + off, 8);
+                memcpy(&v2, scan + off + 8, 8);
+                if (v1 == lat && v2 == lon) {
+                    if (writeToReadOnly(raw + off, &lat, 8) &&
+                        writeToReadOnly(raw + off + 8, &lon, 8)) {
+                        LOGD("[PR147] Location reply mutated (Doppler@%zu→%zu): lat=%.6f lon=%.6f",
+                             dopplerOffset, off, lat, lon);
+                        mutated = true;
+                    } else {
+                        LOGE("[PR147] /proc/self/mem write FAILED for reply (Doppler)");
+                    }
+                    break;
+                }
+            }
         }
     }
 
     // 3) Provider-validated scan
     if (!mutated) {
+        memcpy(scan, raw, sz);
         size_t probeOffset = 0;
-        if (probeProviderValidatedLocation(shadow, sz, lat, lon, probeOffset)) {
-            LOGE("[PR146] Location reply mutated (provider-scan@%zu): lat=%.6f lon=%.6f",
-                 probeOffset, lat, lon);
-            mutated = true;
+        if (probeProviderValidatedLocation(scan, sz, lat, lon, probeOffset)) {
+            for (size_t off = 0; off + 16 <= sz; off += 4) {
+                double v1, v2;
+                memcpy(&v1, scan + off, 8);
+                memcpy(&v2, scan + off + 8, 8);
+                if (v1 == lat && v2 == lon) {
+                    if (writeToReadOnly(raw + off, &lat, 8) &&
+                        writeToReadOnly(raw + off + 8, &lon, 8)) {
+                        LOGE("[PR147] Location reply mutated (probe@%zu→%zu): lat=%.6f lon=%.6f",
+                             probeOffset, off, lat, lon);
+                        mutated = true;
+                    } else {
+                        LOGE("[PR147] /proc/self/mem write FAILED for reply (probe)");
+                    }
+                    break;
+                }
+            }
         }
     }
 
-    if (mutated) {
-        // Swap mData to shadow buffer
-        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
-            static_cast<uint8_t*>(reply) + 0x08);
-        *mDataField = shadow;
-        // Shadow leaks intentionally — caller reads from it after return.
-    } else {
-        delete[] shadow;
-    }
+    delete[] scan;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5122,9 +5184,9 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
         mutateLocationReply(reply);
     }
 
-    // PR146: Reply-side fallback for obfuscated GMS interfaces.
-    // Uses shadow buffer because reply Parcel data is in Binder mmap (PROT_READ only).
-    // Writing directly to it causes SEGV_ACCERR.
+    // PR147: Reply-side fallback for obfuscated GMS interfaces.
+    // Uses /proc/self/mem to write in-place to PROT_READ Binder mmap.
+    // No pointer swap → no freeBuffer/BC_FREE_BUFFER conflict.
     if (!isAospLoc && !isGmsLoc && status == 0 && reply
         && (latBits != 0 || lonBits != 0)) {
         size_t replySz = parcel_dataSize(reply);
@@ -5132,30 +5194,38 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
             uint8_t* replyRaw = *reinterpret_cast<uint8_t**>(
                 static_cast<uint8_t*>(reply) + 0x08);
             if (replyRaw && hasProviderSignature(replyRaw, replySz)) {
-                // PR146: Visualize reply parcel for diagnostics
                 visualizeLocationParcel(replyRaw, replySz, "ipc-reply", code);
 
-                // Allocate writable shadow copy
-                uint8_t* replyShadow = new uint8_t[replySz];
-                memcpy(replyShadow, replyRaw, replySz);
+                // Scan on writable copy to find lat/lon offset
+                uint8_t* scan = new uint8_t[replySz];
+                memcpy(scan, replyRaw, replySz);
 
                 double rLat, rLon;
                 memcpy(&rLat, &latBits, 8);
                 memcpy(&rLon, &lonBits, 8);
 
                 size_t probeOff = 0;
-                if (probeProviderValidatedLocation(replyShadow, replySz, rLat, rLon, probeOff)) {
-                    // Swap mData to shadow buffer
-                    uint8_t** mDataField = reinterpret_cast<uint8_t**>(
-                        static_cast<uint8_t*>(reply) + 0x08);
-                    *mDataField = replyShadow;
-                    LOGE("[PR146] ipc reply mutated: handle=%d code=%u probe@%zu lat=%.6f lon=%.6f",
-                         handle, code, probeOff, rLat, rLon);
-                    // Note: replyShadow leaks intentionally — the caller reads from it
-                    // after we return. The Binder driver reclaims the original buffer.
-                } else {
-                    delete[] replyShadow;
+                if (probeProviderValidatedLocation(scan, replySz, rLat, rLon, probeOff)) {
+                    // Find where the spoofed values were written in the copy
+                    bool written = false;
+                    for (size_t off = 0; off + 16 <= replySz; off += 4) {
+                        double v1, v2;
+                        memcpy(&v1, scan + off, 8);
+                        memcpy(&v2, scan + off + 8, 8);
+                        if (v1 == rLat && v2 == rLon) {
+                            if (writeToReadOnly(replyRaw + off, &rLat, 8) &&
+                                writeToReadOnly(replyRaw + off + 8, &rLon, 8)) {
+                                LOGE("[PR147] ipc reply mutated: handle=%d code=%u probe@%zu→%zu lat=%.6f lon=%.6f",
+                                     handle, code, probeOff, off, rLat, rLon);
+                                written = true;
+                            } else {
+                                LOGE("[PR147] /proc/self/mem write FAILED for ipc reply");
+                            }
+                            break;
+                        }
+                    }
                 }
+                delete[] scan;
             }
         }
     }
