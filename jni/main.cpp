@@ -164,7 +164,8 @@ enum FileType {
     PROC_SELF_CGROUP,     // /proc/self/cgroup — puede revelar namespace KernelSU
     BATTERY_CHARGE_FULL,  // PR42: /sys/class/power_supply/battery/charge_full[_design]
     PROC_NET_IF_INET6,    // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
-    PROC_NET_IPV6_ROUTE   // PR43: /proc/net/ipv6_route
+    PROC_NET_IPV6_ROUTE,  // PR43: /proc/net/ipv6_route
+    PROC_SMAPS            // PR140: /proc/self/smaps — separate from maps for Private_Dirty filtering
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -586,6 +587,53 @@ static inline bool isProcPidPath(const char* path, const char* suffix) {
     while (*p >= '0' && *p <= '9') p++;
     if (*p != '/') return false;
     return strcmp(p + 1, suffix) == 0;
+}
+
+// PR140: Obfuscate Dobby inline hook trampolines to evade pattern detection.
+// Dobby writes LDR Xn,[PC+8]; BR Xn; <addr> (16 bytes). DuckDetector matches
+// this signature. We rewrite it to MOVZ+MOVK+MOVK+BR (same 16 bytes, different
+// encoding) which builds the address in-register without a literal pool.
+static void obfuscateTrampoline(void* func_addr) {
+    uint32_t* code = reinterpret_cast<uint32_t*>(func_addr);
+    uint32_t insn0 = code[0];
+    uint32_t insn1 = code[1];
+
+    // Validate: LDR Xt, #imm19  →  0101 1000 xxxx xxxx xxxx xxxx xxxt tttt
+    //           BR  Xn           →  1101 0110 0001 1111 0000 00nn nnn0 0000
+    if ((insn0 & 0xFF000000) != 0x58000000) return;
+    if ((insn1 & 0xFFFFFC1F) != 0xD61F0000) return;
+
+    uint32_t reg = insn0 & 0x1F;
+    // Verify BR uses same register
+    if (((insn1 >> 5) & 0x1F) != reg) return;
+
+    // Extract 64-bit target address from literal pool (bytes 8-15)
+    uint64_t target;
+    memcpy(&target, &code[2], sizeof(target));
+
+    // Build MOVZ + MOVK + MOVK + BR sequence (16 bytes)
+    // Android user space uses 48-bit virtual addresses (bits [63:48] = 0)
+    uint32_t new_code[4];
+    new_code[0] = 0xD2800000 | (((uint32_t)((target >>  0) & 0xFFFF)) << 5) | reg;  // MOVZ Xreg, #imm0
+    new_code[1] = 0xF2A00000 | (((uint32_t)((target >> 16) & 0xFFFF)) << 5) | reg;  // MOVK Xreg, #imm1, LSL#16
+    new_code[2] = 0xF2C00000 | (((uint32_t)((target >> 32) & 0xFFFF)) << 5) | reg;  // MOVK Xreg, #imm2, LSL#32
+    new_code[3] = 0xD61F0000 | (reg << 5);                                           // BR   Xreg
+
+    uintptr_t page = (uintptr_t)func_addr & ~0xFFFUL;
+    // Handle page boundary: trampoline may span two pages
+    size_t prot_size = (((uintptr_t)func_addr + 16 - 1) & ~0xFFFUL) == page ? 4096 : 8192;
+    mprotect((void*)page, prot_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+    memcpy(func_addr, new_code, 16);
+    __builtin___clear_cache(reinterpret_cast<char*>(func_addr),
+                            reinterpret_cast<char*>(func_addr) + 16);
+    mprotect((void*)page, prot_size, PROT_READ | PROT_EXEC);
+}
+
+// Wrapper: install Dobby hook + obfuscate the trampoline in one call.
+static int DobbyHookObf(void* func, void* hook, void** orig) {
+    int ret = DobbyHook(func, hook, orig);
+    if (ret == 0) obfuscateTrampoline(func);
+    return ret;
 }
 
 // PR70: Remap module .so memory from file-backed to anonymous.
@@ -1882,8 +1930,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
             type = PROC_ETH0_MAC;
         }
         // PR70: Also match /proc/<pid>/maps — detection apps bypass /proc/self/ filtering
-        else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps") ||
-                 isProcPidPath(pathname, "maps") || isProcPidPath(pathname, "smaps")) type = PROC_MAPS;
+        else if (strstr(pathname, "/proc/self/maps") || isProcPidPath(pathname, "maps")) type = PROC_MAPS;
+        // PR140: Separate smaps handler for Private_Dirty sanitization
+        else if (strstr(pathname, "/proc/self/smaps") || isProcPidPath(pathname, "smaps")) type = PROC_SMAPS;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo") ||
@@ -2134,7 +2183,57 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::istringstream iss(rawFile);
                     std::string line;
                     while (std::getline(iss, line)) {
-                        if (!isHiddenPath(line.c_str())) content += line + "\n";
+                        if (isHiddenPath(line.c_str())) continue;
+                        // PR140: Hide small anonymous executable regions (Dobby code buffers)
+                        if (!line.empty() && isxdigit(line[0])) {
+                            uintptr_t s, e; char pm[5];
+                            if (sscanf(line.c_str(), "%lx-%lx %4s", &s, &e, pm) == 3) {
+                                size_t sz = e - s;
+                                bool isAnon = (line.find('/') == std::string::npos &&
+                                               line.find('[') == std::string::npos);
+                                if (isAnon && pm[2] == 'x' && sz <= 8192) continue;
+                            }
+                        }
+                        content += line + "\n";
+                    }
+                } else if (type == PROC_SMAPS) {
+                    // PR140: Filter smaps output — sanitize Private_Dirty on executable
+                    // segments and hide Dobby code buffer regions.
+                    char tmpBuf[8192];
+                    ssize_t r;
+                    std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) {
+                        rawFile.append(tmpBuf, r);
+                    }
+                    std::istringstream iss(rawFile);
+                    std::string line;
+                    bool inExecSegment = false;
+                    bool isHidden = false;
+                    while (std::getline(iss, line)) {
+                        // Header line starts with hex address
+                        if (!line.empty() && isxdigit(line[0])) {
+                            isHidden = isHiddenPath(line.c_str());
+                            inExecSegment = (line.find("r-xp") != std::string::npos);
+                            // Hide small anonymous executable regions (Dobby trampolines)
+                            if (!isHidden) {
+                                uintptr_t s, e; char pm[5];
+                                if (sscanf(line.c_str(), "%lx-%lx %4s", &s, &e, pm) == 3) {
+                                    size_t sz = e - s;
+                                    bool isAnon = (line.find('/') == std::string::npos &&
+                                                   line.find('[') == std::string::npos);
+                                    if (isAnon && pm[2] == 'x' && sz <= 8192)
+                                        isHidden = true;
+                                }
+                            }
+                        }
+                        if (isHidden) continue;
+                        // Zero out Private_Dirty on executable segments (Dobby COW pages)
+                        if (inExecSegment &&
+                            line.find("Private_Dirty:") != std::string::npos) {
+                            content += "Private_Dirty:         0 kB\n";
+                            continue;
+                        }
+                        content += line + "\n";
                     }
                 } else if (type == PROC_MEMINFO) {
                     char tmpBuf[8192];
@@ -5732,7 +5831,7 @@ static void applyBBinderHook() {
     void* sym106 = resolveLibbinderSymbol(
         "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
     if (sym106) {
-        int rc106 = DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
+        int rc106 = DobbyHookObf(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
         LOGE("[PR106] BBinder::transact hook rc=%d @ %p (orig=%p)", rc106, sym106, (void*)orig_bbinder_transact);
     }
 
@@ -5801,7 +5900,7 @@ static void applyBBinderHook() {
 
     // ── Hook final ────────────────────────────────────────────────────────────
     if (target_fn) {
-        int rc115 = DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
+        int rc115 = DobbyHookObf(target_fn, (void*)my_jbbinder_ontransact,
                   (void**)&orig_jbbinder_ontransact);
         if (rc115 == 0) {
             LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p (orig=%p)", target_fn, (void*)orig_jbbinder_ontransact);
@@ -5843,7 +5942,7 @@ static void applyBBinderHook() {
         // Fallback: search for any symbol containing "Location" and "readFromParcel"
         // via dlopen + iteration (future enhancement)
         if (readFromParcel) {
-            int rc118 = DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
+            int rc118 = DobbyHookObf(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
             LOGE("[PR118] Location::readFromParcel hook rc=%d @ %p (orig=%p)", rc118, readFromParcel, (void*)orig_Location_readFromParcel);
         } else {
             // Not an error on most ROMs — readFromParcel is pure Java on Android 11.
@@ -5872,7 +5971,7 @@ static void applyBinderHooks() {
     void* sym = resolveLibbinderSymbol(
         "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
     if (sym) {
-        int rc105 = DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
+        int rc105 = DobbyHookObf(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
         if (rc105 == 0) {
             LOGE("[PR105] IPCThreadState::transact hooked OK @ %p (orig=%p)", sym, (void*)orig_ipc_transact);
         } else {
@@ -5893,7 +5992,7 @@ static void applyBinderHooks() {
     // Instead, we intercept readDouble and return spoofed values when armed.
     void* symRD = resolveLibbinderSymbol("_ZNK7android6Parcel10readDoubleEv");
     if (symRD) {
-        int rcRD = DobbyHook(symRD, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
+        int rcRD = DobbyHookObf(symRD, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
         LOGE("[PR149] Parcel::readDouble hook %s @ %p (orig=%p)",
              rcRD == 0 ? "OK" : "FAILED", symRD, (void*)orig_Parcel_readDouble);
     } else {
@@ -6019,7 +6118,7 @@ public:
                     std::string fake_cpuinfo = generateMulticoreCpuInfo(*fp_cpu);
                     LOGE("MemFD: profile found, hardware='%s', cpuinfo_size=%zu",
                          fp_cpu->hardware, fake_cpuinfo.size());
-                    int mfd = syscall(__NR_memfd_create, "fake_cpuinfo", 0);
+                    int mfd = syscall(__NR_memfd_create, "", 0x0001u /*MFD_CLOEXEC*/);
                     if (mfd >= 0) {
                         write(mfd, fake_cpuinfo.c_str(), fake_cpuinfo.size());
                         lseek(mfd, 0, SEEK_SET);
@@ -6028,12 +6127,15 @@ public:
                         if (mount(fdpath, "/proc/cpuinfo", nullptr, MS_BIND, nullptr) == 0) {
                             LOGE("MemFD: bind-mounted spoofed /proc/cpuinfo (%zu bytes)",
                                  fake_cpuinfo.size());
+                            // PR140: Close fd after bind mount — mount persists independently.
+                            // Eliminates /memfd: entry from /proc/self/fd/ that DuckDetector flags.
+                            close(mfd);
                         } else {
                             LOGE("MemFD: bind mount FAILED (errno=%d: %s), falling back to hooks",
                                  errno, strerror(errno));
+                            // Mount failed — keep fd open as fallback for VFS hook reads
+                            if (g_api) g_api->exemptFd(mfd);
                         }
-                        // Exempt fd from zygote's automatic fd cleanup during specialization
-                        if (g_api) g_api->exemptFd(mfd);
                     } else {
                         LOGE("MemFD: memfd_create failed (errno=%d: %s)", errno, strerror(errno));
                     }
@@ -6129,29 +6231,29 @@ public:
         // Toda llamada a open() pasa por openat() de todas formas → un solo hook en openat basta.
 
         void* openat_func = resolveLibcSymbol("openat");
-        if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
+        if (openat_func) DobbyHookObf(openat_func, (void*)my_openat, (void**)&orig_openat);
 
         void* read_func = resolveLibcSymbol("read");
-        if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
+        if (read_func) DobbyHookObf(read_func, (void*)my_read, (void**)&orig_read);
 
         void* close_func = resolveLibcSymbol("close");
-        if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
+        if (close_func) DobbyHookObf(close_func, (void*)my_close, (void**)&orig_close);
 
         void* lseek_func = resolveLibcSymbol("lseek");
-        if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
+        if (lseek_func) DobbyHookObf(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
 
         void* lseek64_func = resolveLibcSymbol("lseek64");
-        if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
+        if (lseek64_func) DobbyHookObf(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
 
         void* pread_func = resolveLibcSymbol("pread");
-        if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
+        if (pread_func) DobbyHookObf(pread_func, (void*)my_pread, (void**)&orig_pread);
 
         void* pread64_func = resolveLibcSymbol("pread64");
-        if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
+        if (pread64_func) DobbyHookObf(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
 
         void* mmap_func = resolveLibcSymbol("mmap");
         if (mmap_func) {
-            int ret = DobbyHook(mmap_func, (void*)my_mmap, (void**)&orig_mmap);
+            int ret = DobbyHookObf(mmap_func, (void*)my_mmap, (void**)&orig_mmap);
             LOGE("PR120: mmap hook %s at %p (ret=%d)", ret == 0 ? "SUCCESS" : "FAILED", mmap_func, ret);
         } else {
             LOGE("PR120: mmap symbol unresolved (resolver chain exhausted)");
@@ -6168,7 +6270,7 @@ public:
                 // Evitar double-hook sobre la misma dirección (puede anular trampolines).
                 LOGE("PR120: mmap64 shares mmap symbol (%p) — single-hook mode", mmap64_func);
             } else {
-                int ret = DobbyHook(mmap64_func, (void*)my_mmap64, (void**)&orig_mmap64);
+                int ret = DobbyHookObf(mmap64_func, (void*)my_mmap64, (void**)&orig_mmap64);
                 LOGE("PR120: mmap64 hook %s at %p (ret=%d)", ret == 0 ? "SUCCESS" : "FAILED", mmap64_func, ret);
             }
         } else {
@@ -6228,7 +6330,7 @@ public:
                 }
             }
             if (find_func && !tooClose) {
-                int ret = DobbyHook(find_func, (void*)my_system_property_find,
+                int ret = DobbyHookObf(find_func, (void*)my_system_property_find,
                                     (void**)&orig_system_property_find);
                 if (ret == 0) {
                     LOGE("PR86: Dobby inline hook on __system_property_find SUCCESS at %p", find_func);
@@ -6253,7 +6355,7 @@ public:
             void* foreach_addr = resolveLibcSymbol("__system_property_foreach");
             if (!foreach_addr) foreach_addr = dlsym(RTLD_DEFAULT, "__system_property_foreach");
             if (foreach_addr) {
-                int ret = DobbyHook(foreach_addr, (void*)my_system_property_foreach,
+                int ret = DobbyHookObf(foreach_addr, (void*)my_system_property_foreach,
                                     (void**)&orig_system_property_foreach);
                 if (ret == 0) {
                     g_propForeachInlineHooked = true;
@@ -6279,14 +6381,14 @@ public:
             void* spawnp_addr = dlsym(RTLD_DEFAULT, "posix_spawnp");
             bool spawn_ok = false, spawnp_ok = false;
             if (spawn_addr) {
-                int ret = DobbyHook(spawn_addr, (void*)my_posix_spawn,
+                int ret = DobbyHookObf(spawn_addr, (void*)my_posix_spawn,
                                     (void**)&orig_posix_spawn);
                 spawn_ok = (ret == 0);
                 LOGE("PR90: posix_spawn Dobby hook %s at %p (ret=%d)",
                      spawn_ok ? "SUCCESS" : "FAILED", spawn_addr, ret);
             }
             if (spawnp_addr) {
-                int ret = DobbyHook(spawnp_addr, (void*)my_posix_spawnp,
+                int ret = DobbyHookObf(spawnp_addr, (void*)my_posix_spawnp,
                                     (void**)&orig_posix_spawnp);
                 spawnp_ok = (ret == 0);
                 LOGE("PR90: posix_spawnp Dobby hook %s at %p (ret=%d)",
@@ -6323,7 +6425,7 @@ public:
             void* dlsym_addr = DobbySymbolResolver("libdl.so", "dlsym");
             if (!dlsym_addr) dlsym_addr = dlsym(RTLD_DEFAULT, "dlsym");
             if (dlsym_addr) {
-                int ret = DobbyHook(dlsym_addr, (void*)my_dlsym, (void**)&orig_dlsym);
+                int ret = DobbyHookObf(dlsym_addr, (void*)my_dlsym, (void**)&orig_dlsym);
                 LOGE("PR86: dlsym hook %s at %p (ret=%d)",
                      ret == 0 ? "SUCCESS" : "FAILED", dlsym_addr, ret);
             } else {
@@ -6343,7 +6445,7 @@ public:
             void* dlopen_ext_addr = DobbySymbolResolver("libdl.so", "android_dlopen_ext");
             if (!dlopen_ext_addr) dlopen_ext_addr = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
             if (dlopen_ext_addr) {
-                int ret = DobbyHook(dlopen_ext_addr, (void*)my_android_dlopen_ext,
+                int ret = DobbyHookObf(dlopen_ext_addr, (void*)my_android_dlopen_ext,
                                     (void**)&orig_android_dlopen_ext);
                 LOGE("PR87: android_dlopen_ext hook %s at %p (ret=%d)",
                      ret == 0 ? "SUCCESS" : "FAILED", dlopen_ext_addr, ret);
@@ -6354,7 +6456,7 @@ public:
             void* dlopen_addr = DobbySymbolResolver("libdl.so", "dlopen");
             if (!dlopen_addr) dlopen_addr = dlsym(RTLD_DEFAULT, "dlopen");
             if (dlopen_addr) {
-                int ret = DobbyHook(dlopen_addr, (void*)my_dlopen_hook,
+                int ret = DobbyHookObf(dlopen_addr, (void*)my_dlopen_hook,
                                     (void**)&orig_dlopen_hook);
                 LOGE("PR87: dlopen hook %s at %p (ret=%d)",
                      ret == 0 ? "SUCCESS" : "FAILED", dlopen_addr, ret);
@@ -6379,72 +6481,72 @@ public:
         // con DobbySymbolResolver como fallback para símbolos privados (__ioctl).
         // Evita hooking de PLT stubs propios y VDSO (clock_gettime → SIGSEGV).
         void* uname_sym = resolveLibcSymbol("uname");
-        if (uname_sym) DobbyHook(uname_sym, (void*)my_uname, (void**)&orig_uname);
+        if (uname_sym) DobbyHookObf(uname_sym, (void*)my_uname, (void**)&orig_uname);
 
         void* clock_gettime_sym = resolveLibcSymbol("clock_gettime");
-        if (clock_gettime_sym) DobbyHook(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
+        if (clock_gettime_sym) DobbyHookObf(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
 
         void* access_sym = resolveLibcSymbol("access");
-        if (access_sym) DobbyHook(access_sym, (void*)my_access, (void**)&orig_access);
+        if (access_sym) DobbyHookObf(access_sym, (void*)my_access, (void**)&orig_access);
 
         void* getifaddrs_sym = resolveLibcSymbol("getifaddrs");
-        if (getifaddrs_sym) DobbyHook(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
+        if (getifaddrs_sym) DobbyHookObf(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
 
         void* stat_sym = resolveLibcSymbol("stat");
-        if (stat_sym) DobbyHook(stat_sym, (void*)my_stat, (void**)&orig_stat);
+        if (stat_sym) DobbyHookObf(stat_sym, (void*)my_stat, (void**)&orig_stat);
 
         void* lstat_sym = resolveLibcSymbol("lstat");
-        if (lstat_sym) DobbyHook(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
+        if (lstat_sym) DobbyHookObf(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
 
         void* fstatat_func = resolveLibcSymbol("fstatat");
-        if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
+        if (fstatat_func) DobbyHookObf(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
 
         void* fopen_sym = resolveLibcSymbol("fopen");
-        if (fopen_sym) DobbyHook(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
+        if (fopen_sym) DobbyHookObf(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
 
         void* readlinkat_sym = resolveLibcSymbol("readlinkat");
-        if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
+        if (readlinkat_sym) DobbyHookObf(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
         void* readlink_sym = resolveLibcSymbol("readlink");
-        if (readlink_sym) DobbyHook(readlink_sym, (void*)my_readlink, (void**)&orig_readlink);
+        if (readlink_sym) DobbyHookObf(readlink_sym, (void*)my_readlink, (void**)&orig_readlink);
 
         void* sysinfo_func = resolveLibcSymbol("sysinfo");
-        if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
+        if (sysinfo_func) DobbyHookObf(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
 
         void* statfs_func = resolveLibcSymbol("statfs");
-        if (statfs_func) DobbyHook(statfs_func, (void*)my_statfs, (void**)&orig_statfs);
+        if (statfs_func) DobbyHookObf(statfs_func, (void*)my_statfs, (void**)&orig_statfs);
 
         void* statvfs_func = resolveLibcSymbol("statvfs");
-        if (statvfs_func) DobbyHook(statvfs_func, (void*)my_statvfs, (void**)&orig_statvfs);
+        if (statvfs_func) DobbyHookObf(statvfs_func, (void*)my_statvfs, (void**)&orig_statvfs);
 
         void* readdir_func = resolveLibcSymbol("readdir");
-        if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
+        if (readdir_func) DobbyHookObf(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
 
         void* getauxval_func = resolveLibcSymbol("getauxval");
-        if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
+        if (getauxval_func) DobbyHookObf(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
         // PR70: dl_iterate_phdr — hide module .so from ELF enumeration
         void* dl_iter_func = resolveLibcSymbol("dl_iterate_phdr");
         if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
-        if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
+        if (dl_iter_func) DobbyHookObf(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
         void* dup_sym = resolveLibcSymbol("dup");
-        if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
+        if (dup_sym) DobbyHookObf(dup_sym, (void*)my_dup, (void**)&orig_dup);
         void* dup2_func = resolveLibcSymbol("dup2");
-        if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
+        if (dup2_func) DobbyHookObf(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
         void* dup3_func = resolveLibcSymbol("dup3");
-        if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
+        if (dup3_func) DobbyHookObf(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
 
         // PR43: fcntl hook (F_DUPFD)
         void* fcntl_func = resolveLibcSymbol("fcntl");
-        if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
+        if (fcntl_func) DobbyHookObf(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
 
         // PR42: ioctl hook — MAC real bypass via syscall directo
         // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
         void* ioctl_sym = resolveLibcSymbol("__ioctl");
         if (!ioctl_sym) ioctl_sym = resolveLibcSymbol("ioctl");
-        if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
+        if (ioctl_sym) DobbyHookObf(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // -----------------------------------------------------------------------------
         // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote
@@ -6777,19 +6879,19 @@ public:
 
         // Native APIs
         void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
-        if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
+        if (egl_func) DobbyHookObf(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
 
         // TLS 1.3
         void* tls13_ctx = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
-        if (tls13_ctx) DobbyHook(tls13_ctx, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
+        if (tls13_ctx) DobbyHookObf(tls13_ctx, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
         void* tls13_ssl = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
-        if (tls13_ssl) DobbyHook(tls13_ssl, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
+        if (tls13_ssl) DobbyHookObf(tls13_ssl, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
         void* tls13_set = DobbySymbolResolver("libssl.so", "SSL_set_ciphersuites");
-        if (tls13_set) DobbyHook(tls13_set, (void*)my_SSL_set_ciphersuites, (void**)&orig_SSL_set_ciphersuites);
+        if (tls13_set) DobbyHookObf(tls13_set, (void*)my_SSL_set_ciphersuites, (void**)&orig_SSL_set_ciphersuites);
 
         // Network Hooks (TLS 1.2)
         void* ssl12_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
-        if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
+        if (ssl12_func) DobbyHookObf(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
 
         // GPU Hooks
         // Fix11: Force-load GPU libraries — on some ROMs (MIUI, etc.) they are
@@ -6797,18 +6899,18 @@ public:
         // return NULL and leaving GL_RENDERER/GL_VENDOR unspoofed.
         dlopen("libGLESv2.so", RTLD_NOW);
         void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
-        if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
+        if (gl_func) DobbyHookObf(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
         else LOGE("Fix11: glGetString not resolved after dlopen");
 
         // Vulkan
         dlopen("libvulkan.so", RTLD_NOW);
         void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
-        if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
+        if (vulkan_func) DobbyHookObf(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
 
         // OpenCL
         dlopen("libOpenCL.so", RTLD_NOW);
         void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
-        if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
+        if (cl_func) DobbyHookObf(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
         // Sensor::getName()/getVendor() Dobby hooks REMOVED — ABI mismatch
         // (returns const String8&, not const char*) caused SIGBUS in GMS.
@@ -6843,10 +6945,10 @@ public:
         }
         if (settings_func) {
             if (settings_variant == 0) {
-                DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+                DobbyHookObf(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
             } else {
                 LOGE("Settings.Secure: using 3-param variant (index %d)", settings_variant);
-                DobbyHook(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
+                DobbyHookObf(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
             }
         } else {
             LOGE("Settings.Secure.getString: NO symbol found — hook NOT installed");
@@ -6870,10 +6972,10 @@ public:
         }
         if (settings_user_func) {
             if (settings_user_variant == 0) {
-                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+                DobbyHookObf(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
             } else {
                 LOGE("Settings.Secure.getStringForUser: using 4-param variant (index %d)", settings_user_variant);
-                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
+                DobbyHookObf(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
             }
         } else {
             LOGE("Settings.Secure.getStringForUser: NO symbol found — hook NOT installed");
@@ -6894,10 +6996,10 @@ public:
         }
         if (global_func) {
             if (global_variant == 0) {
-                DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+                DobbyHookObf(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
             } else {
                 LOGE("Settings.Global: using 3-param variant (index %d)", global_variant);
-                DobbyHook(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
+                DobbyHookObf(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
             }
         } else {
             LOGE("Settings.Global.getString: NO symbol found — hook NOT installed");
@@ -6918,10 +7020,10 @@ public:
         }
         if (global_user_func) {
             if (global_user_variant == 0) {
-                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+                DobbyHookObf(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
             } else {
                 LOGE("Settings.Global.getStringForUser: using 4-param variant (index %d)", global_user_variant);
-                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
+                DobbyHookObf(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
             }
         } else {
             LOGE("Settings.Global.getStringForUser: NO symbol found — hook NOT installed");
