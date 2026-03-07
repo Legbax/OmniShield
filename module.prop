@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v24.0
-versionCode=24000
+version=v25.0
+versionCode=25000
 author=Legba
-description=PR135 — Skip all Binder hooks in GMS (Dobby trampoline SIGSEGV fix)
+description=Hardcore location spoofer — intercepts Binder IPC to mask real GPS coordinates from apps
