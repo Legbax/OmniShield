@@ -4700,7 +4700,7 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
             memcpy(&cLat, buf + latOff, 8);
             memcpy(&cLon, buf + lonOff, 8);
             if (cLat >= -90.0 && cLat <= 90.0 && cLon >= -180.0 && cLon <= 180.0
-                && cLat != 0.0 && cLon != 0.0) { // PR151: reject single-zero
+                && fabs(cLat) >= 1e-4 && fabs(cLon) >= 1e-4) { // PR152: magnitude threshold
                 memcpy(buf + latOff, &lat, 8);
                 memcpy(buf + lonOff, &lon, 8);
                 return true;
@@ -4722,7 +4722,7 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
                 memcpy(&cLat, buf + latOff, 8);
                 memcpy(&cLon, buf + lonOff, 8);
                 if (cLat >= -90.0 && cLat <= 90.0 && cLon >= -180.0 && cLon <= 180.0
-                    && cLat != 0.0 && cLon != 0.0) { // PR151: reject single-zero
+                    && fabs(cLat) >= 1e-4 && fabs(cLon) >= 1e-4) { // PR152: magnitude threshold
                     memcpy(buf + latOff, &lat, 8);
                     memcpy(buf + lonOff, &lon, 8);
                     return true;
@@ -4830,9 +4830,19 @@ static bool probeProviderValidatedLocation(uint8_t* buf, size_t sz,
 
             if (curLat < -90.0 || curLat > 90.0) continue;
             if (curLon < -180.0 || curLon > 180.0) continue;
-            if (curLat == 0.0 || curLon == 0.0) continue; // PR151: reject single-zero (padding false positive)
+            // PR152: use magnitude threshold — the offending field displays as 0.000000
+            // but is NOT exactly 0.0 (tiny near-zero double like elapsed-time-uncertainty).
+            // 1e-4° ≈ 11m from equator/meridian: no real GPS returns less than this.
+            if (fabs(curLat) < 1e-4 || fabs(curLon) < 1e-4) continue;
 
             // Provider string + lat/lon range match — mutate
+            {
+                static std::atomic<int> s_pvMatch{0};
+                int _m = s_pvMatch.fetch_add(1, std::memory_order_relaxed);
+                if (_m < 8) {
+                    LOGE("[PR152] probe match: off=%zu curLat=%.9f curLon=%.9f", off, curLat, curLon);
+                }
+            }
             memcpy(buf + off, &lat, 8);
             memcpy(buf + off + 8, &lon, 8);
             outBaseOffset = base;
@@ -4888,7 +4898,7 @@ static void visualizeLocationParcel(const uint8_t* buf, size_t sz,
         memcpy(&v1, buf + i, 8);
         memcpy(&v2, buf + i + 8, 8);
         if (v1 >= -90.0 && v1 <= 90.0 && v2 >= -180.0 && v2 <= 180.0
-            && v1 != 0.0 && v2 != 0.0 // PR151: reject single-zero
+            && fabs(v1) >= 1e-4 && fabs(v2) >= 1e-4 // PR152: magnitude threshold
             && v1 != 1.0 && v2 != 1.0 && v1 != -1.0 && v2 != -1.0) {
             LOGE("[PV#%d] coord@%zu lat=%.6f lon=%.6f", n, i, v1, v2);
         }
@@ -4984,11 +4994,18 @@ static void mutateLocationReply(void* reply) {
                 double rv1, rv2;
                 memcpy(&rv1, raw + off, 8);
                 memcpy(&rv2, raw + off + 8, 8);
+                // PR152: safety-net — reject bad originals
+                if (fabs(rv1) < 1e-4 || fabs(rv2) < 1e-4 ||
+                    rv1 < -90.0 || rv1 > 90.0 || rv2 < -180.0 || rv2 > 180.0) {
+                    LOGE("[PR152] arm rejected bad orig (%s): rv1=%.9f rv2=%.9f @ off=%zu",
+                         tag, rv1, rv2, off);
+                    continue;
+                }
                 tl_spoof_parcel = reply;
                 tl_real_lat = rv1;
                 tl_real_lon = rv2;
                 tl_lat_done = false;
-                LOGE("[PR150] AOSP reply spoof armed (%s): parcel=%p realLat=%.6f realLon=%.6f",
+                LOGE("[PR152] AOSP reply spoof armed (%s): parcel=%p realLat=%.9f realLon=%.9f",
                      tag, reply, rv1, rv2);
                 return true;
             }
@@ -5180,11 +5197,20 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                             double origLat, origLon;
                             memcpy(&origLat, replyRaw + off, 8);
                             memcpy(&origLon, replyRaw + off + 8, 8);
+                            // PR152: safety-net — reject if origLat/origLon look invalid
+                            // (would indicate probe still hit a false positive)
+                            if (fabs(origLat) < 1e-4 || fabs(origLon) < 1e-4 ||
+                                origLat < -90.0 || origLat > 90.0 ||
+                                origLon < -180.0 || origLon > 180.0) {
+                                LOGE("[PR152] arm rejected bad orig: lat=%.9f lon=%.9f @ off=%zu",
+                                     origLat, origLon, off);
+                                continue;
+                            }
                             tl_spoof_parcel = reply;
                             tl_real_lat = origLat;
                             tl_real_lon = origLon;
                             tl_lat_done = false;
-                            LOGE("[PR150] ipc reply spoof armed: handle=%d code=%u parcel=%p realLat=%.6f realLon=%.6f",
+                            LOGE("[PR152] ipc reply spoof armed: handle=%d code=%u parcel=%p realLat=%.9f realLon=%.9f",
                                  handle, code, reply, origLat, origLon);
                             break;
                         }
