@@ -4615,39 +4615,40 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
 using fn_Parcel_readDouble = double(*)(const void*);
 static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
 
-// PR149: Thread-local state for readDouble spoofing.
+// PR149/PR150: Thread-local state for readDouble spoofing.
 // Set by my_ipc_transact/mutateLocationReply when reply contains a location.
 // Consumed by my_Parcel_readDouble to return spoofed values.
 // This avoids writing to PROT_READ binder mmap (/proc/self/mem → EIO).
+// PR150: changed from offset-based to value-based matching (mDataPos offset
+// is not at +0x20 on this MIUI build — avoid struct layout assumptions).
 static thread_local const void* tl_spoof_parcel = nullptr;
-static thread_local size_t tl_spoof_lat_off = 0;
-static thread_local size_t tl_spoof_lon_off = 0;
+static thread_local double tl_real_lat = 0.0;  // real lat value to intercept
+static thread_local double tl_real_lon = 0.0;  // real lon value to intercept
+static thread_local bool tl_lat_done = false;   // true after lat has been spoofed
 
 static double my_Parcel_readDouble(const void* self) {
     if (tl_spoof_parcel == self && orig_Parcel_readDouble) {
-        // Read mDataPos from Parcel+0x20 (AOSP arm64 layout:
-        //   +0x00 vtable, +0x08 mData, +0x10 mDataSize, +0x18 mDataCapacity, +0x20 mDataPos)
-        size_t pos = *reinterpret_cast<const size_t*>(
-            static_cast<const uint8_t*>(self) + 0x20);
-
+        // PR150: value-based matching — call orig first, intercept by exact value.
+        // Avoids reading mDataPos from the Parcel struct (offset varies across MIUI builds).
+        double val = orig_Parcel_readDouble(self); // advance position, get real value
         int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
         int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+        double fakeLat, fakeLon;
+        memcpy(&fakeLat, &latBits, 8);
+        memcpy(&fakeLon, &lonBits, 8);
 
-        if (pos == tl_spoof_lat_off && latBits != 0) {
-            double orig = orig_Parcel_readDouble(self); // advance mDataPos
-            double lat;
-            memcpy(&lat, &latBits, 8);
-            LOGE("[PR149] readDouble spoofed lat: %.6f -> %.6f @ pos=%zu", orig, lat, pos);
-            return lat;
+        if (!tl_lat_done && val == tl_real_lat && latBits != 0) {
+            tl_lat_done = true;
+            LOGE("[PR150] readDouble spoofed lat: %.6f -> %.6f", val, fakeLat);
+            return fakeLat;
         }
-        if (pos == tl_spoof_lon_off && lonBits != 0) {
-            double orig = orig_Parcel_readDouble(self); // advance mDataPos
-            double lon;
-            memcpy(&lon, &lonBits, 8);
-            LOGE("[PR149] readDouble spoofed lon: %.6f -> %.6f @ pos=%zu", orig, lon, pos);
-            tl_spoof_parcel = nullptr; // done — clear state
-            return lon;
+        if (tl_lat_done && val == tl_real_lon && lonBits != 0) {
+            tl_spoof_parcel = nullptr;
+            tl_lat_done = false;
+            LOGE("[PR150] readDouble spoofed lon: %.6f -> %.6f", val, fakeLon);
+            return fakeLon;
         }
+        return val;
     }
     return orig_Parcel_readDouble(self);
 }
@@ -4971,18 +4972,24 @@ static void mutateLocationReply(void* reply) {
     uint8_t* scan = new uint8_t[sz];
     memcpy(scan, raw, sz);
 
-    // Helper lambda: scan copy for spoofed values, arm readDouble thread-local
+    // Helper lambda: scan copy for spoofed values, arm readDouble thread-local.
+    // PR150: stores real lat/lon (from original 'raw' buffer) for value-based matching.
     auto armIfFound = [&](const char* tag) -> bool {
         for (size_t off = 0; off + 16 <= sz; off += 4) {
             double v1, v2;
             memcpy(&v1, scan + off, 8);
             memcpy(&v2, scan + off + 8, 8);
             if (v1 == lat && v2 == lon) {
+                // Read real values from original unmodified buffer
+                double rv1, rv2;
+                memcpy(&rv1, raw + off, 8);
+                memcpy(&rv2, raw + off + 8, 8);
                 tl_spoof_parcel = reply;
-                tl_spoof_lat_off = off;
-                tl_spoof_lon_off = off + 8;
-                LOGE("[PR149] AOSP reply spoof armed (%s): parcel=%p lat@%zu lon@%zu",
-                     tag, reply, off, off + 8);
+                tl_real_lat = rv1;
+                tl_real_lon = rv2;
+                tl_lat_done = false;
+                LOGE("[PR150] AOSP reply spoof armed (%s): parcel=%p realLat=%.6f realLon=%.6f",
+                     tag, reply, rv1, rv2);
                 return true;
             }
         }
@@ -5168,11 +5175,17 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                         memcpy(&v1, scan + off, 8);
                         memcpy(&v2, scan + off + 8, 8);
                         if (v1 == rLat && v2 == rLon) {
+                            // PR150: store real values from original unmodified buffer
+                            // (scan has been modified by probeProviderValidatedLocation)
+                            double origLat, origLon;
+                            memcpy(&origLat, replyRaw + off, 8);
+                            memcpy(&origLon, replyRaw + off + 8, 8);
                             tl_spoof_parcel = reply;
-                            tl_spoof_lat_off = off;
-                            tl_spoof_lon_off = off + 8;
-                            LOGE("[PR149] ipc reply spoof armed: handle=%d code=%u parcel=%p lat@%zu lon@%zu",
-                                 handle, code, reply, off, off + 8);
+                            tl_real_lat = origLat;
+                            tl_real_lon = origLon;
+                            tl_lat_done = false;
+                            LOGE("[PR150] ipc reply spoof armed: handle=%d code=%u parcel=%p realLat=%.6f realLon=%.6f",
+                                 handle, code, reply, origLat, origLon);
                             break;
                         }
                     }
