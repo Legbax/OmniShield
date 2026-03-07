@@ -5218,6 +5218,29 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                 }
                 delete[] scan;
             }
+
+            // PR153: Fallback — scan IPC replies without provider strings.
+            // On first Maps launch, getLastLocation() may return a Location object
+            // without the expected provider string format. Scan for coordinate-range
+            // doubles directly for code=1 replies only.
+            if (!tl_spoof_parcel && code == 1 && replySz > 100 && replyRaw &&
+                !hasProviderSignature(replyRaw, replySz)) {
+                for (size_t off = 0; off + 16 <= replySz; off += 4) {
+                    double v1, v2;
+                    memcpy(&v1, replyRaw + off, 8);
+                    memcpy(&v2, replyRaw + off + 8, 8);
+                    if (v1 >= -90.0 && v1 <= 90.0 && fabs(v1) >= 1e-4 &&
+                        v2 >= -180.0 && v2 <= 180.0 && fabs(v2) >= 1e-4) {
+                        tl_spoof_parcel = reply;
+                        tl_real_lat = v1;
+                        tl_real_lon = v2;
+                        tl_lat_done = false;
+                        LOGE("[PR153] ipc reply fallback armed: handle=%d code=%u realLat=%.9f realLon=%.9f off=%zu",
+                             handle, code, v1, v2, off);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -5368,6 +5391,23 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                         const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
+
+                    // PR153: Also arm readDouble for belt-and-suspenders coverage.
+                    for (size_t off = 0; off + 16 <= sz; off += 4) {
+                        double v1, v2;
+                        memcpy(&v1, savedMData + off, 8);
+                        memcpy(&v2, savedMData + off + 8, 8);
+                        if (v1 >= -90.0 && v1 <= 90.0 && fabs(v1) >= 1e-4 &&
+                            v2 >= -180.0 && v2 <= 180.0 && fabs(v2) >= 1e-4) {
+                            tl_spoof_parcel = data;
+                            tl_real_lat = v1;
+                            tl_real_lon = v2;
+                            tl_lat_done = false;
+                            LOGE("[PR153] jbbinder readDouble armed: code=%u parcel=%p realLat=%.9f realLon=%.9f",
+                                 code, data, v1, v2);
+                            break;
+                        }
+                    }
                 } else {
                     if (looksLocation) {
                         LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
@@ -5387,6 +5427,9 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
         uint8_t** mDataField = reinterpret_cast<uint8_t**>(
             const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
         *mDataField = savedMData;
+        // PR153: Clear stale readDouble arming
+        tl_spoof_parcel = nullptr;
+        tl_lat_done = false;
     }
     delete[] shadowBuf;
 
@@ -5496,6 +5539,24 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                         const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData = *mDataField;
                     *mDataField = shadowBuf;
+
+                    // PR153: Also arm readDouble for belt-and-suspenders coverage.
+                    // Find real coords in original buffer and arm readDouble hook.
+                    for (size_t off = 0; off + 16 <= sz; off += 4) {
+                        double v1, v2;
+                        memcpy(&v1, savedMData + off, 8);
+                        memcpy(&v2, savedMData + off + 8, 8);
+                        if (v1 >= -90.0 && v1 <= 90.0 && fabs(v1) >= 1e-4 &&
+                            v2 >= -180.0 && v2 <= 180.0 && fabs(v2) >= 1e-4) {
+                            tl_spoof_parcel = data;
+                            tl_real_lat = v1;
+                            tl_real_lon = v2;
+                            tl_lat_done = false;
+                            LOGE("[PR153] bbinder readDouble armed: code=%u parcel=%p realLat=%.9f realLon=%.9f",
+                                 code, data, v1, v2);
+                            break;
+                        }
+                    }
                 } else {
                     // PR146: Log when provider signature found but no mutation
                     if (hasProviderSig) {
@@ -5516,6 +5577,9 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
         uint8_t** mDataField = reinterpret_cast<uint8_t**>(
             const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
         *mDataField = savedMData;
+        // PR153: Clear stale readDouble arming after transact completes
+        tl_spoof_parcel = nullptr;
+        tl_lat_done = false;
     }
     delete[] shadowBuf;
 
