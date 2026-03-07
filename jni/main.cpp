@@ -4690,6 +4690,133 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PR144: Provider-validated Location scanner for obfuscated GMS interfaces.
+//
+// GMS FusedLocationProviderClient uses ProGuard-obfuscated Binder interface
+// names (e.g. com.google.android.gms.internal.location.zzaz) that don't match
+// any token pattern. This scanner finds serialized Location objects by matching
+// the provider string ("gps"/"fused"/"network"/"passive") in UTF-16LE, which
+// is dramatically more selective than lat/lon range checks alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PR144: Known Location.provider strings in UTF-16LE wire format.
+// "gps" (3 chars) → 6 bytes
+static constexpr uint8_t PROVIDER_GPS_UTF16[] = {
+    0x67,0x00, 0x70,0x00, 0x73,0x00
+};
+// "fused" (5 chars) → 10 bytes
+static constexpr uint8_t PROVIDER_FUSED_UTF16[] = {
+    0x66,0x00, 0x75,0x00, 0x73,0x00, 0x65,0x00, 0x64,0x00
+};
+// "network" (7 chars) → 14 bytes
+static constexpr uint8_t PROVIDER_NETWORK_UTF16[] = {
+    0x6E,0x00, 0x65,0x00, 0x74,0x00, 0x77,0x00,
+    0x6F,0x00, 0x72,0x00, 0x6B,0x00
+};
+// "passive" (7 chars) → 14 bytes
+static constexpr uint8_t PROVIDER_PASSIVE_UTF16[] = {
+    0x70,0x00, 0x61,0x00, 0x73,0x00, 0x73,0x00,
+    0x69,0x00, 0x76,0x00, 0x65,0x00
+};
+
+// PR144: Check if buffer at offset contains a known Location provider string.
+// The int32 at buf[off] must be 3/5/7, followed by exact UTF-16LE match.
+static bool matchesKnownProvider(const uint8_t* buf, size_t sz, size_t off) {
+    if (off + 4 > sz) return false;
+    int32_t pLen = 0;
+    memcpy(&pLen, buf + off, 4);
+
+    const uint8_t* expected = nullptr;
+    size_t expectedBytes = 0;
+
+    switch (pLen) {
+        case 3:
+            expected = PROVIDER_GPS_UTF16;
+            expectedBytes = sizeof(PROVIDER_GPS_UTF16);
+            break;
+        case 5:
+            expected = PROVIDER_FUSED_UTF16;
+            expectedBytes = sizeof(PROVIDER_FUSED_UTF16);
+            break;
+        case 7:
+            // "network" or "passive"
+            if (off + 4 + sizeof(PROVIDER_NETWORK_UTF16) > sz) return false;
+            if (memcmp(buf + off + 4, PROVIDER_NETWORK_UTF16, sizeof(PROVIDER_NETWORK_UTF16)) == 0)
+                return true;
+            expected = PROVIDER_PASSIVE_UTF16;
+            expectedBytes = sizeof(PROVIDER_PASSIVE_UTF16);
+            break;
+        default:
+            return false;
+    }
+
+    if (off + 4 + expectedBytes > sz) return false;
+    return memcmp(buf + off + 4, expected, expectedBytes) == 0;
+}
+
+// PR144: Provider-validated Location scanner.
+// Scans buf at 4-byte-aligned offsets for a serialized Location object.
+// Validation chain (ALL must pass):
+//   1. providerLen is exactly 3, 5, or 7
+//   2. UTF-16LE bytes match "gps"/"fused"/"network"/"passive"
+//   3. fieldsMask in [0, 0xFF]
+//   4. lat in [-90,90], lon in [-180,180]
+//   5. lat and lon are not both zero
+static bool probeProviderValidatedLocation(uint8_t* buf, size_t sz,
+                                            double lat, double lon,
+                                            size_t& outBaseOffset) {
+    outBaseOffset = 0;
+    if (!buf || sz < 64) return false;
+
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        if (!matchesKnownProvider(buf, sz, base)) continue;
+
+        int32_t providerLen = 0;
+        memcpy(&providerLen, buf + base, 4);
+
+        size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+        size_t maskOffset = base + providerBytes + 24;
+        if (maskOffset + 4 > sz) continue;
+
+        int32_t fieldsMask = 0;
+        memcpy(&fieldsMask, buf + maskOffset, 4);
+        if (fieldsMask < 0 || fieldsMask > 0xFF) continue;
+
+        size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
+        size_t lonOffset = latOffset + 8;
+        if (lonOffset + 8 > sz) continue;
+
+        double curLat = 0.0, curLon = 0.0;
+        memcpy(&curLat, buf + latOffset, 8);
+        memcpy(&curLon, buf + lonOffset, 8);
+
+        if (curLat < -90.0 || curLat > 90.0) continue;
+        if (curLon < -180.0 || curLon > 180.0) continue;
+        if (curLat == 0.0 && curLon == 0.0) continue;
+
+        // All 5 checks passed — mutate
+        memcpy(buf + latOffset, &lat, 8);
+        memcpy(buf + lonOffset, &lon, 8);
+        outBaseOffset = base;
+        return true;
+    }
+    return false;
+}
+
+// PR144: Quick read-only check if buffer might contain a Location provider string.
+// Used to avoid allocating a shadow buffer for parcels that definitely don't contain
+// a Location object. Returns true if any 4-byte-aligned offset has providerLen 3/5/7
+// with matching UTF-16LE provider bytes.
+static bool hasProviderSignature(const uint8_t* buf, size_t sz) {
+    if (!buf || sz < 64) return false;
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        if (matchesKnownProvider(buf, sz, base)) return true;
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PR119: Radar Doppler de payload Location.
 // No depende de transaction code fijo. Inspecciona el descriptor Binder
 // y, si contiene "location", intenta mutar lat/lon con offsets conocidos
@@ -4786,6 +4913,14 @@ static void mutateLocationReply(void* reply) {
     if (mutateLocationByDopplerScan(raw, sz, lat, lon, dopplerOffset)) {
         LOGD("[PR137] Location reply mutated (Doppler@%zu): lat=%.6f lon=%.6f",
              dopplerOffset, lat, lon);
+        return;
+    }
+
+    // 3) PR144: Provider-validated scan for replies with non-standard layout.
+    size_t probeOffset = 0;
+    if (probeProviderValidatedLocation(raw, sz, lat, lon, probeOffset)) {
+        LOGE("[PR144] Location reply mutated (provider-scan@%zu): lat=%.6f lon=%.6f",
+             probeOffset, lat, lon);
     }
 }
 
@@ -5014,9 +5149,10 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 }
             }
 
-            if (looksLocation && (latBits != 0 || lonBits != 0)) {
-                // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
-                // Copiamos, mutamos, redirigimos mData ANTES del handler original.
+            // PR144: Also scan parcels with provider signature for obfuscated GMS interfaces.
+            bool hasProviderSig = !looksLocation && sz > 128 && hasProviderSignature(raw, sz);
+
+            if ((latBits != 0 || lonBits != 0) && (looksLocation || hasProviderSig)) {
                 shadowBuf = new uint8_t[sz];
                 memcpy(shadowBuf, raw, sz);
 
@@ -5024,26 +5160,38 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119: For known location interfaces, try known offsets first.
                 if (looksLocation) {
+                    // PR119: For known location interfaces, try known offsets first.
                     mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
                               mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
                               (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+
+                    size_t dopplerOffset = 0;
+                    if (!mutated) {
+                        mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    }
+
+                    if (mutated) {
+                        LOGD("[PR144] jbbinder token-mutated: code=%u token='%s' hdr=%zu lat=%.6f lon=%.6f",
+                             code, token.c_str(), parsedHdr, lat, lon);
+                    }
                 }
 
-                size_t dopplerOffset = 0;
-                if (!mutated) {
-                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                // PR144: Provider-validated fallback for obfuscated GMS interfaces.
+                if (!mutated && hasProviderSig) {
+                    size_t probeOffset = 0;
+                    mutated = probeProviderValidatedLocation(shadowBuf, sz, lat, lon, probeOffset);
+                    if (mutated) {
+                        LOGE("[PR144] jbbinder provider-scan mutated: code=%u token='%s' probe=%zu sz=%zu lat=%.6f lon=%.6f",
+                             code, token.c_str(), probeOffset, sz, lat, lon);
+                    }
                 }
 
                 if (mutated) {
-                    // PR137: mData is at Parcel+0x08 (after mError+pad), not +0x00
                     uint8_t** mDataField = reinterpret_cast<uint8_t**>(
                         const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
-                    LOGD("[PR142] jbbinder mutated: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f",
-                         code, token.c_str(), parsedHdr, dopplerOffset, lat, lon);
                 } else {
                     if (looksLocation) {
                         LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
@@ -5100,7 +5248,10 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                  token.find("fused") != std::string::npos ||
                  token.find("gnss") != std::string::npos);
 
-            if (looksLocation) {
+            // PR144: Also scan parcels with provider signature for obfuscated GMS interfaces.
+            bool hasProviderSig = !looksLocation && sz > 128 && hasProviderSignature(raw, sz);
+
+            if (looksLocation || hasProviderSig) {
                 shadowBuf = new uint8_t[sz];
                 memcpy(shadowBuf, raw, sz);
 
@@ -5108,26 +5259,37 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119: For known location interfaces, try known offsets first.
                 if (looksLocation) {
                     mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
                               mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
                               (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+
+                    size_t dopplerOffset = 0;
+                    if (!mutated) {
+                        mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    }
+
+                    if (mutated) {
+                        LOGD("[PR144] bbinder token-mutated: code=%u token='%s' lat=%.6f lon=%.6f",
+                             code, token.c_str(), lat, lon);
+                    }
                 }
 
-                size_t dopplerOffset = 0;
-                if (!mutated) {
-                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                // PR144: Provider-validated fallback for obfuscated GMS interfaces.
+                if (!mutated && hasProviderSig) {
+                    size_t probeOffset = 0;
+                    mutated = probeProviderValidatedLocation(shadowBuf, sz, lat, lon, probeOffset);
+                    if (mutated) {
+                        LOGE("[PR144] bbinder provider-scan mutated: code=%u token='%s' probe=%zu sz=%zu lat=%.6f lon=%.6f",
+                             code, token.c_str(), probeOffset, sz, lat, lon);
+                    }
                 }
 
                 if (mutated) {
-                    // Swap mData pointer — mData is at Parcel+0x08 (after mError+pad)
                     uint8_t** mDataField = reinterpret_cast<uint8_t**>(
                         const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData = *mDataField;
                     *mDataField = shadowBuf;
-                    LOGD("[PR142] bbinder mutated: code=%u token='%s' lat=%.6f lon=%.6f",
-                         code, token.c_str(), lat, lon);
                 } else {
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
