@@ -6134,25 +6134,25 @@ public:
         // hookear ambos crea recursión infinita (my_open→orig_open→openat→my_openat→my_open).
         // Toda llamada a open() pasa por openat() de todas formas → un solo hook en openat basta.
 
-        void* openat_func = DobbySymbolResolver("libc.so", "openat");
+        void* openat_func = resolveLibcSymbol("openat");
         if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
 
-        void* read_func = DobbySymbolResolver("libc.so", "read");
+        void* read_func = resolveLibcSymbol("read");
         if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
 
-        void* close_func = DobbySymbolResolver("libc.so", "close");
+        void* close_func = resolveLibcSymbol("close");
         if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
 
-        void* lseek_func = DobbySymbolResolver("libc.so", "lseek");
+        void* lseek_func = resolveLibcSymbol("lseek");
         if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
 
-        void* lseek64_func = DobbySymbolResolver("libc.so", "lseek64");
+        void* lseek64_func = resolveLibcSymbol("lseek64");
         if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
 
-        void* pread_func = DobbySymbolResolver("libc.so", "pread");
+        void* pread_func = resolveLibcSymbol("pread");
         if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
 
-        void* pread64_func = DobbySymbolResolver("libc.so", "pread64");
+        void* pread64_func = resolveLibcSymbol("pread64");
         if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
 
         void* mmap_func = resolveLibcSymbol("mmap");
@@ -6187,7 +6187,7 @@ public:
         // OmniShield's, and OmniShield's orig trampoline jumps to corrupted data → SIGILL.
         // patchPropertyPages() + PLT hooks provide sufficient coverage without Dobby.
         {
-            void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
+            void* sysprop_func = resolveLibcSymbol("__system_property_get");
             LOGE("PR138: __system_property_get @ %p — skipping Dobby hook (PIF conflict avoidance)",
                  sysprop_func);
             if (!orig_system_property_get) {
@@ -6197,7 +6197,7 @@ public:
             }
         }
         {
-            void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
+            void* sysprop_cb_func = resolveLibcSymbol("__system_property_read_callback");
             LOGE("PR138: __system_property_read_callback @ %p — skipping Dobby hook (PIF conflict avoidance)",
                  sysprop_cb_func);
             if (!orig_system_property_read_callback) {
@@ -6256,7 +6256,7 @@ public:
         // MUST be installed BEFORE installPltHooks() so g_propForeachInlineHooked guard
         // prevents double-hook recursion (same pattern as __system_property_find above).
         {
-            void* foreach_addr = DobbySymbolResolver("libc.so", "__system_property_foreach");
+            void* foreach_addr = resolveLibcSymbol("__system_property_foreach");
             if (!foreach_addr) foreach_addr = dlsym(RTLD_DEFAULT, "__system_property_foreach");
             if (foreach_addr) {
                 int ret = DobbyHook(foreach_addr, (void*)my_system_property_foreach,
@@ -6381,74 +6381,75 @@ public:
         patchPropertyPages();
 
         // Syscalls (Evasión Root, Uptime, Kernel, Network)
-        // PR49: DobbySymbolResolver en todos — evita hooking de PLT stubs propios
-        // y de funciones VDSO (clock_gettime en arm64 es VDSO read-only → SIGSEGV).
-        void* uname_sym = DobbySymbolResolver("libc.so", "uname");
+        // PR49: resolveLibcSymbol usa dlsym hash-lookup (O(1)) como fast-path,
+        // con DobbySymbolResolver como fallback para símbolos privados (__ioctl).
+        // Evita hooking de PLT stubs propios y VDSO (clock_gettime → SIGSEGV).
+        void* uname_sym = resolveLibcSymbol("uname");
         if (uname_sym) DobbyHook(uname_sym, (void*)my_uname, (void**)&orig_uname);
 
-        void* clock_gettime_sym = DobbySymbolResolver("libc.so", "clock_gettime");
+        void* clock_gettime_sym = resolveLibcSymbol("clock_gettime");
         if (clock_gettime_sym) DobbyHook(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
 
-        void* access_sym = DobbySymbolResolver("libc.so", "access");
+        void* access_sym = resolveLibcSymbol("access");
         if (access_sym) DobbyHook(access_sym, (void*)my_access, (void**)&orig_access);
 
-        void* getifaddrs_sym = DobbySymbolResolver("libc.so", "getifaddrs");
+        void* getifaddrs_sym = resolveLibcSymbol("getifaddrs");
         if (getifaddrs_sym) DobbyHook(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
 
-        void* stat_sym = DobbySymbolResolver("libc.so", "stat");
+        void* stat_sym = resolveLibcSymbol("stat");
         if (stat_sym) DobbyHook(stat_sym, (void*)my_stat, (void**)&orig_stat);
 
-        void* lstat_sym = DobbySymbolResolver("libc.so", "lstat");
+        void* lstat_sym = resolveLibcSymbol("lstat");
         if (lstat_sym) DobbyHook(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
 
-        void* fstatat_func = DobbySymbolResolver("libc.so", "fstatat");
+        void* fstatat_func = resolveLibcSymbol("fstatat");
         if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
 
-        void* fopen_sym = DobbySymbolResolver("libc.so", "fopen");
+        void* fopen_sym = resolveLibcSymbol("fopen");
         if (fopen_sym) DobbyHook(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
 
-        void* readlinkat_sym = DobbySymbolResolver("libc.so", "readlinkat");
+        void* readlinkat_sym = resolveLibcSymbol("readlinkat");
         if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
 
-        void* readlink_sym = DobbySymbolResolver("libc.so", "readlink");
+        void* readlink_sym = resolveLibcSymbol("readlink");
         if (readlink_sym) DobbyHook(readlink_sym, (void*)my_readlink, (void**)&orig_readlink);
 
-        void* sysinfo_func = DobbySymbolResolver("libc.so", "sysinfo");
+        void* sysinfo_func = resolveLibcSymbol("sysinfo");
         if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
 
-        void* statfs_func = DobbySymbolResolver("libc.so", "statfs");
+        void* statfs_func = resolveLibcSymbol("statfs");
         if (statfs_func) DobbyHook(statfs_func, (void*)my_statfs, (void**)&orig_statfs);
 
-        void* statvfs_func = DobbySymbolResolver("libc.so", "statvfs");
+        void* statvfs_func = resolveLibcSymbol("statvfs");
         if (statvfs_func) DobbyHook(statvfs_func, (void*)my_statvfs, (void**)&orig_statvfs);
 
-        void* readdir_func = DobbySymbolResolver("libc.so", "readdir");
+        void* readdir_func = resolveLibcSymbol("readdir");
         if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
 
-        void* getauxval_func = DobbySymbolResolver("libc.so", "getauxval");
+        void* getauxval_func = resolveLibcSymbol("getauxval");
         if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
 
         // PR70: dl_iterate_phdr — hide module .so from ELF enumeration
-        void* dl_iter_func = DobbySymbolResolver("libc.so", "dl_iterate_phdr");
+        void* dl_iter_func = resolveLibcSymbol("dl_iterate_phdr");
         if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
         if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
 
         // PR41: dup family hooks — prevenir bypass de caché VFS
-        void* dup_sym = DobbySymbolResolver("libc.so", "dup");
+        void* dup_sym = resolveLibcSymbol("dup");
         if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
-        void* dup2_func = DobbySymbolResolver("libc.so", "dup2");
+        void* dup2_func = resolveLibcSymbol("dup2");
         if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
-        void* dup3_func = DobbySymbolResolver("libc.so", "dup3");
+        void* dup3_func = resolveLibcSymbol("dup3");
         if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
 
         // PR43: fcntl hook (F_DUPFD)
-        void* fcntl_func = DobbySymbolResolver("libc.so", "fcntl");
+        void* fcntl_func = resolveLibcSymbol("fcntl");
         if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
 
         // PR42: ioctl hook — MAC real bypass via syscall directo
         // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
-        void* ioctl_sym = DobbySymbolResolver("libc.so", "__ioctl");
-        if (!ioctl_sym) ioctl_sym = DobbySymbolResolver("libc.so", "ioctl");
+        void* ioctl_sym = resolveLibcSymbol("__ioctl");
+        if (!ioctl_sym) ioctl_sym = resolveLibcSymbol("ioctl");
         if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
 
         // -----------------------------------------------------------------------------
