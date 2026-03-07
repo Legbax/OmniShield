@@ -29,6 +29,7 @@
 #include <linux/if_arp.h>
 #include <errno.h>
 #include <cstdlib>
+#include <cmath>
 #include <vulkan/vulkan.h>
 #include <sys/sysinfo.h>
 #include <sys/vfs.h>
@@ -91,6 +92,14 @@ static long   g_seedVersion        = 0;
 // Usados por SensorListHook para filtrar sensores ausentes en el perfil emulado
 static bool   g_sensorHasHeartRate = false;
 static bool   g_sensorHasBarometer = false;
+
+// PR121: Firma runtime de identidad/ubicación aplicada a procesos persistentes.
+// Si cambia (perfil, seed o pin de ubicación), reiniciamos stack de ubicación
+// para forzar que Maps/GMS relancen procesos con el config nuevo.
+static std::string g_lastRuntimeIdentitySig;
+
+// PR134: Current process name for per-process hook decisions.
+static std::string g_currentProcessName;
 
 // PR44: Camera2 — globals ópticos cargados desde findProfile() en postAppSpecialize
 // Rear camera (siempre activo)
@@ -317,10 +326,8 @@ typedef unsigned int cl_device_info;
 #define CL_DEVICE_VERSION 0x102F
 static cl_int (*orig_clGetDeviceInfo)(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret);
 
-// Vulkan & Sensors
+// Vulkan
 static void (*orig_vkGetPhysicalDeviceProperties)(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
-static const char* (*orig_Sensor_getName)(void* sensor);
-static const char* (*orig_Sensor_getVendor)(void* sensor);
 
 // Settings.Secure
 static jstring (*orig_SettingsSecure_getString)(JNIEnv*, jstring);
@@ -447,6 +454,46 @@ static bool readConfigViaCompanion(zygisk::Api *api) {
          g_config.size(),
          g_config.count("scoped_apps") ? g_config["scoped_apps"].c_str() : "(none)");
     return true;
+}
+
+// PR121: Construye una firma de los campos que afectan spoof de ubicación.
+static std::string buildRuntimeIdentitySignature(const std::map<std::string, std::string>& cfg) {
+    static const char* kKeys[] = {
+        "profile",
+        "master_seed",
+        "seed_version",
+        "location_lat",
+        "location_lon",
+        "location_alt",
+        "jitter",
+        nullptr
+    };
+    std::ostringstream oss;
+    for (int i = 0; kKeys[i]; ++i) {
+        const char* key = kKeys[i];
+        auto it = cfg.find(key);
+        oss << key << '=';
+        if (it != cfg.end()) oss << it->second;
+        oss << ';';
+    }
+    return oss.str();
+}
+
+// PR121: Reinicia procesos críticos de ubicación para evitar coordenadas stale
+// en procesos persistentes de GMS/Maps (que pueden seguir vivos tras cambios).
+static void restartLocationRuntime() {
+    system("sh -c '"
+           "am force-stop com.google.android.apps.maps 2>/dev/null; "
+           "am force-stop com.google.android.gms 2>/dev/null; "
+           "killall com.google.android.gms.unstable 2>/dev/null; "
+           "killall com.google.android.gms.persistent 2>/dev/null; "
+           "killall com.google.android.gms.location.history 2>/dev/null; "
+           "killall com.android.location.fused 2>/dev/null; "
+           "killall com.xiaomi.location.fused 2>/dev/null; "
+           "killall com.mediatek.location.lppe.main 2>/dev/null; "
+           "killall com.mediatek.location.ppe.main 2>/dev/null"
+           "' &");
+    LOGE("[PR121] Restarted Maps/GMS location stack after identity/location change");
 }
 
 bool shouldHide(const char* key) {
@@ -2808,46 +2855,12 @@ void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysica
 }
 
 // -----------------------------------------------------------------------------
-// Hooks: SensorManager (Limpieza de firmas MTK/Xiaomi)
-// -----------------------------------------------------------------------------
-const char* my_Sensor_getName(void* sensor) {
-    if (!orig_Sensor_getName) return nullptr;
-    const char* orig_name = orig_Sensor_getName(sensor);
-    if (!orig_name) return nullptr;
-
-    static thread_local std::string name_cache;
-    name_cache = orig_name;
-
-    std::string lower_name = toLowerStr(orig_name);
-    if (lower_name.find("mtk") != std::string::npos ||
-        lower_name.find("mediatek") != std::string::npos ||
-        lower_name.find("xiaomi") != std::string::npos) {
-
-        size_t pos;
-        while ((pos = name_cache.find("MTK")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
-        while ((pos = name_cache.find("mtk")) != std::string::npos) name_cache.replace(pos, 3, "AOSP");
-        while ((pos = name_cache.find("MediaTek")) != std::string::npos) name_cache.replace(pos, 8, "AOSP");
-        while ((pos = name_cache.find("Xiaomi")) != std::string::npos) name_cache.replace(pos, 6, "AOSP");
-    }
-    return name_cache.c_str();
-}
-
-const char* my_Sensor_getVendor(void* sensor) {
-    if (!orig_Sensor_getVendor) return nullptr;
-    const char* orig_vendor = orig_Sensor_getVendor(sensor);
-    if (!orig_vendor) return nullptr;
-
-    static thread_local std::string vendor_cache;
-    vendor_cache = orig_vendor;
-
-    std::string lower_vendor = toLowerStr(orig_vendor);
-    if (lower_vendor.find("mtk") != std::string::npos ||
-        lower_vendor.find("mediatek") != std::string::npos ||
-        lower_vendor.find("xiaomi") != std::string::npos) {
-        vendor_cache = "AOSP Framework"; // Vendor genérico y seguro
-    }
-    return vendor_cache.c_str();
-}
+// PR38+39 Sensor name/vendor Dobby hooks REMOVED.
+// Reason: android::Sensor::getName() returns const String8& (pointer to object),
+// but the hooks returned const char* (pointer to chars).  The caller
+// (translateNativeSensorToJavaSensor in libandroid_runtime.so) reads the first
+// 8 bytes of the char data as String8::mString pointer → wild pointer → SIGBUS.
+// Sensor metadata (range, resolution, etc.) is still spoofed via JNI hooks below.
 
 // -----------------------------------------------------------------------------
 // Hooks: sysinfo (Uptime Paradox Fix)
@@ -4180,6 +4193,37 @@ static void patchPropertyPages() {
     int patched = 0;
     int remap_ok = 0, remap_fail = 0;
 
+    // PR143: Build a set of valid property page ranges from /proc/self/maps.
+    // Only remap pages that belong to __properties__ mappings — never touch
+    // library pages (libcutils, libc, etc.) even if a corrupted prop_info*
+    // points there. Without this guard, a stale/wrong pointer causes
+    // mremap+mprotect(PROT_READ) on a library data page → SEGV_ACCERR
+    // when another thread (JIT, GC) writes to a global on that page.
+    std::set<uintptr_t> propPages;
+    {
+        int maps_fd = (int)syscall(__NR_openat, AT_FDCWD, "/proc/self/maps",
+                                   O_RDONLY | O_CLOEXEC);
+        FILE* mfp = maps_fd >= 0 ? fdopen(maps_fd, "re") : nullptr;
+        if (mfp) {
+            char mline[512];
+            while (fgets(mline, sizeof(mline), mfp)) {
+                if (!strstr(mline, "__properties__")) continue;
+                uintptr_t mstart = 0, mend = 0;
+                if (sscanf(mline, "%lx-%lx", &mstart, &mend) == 2 && mstart < mend) {
+                    for (uintptr_t pg = mstart & ~((uintptr_t)ps - 1);
+                         pg < mend; pg += ps) {
+                        propPages.insert(pg);
+                    }
+                }
+            }
+            fclose(mfp);
+        } else {
+            if (maps_fd >= 0) close(maps_fd);
+        }
+        LOGE("PR143: property page whitelist: %zu pages from __properties__ mappings",
+             propPages.size());
+    }
+
     LOGE("PR91: Phase 2 — remapping property pages (pagesize=%ld)", ps);
 
     for (const auto& e : patches) {
@@ -4193,6 +4237,13 @@ static void patchPropertyPages() {
 
         for (uintptr_t pg = page_lo; pg <= page_hi; pg += ps) {
             if (remapped.count(pg)) continue;
+
+            // PR143: Validate page belongs to __properties__ area.
+            if (!propPages.empty() && !propPages.count(pg)) {
+                LOGE("PR143: SKIPPING page %p — NOT in __properties__ area (prop_info=%p)",
+                     (void*)pg, (void*)pi_addr);
+                continue;
+            }
 
             // Step 1: Allocate a temporary private page at any address
             void* tmp = mmap(nullptr, ps, PROT_READ | PROT_WRITE,
@@ -4295,7 +4346,8 @@ static bool installPltHooks() {
 
     // Dummy vars for pltHookRegister oldFunc — we don't use these values.
     // The real originals were already set above via dlsym.
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
+    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr,
+         *d7 = nullptr, *d8 = nullptr;
 
     // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
     // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
@@ -4334,6 +4386,12 @@ static bool installPltHooks() {
             g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
                                    (void*)my_system_property_foreach, &d6);
         }
+        // PR138: PLT hooks for __system_property_get and __system_property_read_callback.
+        // These are NOT Dobby-hooked (PIF conflict), so PLT hooks are always safe here.
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get",
+                               (void*)my_system_property_get, &d7);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback",
+                               (void*)my_system_property_read_callback, &d8);
     }
 
     bool ok = g_api->pltHookCommit();
@@ -4358,7 +4416,8 @@ static void reapplyPltHooksForNewLibraries() {
     if (elfs.empty()) return;
 
     void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr,
-         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr;
+         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr,
+         *d7 = nullptr, *d8 = nullptr;
 
     for (const auto& elf : elfs) {
         g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
@@ -4381,12 +4440,20 @@ static void reapplyPltHooksForNewLibraries() {
             g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
                                    (void*)my_posix_spawnp, &d6);
         }
+        // PR138: PLT hooks for __system_property_get and __system_property_read_callback.
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get",
+                               (void*)my_system_property_get, &d7);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback",
+                               (void*)my_system_property_read_callback, &d8);
     }
 
     bool ok = g_api->pltHookCommit();
     LOGE("PR89: reapplyPltHooks (spawn+props) across %zu ELFs, commit=%s",
          elfs.size(), ok ? "true" : "false");
 }
+
+// PR138: Forward declaration — defined after orig_* Binder variables.
+static void logBinderDiag();
 
 // PR87: Intercept android_dlopen_ext — called by System.loadLibrary() via JNI.
 // After the linker loads the new .so and resolves its GOT with real libc addresses,
@@ -4405,6 +4472,7 @@ static void* my_android_dlopen_ext(const char* filename, int flags, const void* 
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
         LOGE("PR87: Re-applied PLT hooks after android_dlopen_ext(%s)", filename ? filename : "(null)");
+        logBinderDiag();
     }
 
     g_dlopenReapplyDepth--;
@@ -4425,6 +4493,7 @@ static void* my_dlopen_hook(const char* filename, int flags) {
         std::lock_guard<std::mutex> lock(g_reapplyMutex);
         reapplyPltHooksForNewLibraries();
         LOGE("PR87: Re-applied PLT hooks after dlopen(%s)", filename ? filename : "(null)");
+        logBinderDiag();
     }
 
     g_dlopenReapplyDepth--;
@@ -4466,20 +4535,21 @@ static void* my_dlopen_hook(const char* filename, int flags) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Acceso al Parcel via offsets del struct (arm64, Android 11).
-// Parcel NO tiene vtable. mData es el primer campo en offset 0x00.
+// Layout: mError(int32 @0x00) + pad(4) + mData(ptr @0x08) + mDataSize(size_t @0x10)
+// Parcel NO tiene vtable, pero mData NO es el primer campo — mError lo es.
 static inline const uint8_t* parcel_data(const void* p) {
     return *reinterpret_cast<const uint8_t* const*>(
-        static_cast<const uint8_t*>(p) + 0x00);
+        static_cast<const uint8_t*>(p) + 0x08);
 }
 static inline size_t parcel_dataSize(const void* p) {
     return *reinterpret_cast<const size_t*>(
-        static_cast<const uint8_t*>(p) + 0x08);
+        static_cast<const uint8_t*>(p) + 0x10);
 }
 // Escritura in-place en el buffer mData del reply (buffer privado del caller,
 // PROT_READ|PROT_WRITE — distinto del buffer PROT_READ de BBinder::transact).
 static inline void parcel_write_double_at(void* p, size_t offset, double val) {
     uint8_t* data = *reinterpret_cast<uint8_t**>(
-        static_cast<uint8_t*>(p) + 0x00);
+        static_cast<uint8_t*>(p) + 0x08);
     memcpy(data + offset, &val, sizeof(double));
 }
 
@@ -4541,30 +4611,46 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
            token.find("google.android.gms.location") != std::string::npos;
 }
 
-// PR117: Hook para la lectura de doubles en el Parcel
+// PR117/PR149: Hook para la lectura de doubles en el Parcel
 using fn_Parcel_readDouble = double(*)(const void*);
 static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
 
-static double my_Parcel_readDouble(const void* self) {
-    double val = orig_Parcel_readDouble(self);
+// PR149/PR150: Thread-local state for readDouble spoofing.
+// Set by my_ipc_transact/mutateLocationReply when reply contains a location.
+// Consumed by my_Parcel_readDouble to return spoofed values.
+// This avoids writing to PROT_READ binder mmap (/proc/self/mem → EIO).
+// PR150: changed from offset-based to value-based matching (mDataPos offset
+// is not at +0x20 on this MIUI build — avoid struct layout assumptions).
+static thread_local const void* tl_spoof_parcel = nullptr;
+static thread_local double tl_real_lat = 0.0;  // real lat value to intercept
+static thread_local double tl_real_lon = 0.0;  // real lon value to intercept
+static thread_local bool tl_lat_done = false;   // true after lat has been spoofed
 
-    // Solo falseamos si el valor parece una coordenada real y estamos en el scope
-    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-    if (latBits != 0 && val != 0.0) {
-        double fakeLat, fakeLon;
+static double my_Parcel_readDouble(const void* self) {
+    if (tl_spoof_parcel == self && orig_Parcel_readDouble) {
+        // PR150: value-based matching — call orig first, intercept by exact value.
+        // Avoids reading mDataPos from the Parcel struct (offset varies across MIUI builds).
+        double val = orig_Parcel_readDouble(self); // advance position, get real value
+        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
         int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+        double fakeLat, fakeLon;
         memcpy(&fakeLat, &latBits, 8);
         memcpy(&fakeLon, &lonBits, 8);
 
-        // Si el valor leído coincide con un rango plausible de tu zona, lo cambiamos
-        // (Esto es un 'envenenamiento por proximidad')
-        if (std::abs(val - fakeLat) > 0.0001 || std::abs(val - fakeLon) > 0.0001) {
-             // Aquí podrías añadir lógica de filtrado extra, pero por ahora
-             // probemos el pulso del log.
-             LOGD("[PR117-PULSE] readDouble intercepted: %.6f", val);
+        if (!tl_lat_done && val == tl_real_lat && latBits != 0) {
+            tl_lat_done = true;
+            LOGE("[PR150] readDouble spoofed lat: %.6f -> %.6f", val, fakeLat);
+            return fakeLat;
         }
+        if (tl_lat_done && val == tl_real_lon && lonBits != 0) {
+            tl_spoof_parcel = nullptr;
+            tl_lat_done = false;
+            LOGE("[PR150] readDouble spoofed lon: %.6f -> %.6f", val, fakeLon);
+            return fakeLon;
+        }
+        return val;
     }
-    return val;
+    return orig_Parcel_readDouble(self);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4581,21 +4667,20 @@ static double my_Parcel_readDouble(const void* self) {
 //   bit 6 = HAS_BEARING_ACCURACY  → float  (4 bytes)
 // Verificado contra AOSP android-11.0.0_r46 Location.java
 // ─────────────────────────────────────────────────────────────────────────────
-static size_t locationOptionalBytes(int32_t mask) {
-    size_t n = 0;
-    if (mask & 0x01) n += 8;
-    if (mask & 0x02) n += 4;
-    if (mask & 0x04) n += 4;
-    if (mask & 0x08) n += 4;
-    if (mask & 0x10) n += 4;
-    if (mask & 0x20) n += 4;
-    if (mask & 0x40) n += 4;
-    return n;
-}
-
-// Muta lat/lon en un buffer de Location.writeToParcel serializado.
+// PR145: Muta lat/lon en un buffer de Location.writeToParcel serializado.
 // base_offset = inicio del campo providerLen dentro del buffer.
-// Reutilizado por mutateLocationReply (base=12) y my_bbinder_transact (base=84 o 132).
+// Soporta dos layouts verificados de AOSP:
+//
+//  Android 11 (API 30) — todos los campos incondicionales:
+//    provider → mTime(8) → mElapsedRT(8) → mElapsedRTUnc(8) → mask(4) → lat(8) → lon(8) → ...
+//    latOffset = base + providerBytes + 28
+//
+//  Android 12 (API 31+) — campos condicionales, orden diferente:
+//    provider → mask(4) → mTime(8) → mElapsedRT(8) → [mElapsedRTUnc(8) si bit8] → lat(8) → lon(8) → ...
+//    latOffset = base + providerBytes + 20 + (bit8 ? 8 : 0)
+//
+// Valida lat/lon antes de escribir para evitar corromper parcels que no son Location.
+
 static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
                                    size_t base_offset, double lat, double lon) {
     if (base_offset + 4 > sz) return false;
@@ -4603,23 +4688,224 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
     memcpy(&providerLen, buf + base_offset, 4);
     if (providerLen < 0 || providerLen > 64) return false;
 
-    size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+    size_t pBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
 
-    // mTime(8) + mElapsedRealtimeNs(8) + mElapsedRealtimeUncertaintyNs(8) = 24
-    size_t maskOffset = base_offset + providerBytes + 24;
-    if (maskOffset + 4 > sz) return false;
-    int32_t fieldsMask = 0;
-    memcpy(&fieldsMask, buf + maskOffset, 4);
+    // Android 11: provider → mTime(8) → mElapsedRT(8) → mElapsedRTUnc(8) → mask(4) → lat → lon
+    // lat at base + pBytes + 24 + 4 = base + pBytes + 28
+    {
+        size_t latOff = base_offset + pBytes + 28;
+        size_t lonOff = latOff + 8;
+        if (lonOff + 8 <= sz) {
+            double cLat, cLon;
+            memcpy(&cLat, buf + latOff, 8);
+            memcpy(&cLon, buf + lonOff, 8);
+            if (cLat >= -90.0 && cLat <= 90.0 && cLon >= -180.0 && cLon <= 180.0
+                && fabs(cLat) >= 1e-4 && fabs(cLon) >= 1e-4) { // PR152: magnitude threshold
+                memcpy(buf + latOff, &lat, 8);
+                memcpy(buf + lonOff, &lon, 8);
+                return true;
+            }
+        }
+    }
 
-    size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
-    size_t lonOffset = latOffset + 8;
-    if (lonOffset + 8 > sz) return false;
+    // Android 12+: provider → mask(4) → mTime(8) → mElapsedRT(8) → [mElapsedRTUnc(8)] → lat → lon
+    {
+        size_t maskOff = base_offset + pBytes;
+        if (maskOff + 4 <= sz) {
+            int32_t mask = 0;
+            memcpy(&mask, buf + maskOff, 4);
+            size_t ertBytes = (mask & 0x100) ? 8 : 0;
+            size_t latOff = maskOff + 20 + ertBytes;  // mask(4) + mTime(8) + mElapsedRT(8) + [ertUnc]
+            size_t lonOff = latOff + 8;
+            if (lonOff + 8 <= sz) {
+                double cLat, cLon;
+                memcpy(&cLat, buf + latOff, 8);
+                memcpy(&cLon, buf + lonOff, 8);
+                if (cLat >= -90.0 && cLat <= 90.0 && cLon >= -180.0 && cLon <= 180.0
+                    && fabs(cLat) >= 1e-4 && fabs(cLon) >= 1e-4) { // PR152: magnitude threshold
+                    memcpy(buf + latOff, &lat, 8);
+                    memcpy(buf + lonOff, &lon, 8);
+                    return true;
+                }
+            }
+        }
+    }
 
-    memcpy(buf + latOffset, &lat, 8);
-    memcpy(buf + lonOffset, &lon, 8);
-    return true;
+    return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PR144: Provider-validated Location scanner for obfuscated GMS interfaces.
+//
+// GMS FusedLocationProviderClient uses ProGuard-obfuscated Binder interface
+// names (e.g. com.google.android.gms.internal.location.zzaz) that don't match
+// any token pattern. This scanner finds serialized Location objects by matching
+// the provider string ("gps"/"fused"/"network"/"passive") in UTF-16LE, which
+// is dramatically more selective than lat/lon range checks alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PR144: Known Location.provider strings in UTF-16LE wire format.
+// "gps" (3 chars) → 6 bytes
+static constexpr uint8_t PROVIDER_GPS_UTF16[] = {
+    0x67,0x00, 0x70,0x00, 0x73,0x00
+};
+// "fused" (5 chars) → 10 bytes
+static constexpr uint8_t PROVIDER_FUSED_UTF16[] = {
+    0x66,0x00, 0x75,0x00, 0x73,0x00, 0x65,0x00, 0x64,0x00
+};
+// "network" (7 chars) → 14 bytes
+static constexpr uint8_t PROVIDER_NETWORK_UTF16[] = {
+    0x6E,0x00, 0x65,0x00, 0x74,0x00, 0x77,0x00,
+    0x6F,0x00, 0x72,0x00, 0x6B,0x00
+};
+// "passive" (7 chars) → 14 bytes
+static constexpr uint8_t PROVIDER_PASSIVE_UTF16[] = {
+    0x70,0x00, 0x61,0x00, 0x73,0x00, 0x73,0x00,
+    0x69,0x00, 0x76,0x00, 0x65,0x00
+};
+
+// PR144: Check if buffer at offset contains a known Location provider string.
+// The int32 at buf[off] must be 3/5/7, followed by exact UTF-16LE match.
+static bool matchesKnownProvider(const uint8_t* buf, size_t sz, size_t off) {
+    if (off + 4 > sz) return false;
+    int32_t pLen = 0;
+    memcpy(&pLen, buf + off, 4);
+
+    const uint8_t* expected = nullptr;
+    size_t expectedBytes = 0;
+
+    switch (pLen) {
+        case 3:
+            expected = PROVIDER_GPS_UTF16;
+            expectedBytes = sizeof(PROVIDER_GPS_UTF16);
+            break;
+        case 5:
+            expected = PROVIDER_FUSED_UTF16;
+            expectedBytes = sizeof(PROVIDER_FUSED_UTF16);
+            break;
+        case 7:
+            // "network" or "passive"
+            if (off + 4 + sizeof(PROVIDER_NETWORK_UTF16) > sz) return false;
+            if (memcmp(buf + off + 4, PROVIDER_NETWORK_UTF16, sizeof(PROVIDER_NETWORK_UTF16)) == 0)
+                return true;
+            expected = PROVIDER_PASSIVE_UTF16;
+            expectedBytes = sizeof(PROVIDER_PASSIVE_UTF16);
+            break;
+        default:
+            return false;
+    }
+
+    if (off + 4 + expectedBytes > sz) return false;
+    return memcmp(buf + off + 4, expected, expectedBytes) == 0;
+}
+
+// PR145: Layout-agnostic provider-validated Location scanner.
+// Finds provider string ("gps"/"fused"/"network"/"passive") in UTF-16LE,
+// then scans forward 16-128 bytes for two consecutive doubles in lat/lon range.
+// Works on any Android version without assuming specific field order.
+static bool probeProviderValidatedLocation(uint8_t* buf, size_t sz,
+                                            double lat, double lon,
+                                            size_t& outBaseOffset) {
+    outBaseOffset = 0;
+    if (!buf || sz < 64) return false;
+
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        if (!matchesKnownProvider(buf, sz, base)) continue;
+
+        int32_t providerLen = 0;
+        memcpy(&providerLen, buf + base, 4);
+        size_t pBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
+
+        // Scan forward from provider end for lat/lon doubles.
+        // Min offset: 16 bytes (mask + some time fields).
+        // Max offset: 128 bytes (no Location has more between provider and lat).
+        size_t searchStart = base + pBytes + 16;
+        size_t searchEnd   = base + pBytes + 128;
+        if (searchEnd > sz) searchEnd = sz;
+
+        for (size_t off = searchStart; off + 16 <= searchEnd; off += 4) {
+            double curLat = 0.0, curLon = 0.0;
+            memcpy(&curLat, buf + off, 8);
+            memcpy(&curLon, buf + off + 8, 8);
+
+            if (curLat < -90.0 || curLat > 90.0) continue;
+            if (curLon < -180.0 || curLon > 180.0) continue;
+            // PR152: use magnitude threshold — the offending field displays as 0.000000
+            // but is NOT exactly 0.0 (tiny near-zero double like elapsed-time-uncertainty).
+            // 1e-4° ≈ 11m from equator/meridian: no real GPS returns less than this.
+            if (fabs(curLat) < 1e-4 || fabs(curLon) < 1e-4) continue;
+
+            // Provider string + lat/lon range match — mutate
+            {
+                static std::atomic<int> s_pvMatch{0};
+                int _m = s_pvMatch.fetch_add(1, std::memory_order_relaxed);
+                if (_m < 8) {
+                    LOGE("[PR152] probe match: off=%zu curLat=%.9f curLon=%.9f", off, curLat, curLon);
+                }
+            }
+            memcpy(buf + off, &lat, 8);
+            memcpy(buf + off + 8, &lon, 8);
+            outBaseOffset = base;
+            return true;
+        }
+    }
+    return false;
+}
+
+// PR144: Quick read-only check if buffer might contain a Location provider string.
+// Used to avoid allocating a shadow buffer for parcels that definitely don't contain
+// a Location object. Returns true if any 4-byte-aligned offset has providerLen 3/5/7
+// with matching UTF-16LE provider bytes.
+static bool hasProviderSignature(const uint8_t* buf, size_t sz) {
+    if (!buf || sz < 64) return false;
+    for (size_t base = 0; base + 48 < sz; base += 4) {
+        if (matchesKnownProvider(buf, sz, base)) return true;
+    }
+    return false;
+}
+
+// PR145: Parcel visualizer for diagnostic logging.
+// Dumps UTF-16LE strings and coordinate-like doubles found in parcels
+// that have a provider signature. Limited to first 20 dumps.
+static void visualizeLocationParcel(const uint8_t* buf, size_t sz,
+                                     const char* tag, uint32_t code) {
+    static std::atomic<int> s_pvCount{0};
+    int n = s_pvCount.fetch_add(1, std::memory_order_relaxed);
+    if (n >= 20) return;
+
+    LOGE("[PV#%d] %s code=%u sz=%zu", n, tag, code, sz);
+
+    // Scan for UTF-16LE strings (low byte printable ASCII, high byte 0x00)
+    for (size_t i = 0; i + 8 < sz; i += 2) {
+        if (buf[i] >= 0x20 && buf[i] <= 0x7E && buf[i+1] == 0x00) {
+            char tmp[64];
+            int len = 0;
+            for (size_t j = 0; j < 30 && i + j*2 + 1 < sz; ++j) {
+                if (buf[i+j*2+1] != 0x00 || buf[i+j*2] < 0x20) break;
+                tmp[len++] = (char)buf[i+j*2];
+            }
+            tmp[len] = 0;
+            if (len > 2) {
+                LOGE("[PV#%d] str@%zu = '%s'", n, i, tmp);
+                i += (size_t)len * 2 - 2;
+            }
+        }
+    }
+
+    // Scan for coordinate-like doubles (two consecutive in lat/lon range)
+    for (size_t i = 0; i + 16 <= sz; i += 4) {
+        double v1, v2;
+        memcpy(&v1, buf + i, 8);
+        memcpy(&v2, buf + i + 8, 8);
+        if (v1 >= -90.0 && v1 <= 90.0 && v2 >= -180.0 && v2 <= 180.0
+            && fabs(v1) >= 1e-4 && fabs(v2) >= 1e-4 // PR152: magnitude threshold
+            && v1 != 1.0 && v2 != 1.0 && v1 != -1.0 && v2 != -1.0) {
+            LOGE("[PV#%d] coord@%zu lat=%.6f lon=%.6f", n, i, v1, v2);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PR119: Radar Doppler de payload Location.
 // No depende de transaction code fijo. Inspecciona el descriptor Binder
 // y, si contiene "location", intenta mutar lat/lon con offsets conocidos
@@ -4669,6 +4955,13 @@ static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
 // ─────────────────────────────────────────────────────────────────────────────
 
 // 3. Adaptador para respuestas síncronas (IPCThreadState::transact)
+// PR137: Added Doppler scan fallback for GMS FusedLocation replies
+// (SafeParcelable-wrapped Location objects with different header layout).
+// PR146: Reply Parcel data is in Binder mmap (PROT_READ only).
+// Must use shadow buffer to mutate — writing directly causes SEGV_ACCERR.
+// PR149: Arms the readDouble hook to spoof lat/lon for AOSP reply parcels.
+// Scans a writable copy to find offsets, then stores them in thread-local.
+// No writes to PROT_READ binder mmap. Spoofing happens at read-time.
 static void mutateLocationReply(void* reply) {
     if (!reply) return;
     size_t sz = parcel_dataSize(reply);
@@ -4678,36 +4971,71 @@ static void mutateLocationReply(void* reply) {
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
     if (latBits == 0 && lonBits == 0) return;
 
-    const uint8_t* raw = parcel_data(reply);
-    int32_t providerLen = 0;
-    memcpy(&providerLen, raw + 12, 4);
-    if (providerLen < 0 || providerLen > 64) return;
-
-    // Calcular bytes del proveedor con padding
-    size_t providerBytes = (4 + (size_t)providerLen * 2 + 3) & ~3u;
-
-    // PR105b: Leer mFieldsMask para calcular bytes opcionales antes de mLatitude.
-    // offset de mFieldsMask = 12 + providerBytes + 24 (mTime + mElapsedRtNs + mElapsedRtUncNs)
-    size_t maskOffset = 12 + providerBytes + 24;
-
-    if (sz < maskOffset + 4) return;
-    int32_t fieldsMask = 0;
-    memcpy(&fieldsMask, raw + maskOffset, 4);
-
-    size_t latOffset = maskOffset + 4 + locationOptionalBytes(fieldsMask);
-    size_t lonOffset = latOffset + 8;
-
-    if (sz < lonOffset + 8) return; // reply demasiado corto
-
     double lat, lon;
     memcpy(&lat, &latBits, 8);
     memcpy(&lon, &lonBits, 8);
 
-    parcel_write_double_at(reply, latOffset, lat);
-    parcel_write_double_at(reply, lonOffset, lon);
+    uint8_t* raw = *reinterpret_cast<uint8_t**>(
+        static_cast<uint8_t*>(reply) + 0x08);
+    if (!raw) return;
 
-    LOGD("[PR105b] Location reply mutated: lat=%.6f lon=%.6f (mask=0x%02x)",
-         lat, lon, (uint32_t)fieldsMask);
+    uint8_t* scan = new uint8_t[sz];
+    memcpy(scan, raw, sz);
+
+    // Helper lambda: scan copy for spoofed values, arm readDouble thread-local.
+    // PR150: stores real lat/lon (from original 'raw' buffer) for value-based matching.
+    auto armIfFound = [&](const char* tag) -> bool {
+        for (size_t off = 0; off + 16 <= sz; off += 4) {
+            double v1, v2;
+            memcpy(&v1, scan + off, 8);
+            memcpy(&v2, scan + off + 8, 8);
+            if (v1 == lat && v2 == lon) {
+                // Read real values from original unmodified buffer
+                double rv1, rv2;
+                memcpy(&rv1, raw + off, 8);
+                memcpy(&rv2, raw + off + 8, 8);
+                // PR152: safety-net — reject bad originals
+                if (fabs(rv1) < 1e-4 || fabs(rv2) < 1e-4 ||
+                    rv1 < -90.0 || rv1 > 90.0 || rv2 < -180.0 || rv2 > 180.0) {
+                    LOGE("[PR152] arm rejected bad orig (%s): rv1=%.9f rv2=%.9f @ off=%zu",
+                         tag, rv1, rv2, off);
+                    continue;
+                }
+                tl_spoof_parcel = reply;
+                tl_real_lat = rv1;
+                tl_real_lon = rv2;
+                tl_lat_done = false;
+                LOGE("[PR152] AOSP reply spoof armed (%s): parcel=%p realLat=%.9f realLon=%.9f",
+                     tag, reply, rv1, rv2);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 1) AOSP fixed-offset (base=12)
+    if (mutateLocationInBuffer(scan, sz, 12, lat, lon) && armIfFound("AOSP@12")) {
+        delete[] scan;
+        return;
+    }
+
+    // 2) Doppler scan
+    memcpy(scan, raw, sz);
+    size_t dopplerOff = 0;
+    if (mutateLocationByDopplerScan(scan, sz, lat, lon, dopplerOff) && armIfFound("Doppler")) {
+        delete[] scan;
+        return;
+    }
+
+    // 3) Provider-validated scan
+    memcpy(scan, raw, sz);
+    size_t probeOff = 0;
+    if (probeProviderValidatedLocation(scan, sz, lat, lon, probeOff) && armIfFound("probe")) {
+        delete[] scan;
+        return;
+    }
+
+    delete[] scan;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4723,6 +5051,25 @@ static constexpr size_t  GMS_ILOCLISTENER_MIN_SIZE = 188;
 static constexpr uint8_t GMS_TOKEN_PREFIX[8] = {
     0x63,0x00, 0x6F,0x00, 0x6D,0x00, 0x2E,0x00  // 'com.'
 };
+// PR139: Exact UTF-16LE descriptor for "com.google.android.gms.location.internal.ILocationListener"
+// 58 chars × 2 = 116 bytes. Replaces GMS_TOKEN_PREFIX heuristic to eliminate false positives.
+static constexpr uint8_t GMS_ILOCLISTENER_DESCRIPTOR[] = {
+    0x63,0x00, 0x6F,0x00, 0x6D,0x00, 0x2E,0x00,  // com.
+    0x67,0x00, 0x6F,0x00, 0x6F,0x00, 0x67,0x00,  // goog
+    0x6C,0x00, 0x65,0x00, 0x2E,0x00, 0x61,0x00,  // le.a
+    0x6E,0x00, 0x64,0x00, 0x72,0x00, 0x6F,0x00,  // ndro
+    0x69,0x00, 0x64,0x00, 0x2E,0x00, 0x67,0x00,  // id.g
+    0x6D,0x00, 0x73,0x00, 0x2E,0x00, 0x6C,0x00,  // ms.l
+    0x6F,0x00, 0x63,0x00, 0x61,0x00, 0x74,0x00,  // ocat
+    0x69,0x00, 0x6F,0x00, 0x6E,0x00, 0x2E,0x00,  // ion.
+    0x69,0x00, 0x6E,0x00, 0x74,0x00, 0x65,0x00,  // inte
+    0x72,0x00, 0x6E,0x00, 0x61,0x00, 0x6C,0x00,  // rnal
+    0x2E,0x00, 0x49,0x00, 0x4C,0x00, 0x6F,0x00,  // .ILo
+    0x63,0x00, 0x61,0x00, 0x74,0x00, 0x69,0x00,  // cati
+    0x6F,0x00, 0x6E,0x00, 0x4C,0x00, 0x69,0x00,  // onLi
+    0x73,0x00, 0x74,0x00, 0x65,0x00, 0x6E,0x00,  // sten
+    0x65,0x00, 0x72,0x00                           // er
+};
 
 static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
     // PR109-DBG: filtro de código eliminado para diagnóstico.
@@ -4735,7 +5082,10 @@ static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
     int32_t strLen = 0;
     memcpy(&strLen, raw + 8, 4);
     if (strLen != GMS_ILOCLISTENER_STR_LEN) return false;
-    bool match = (memcmp(raw + 12, GMS_TOKEN_PREFIX, sizeof(GMS_TOKEN_PREFIX)) == 0);
+    // PR139: Exact full-descriptor match (not just "com." prefix) to eliminate false positives
+    if (sz < 12 + sizeof(GMS_ILOCLISTENER_DESCRIPTOR)) return false;
+    bool match = (memcmp(raw + 12, GMS_ILOCLISTENER_DESCRIPTOR,
+                         sizeof(GMS_ILOCLISTENER_DESCRIPTOR)) == 0);
     if (match) {
         LOGD("[PR109-DBG] GMS token MATCH code=%u sz=%zu", code, sz);
     }
@@ -4745,6 +5095,14 @@ static bool isGmsLocationOutgoing(const void* data_parcel, uint32_t code) {
 
 static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
                                 const void* data, void* reply, uint32_t flags) {
+    // PR130: Verify outgoing hook fires (first 25 invocations for diagnostics)
+    static std::atomic<int> s_ipcCount{0};
+    int _pr130_ipc = s_ipcCount.fetch_add(1, std::memory_order_relaxed);
+    if (_pr130_ipc < 25) {
+        LOGE("[PR130] ipc_transact called: handle=%d code=%u call#%d proc='%s'",
+             handle, code, _pr130_ipc, g_currentProcessName.c_str());
+    }
+
     // PR105: detección AOSP getLastLocation/getCurrentLocation (muta REPLY)
     bool isAospLoc = isLocationRequest(data, code);
     if (isAospLoc) {
@@ -4752,30 +5110,138 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
              handle, code, parcel_dataSize(data));
     }
 
-    // PR107: detección GMS outgoing ILocationListener (muta DATA in-place antes del envío)
-    // El DATA Parcel en IPCThreadState es heap local de GMS — PROT_READ|PROT_WRITE.
-    // Modificación in-place segura, sin shadow copy.
-    if (isGmsLocationOutgoing(data, code)) {
-        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-        int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-        if (latBits != 0 || lonBits != 0) {
+    // PR139: Re-enable PR107 outgoing mutation with shadow buffer (safe copy pattern).
+    // PR134 disabled in-place mutation due to false positives in isGmsLocationOutgoing().
+    // Now safe: exact descriptor match (PR139 Change B) eliminates false positives,
+    // and shadow buffer avoids writing into kernel-mapped Parcel memory.
+    bool isGmsLoc = isGmsLocationOutgoing(data, code);
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+    bool outMutated = false;
+    uint8_t* outSavedMData = nullptr;
+    uint8_t* outShadowBuf = nullptr;
+
+    if (isGmsLoc && (latBits != 0 || lonBits != 0)) {
+        size_t sz = parcel_dataSize(data);
+        const uint8_t* raw = parcel_data(data);
+        if (sz >= GMS_ILOCLISTENER_MIN_SIZE && raw) {
+            outShadowBuf = new uint8_t[sz];
+            memcpy(outShadowBuf, raw, sz);
+
             double lat, lon;
             memcpy(&lat, &latBits, 8);
             memcpy(&lon, &lonBits, 8);
-            uint8_t* mutableData = *reinterpret_cast<uint8_t**>(
-                const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
-            size_t sz = parcel_dataSize(data);
-            bool ok = mutateLocationInBuffer(mutableData, sz, GMS_ILOCLISTENER_HDR, lat, lon);
-            LOGD("[PR107] GMS→app location mutated: lat=%.6f lon=%.6f ok=%d (code=%u)",
-                 lat, lon, (int)ok, code);
+
+            outMutated = mutateLocationInBuffer(outShadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon);
+            size_t dopplerOff = 0;
+            if (!outMutated)
+                outMutated = mutateLocationByDopplerScan(outShadowBuf, sz, lat, lon, dopplerOff);
+
+            if (outMutated) {
+                // PR137-style mData swap at Parcel+0x08 (after mError+pad)
+                uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+                    const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+                outSavedMData = *mDataField;
+                *mDataField = outShadowBuf;
+                LOGE("[PR139] outgoing GMS location mutated: handle=%d code=%u sz=%zu lat=%.6f lon=%.6f",
+                     handle, code, sz, lat, lon);
+            } else {
+                delete[] outShadowBuf;
+                outShadowBuf = nullptr;
+            }
         }
     }
 
     int32_t status = orig_ipc_transact(self, handle, code, data, reply, flags);
 
+    // Restore mData pointer after original transact call
+    if (outMutated && outSavedMData) {
+        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+            const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+        *mDataField = outSavedMData;
+    }
+    delete[] outShadowBuf;
+
     // PR105: mutar REPLY de AOSP ILocationManager
     if (isAospLoc && status == 0 && reply) {
         mutateLocationReply(reply);
+    }
+
+    // PR149: Reply-side location interception via readDouble hook.
+    // Binder mmap is not writable (/proc/self/mem → EIO, mprotect → ~VM_MAYWRITE).
+    // Instead of writing, we arm the Parcel::readDouble hook to spoof values at read-time.
+    if (!isAospLoc && !isGmsLoc && status == 0 && reply
+        && (latBits != 0 || lonBits != 0)) {
+        size_t replySz = parcel_dataSize(reply);
+        if (replySz > 64) {
+            uint8_t* replyRaw = *reinterpret_cast<uint8_t**>(
+                static_cast<uint8_t*>(reply) + 0x08);
+            if (replyRaw && hasProviderSignature(replyRaw, replySz)) {
+                // Scan on writable copy to find lat/lon offset
+                uint8_t* scan = new uint8_t[replySz];
+                memcpy(scan, replyRaw, replySz);
+
+                double rLat, rLon;
+                memcpy(&rLat, &latBits, 8);
+                memcpy(&rLon, &lonBits, 8);
+
+                size_t probeOff = 0;
+                if (probeProviderValidatedLocation(scan, replySz, rLat, rLon, probeOff)) {
+                    for (size_t off = 0; off + 16 <= replySz; off += 4) {
+                        double v1, v2;
+                        memcpy(&v1, scan + off, 8);
+                        memcpy(&v2, scan + off + 8, 8);
+                        if (v1 == rLat && v2 == rLon) {
+                            // PR150: store real values from original unmodified buffer
+                            // (scan has been modified by probeProviderValidatedLocation)
+                            double origLat, origLon;
+                            memcpy(&origLat, replyRaw + off, 8);
+                            memcpy(&origLon, replyRaw + off + 8, 8);
+                            // PR152: safety-net — reject if origLat/origLon look invalid
+                            // (would indicate probe still hit a false positive)
+                            if (fabs(origLat) < 1e-4 || fabs(origLon) < 1e-4 ||
+                                origLat < -90.0 || origLat > 90.0 ||
+                                origLon < -180.0 || origLon > 180.0) {
+                                LOGE("[PR152] arm rejected bad orig: lat=%.9f lon=%.9f @ off=%zu",
+                                     origLat, origLon, off);
+                                continue;
+                            }
+                            tl_spoof_parcel = reply;
+                            tl_real_lat = origLat;
+                            tl_real_lon = origLon;
+                            tl_lat_done = false;
+                            LOGE("[PR152] ipc reply spoof armed: handle=%d code=%u parcel=%p realLat=%.9f realLon=%.9f",
+                                 handle, code, reply, origLat, origLon);
+                            break;
+                        }
+                    }
+                }
+                delete[] scan;
+            }
+
+            // PR153: Fallback — scan IPC replies without provider strings.
+            // On first Maps launch, getLastLocation() may return a Location object
+            // without the expected provider string format. Scan for coordinate-range
+            // doubles directly for code=1 replies only.
+            if (!tl_spoof_parcel && code == 1 && replySz > 100 && replyRaw &&
+                !hasProviderSignature(replyRaw, replySz)) {
+                for (size_t off = 0; off + 16 <= replySz; off += 4) {
+                    double v1, v2;
+                    memcpy(&v1, replyRaw + off, 8);
+                    memcpy(&v2, replyRaw + off + 8, 8);
+                    if (v1 >= -90.0 && v1 <= 90.0 && fabs(v1) >= 1e-4 &&
+                        v2 >= -180.0 && v2 <= 180.0 && fabs(v2) >= 1e-4) {
+                        tl_spoof_parcel = reply;
+                        tl_real_lat = v1;
+                        tl_real_lon = v2;
+                        tl_lat_done = false;
+                        LOGE("[PR153] ipc reply fallback armed: handle=%d code=%u realLat=%.9f realLon=%.9f off=%zu",
+                             handle, code, v1, v2, off);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     return status;
@@ -4805,8 +5271,34 @@ static bool isLocationCallback(const void* data_parcel, uint32_t code) {
 using fn_jbbinder_ontransact = int32_t(*)(void*, uint32_t, const void*, void*, uint32_t);
 static fn_jbbinder_ontransact orig_jbbinder_ontransact = nullptr;
 
+// PR138: One-time diagnostic — verify Binder hooks are installed.
+// Called from dlopen hooks (fires during Maps runtime, guaranteed in logcat).
+// Defined here so all orig_* variables above are already in scope.
+static void logBinderDiag() {
+    static std::atomic<bool> s_binderDiagDone{false};
+    if (!s_binderDiagDone.exchange(true)) {
+        LOGE("[PR138-DIAG] Binder hooks: ipc_transact orig=%p, bbinder orig=%p, "
+             "jbbinder orig=%p, latBits=%lld, lonBits=%lld, pagesPatched=%d, proc='%s'",
+             (void*)orig_ipc_transact, (void*)orig_bbinder_transact,
+             (void*)orig_jbbinder_ontransact,
+             (long long)g_cachedLatBits.load(), (long long)g_cachedLonBits.load(),
+             (int)g_pagesPatched, g_currentProcessName.c_str());
+    }
+}
+
 static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                                       const void* data, void* reply, uint32_t flags) {
+    // PR133: Safety guard — orig must be set (hook installed correctly).
+    if (!orig_jbbinder_ontransact) return 0;
+
+    // PR130: Verify hook is being called (first 5 invocations only)
+    static std::atomic<int> s_callCount{0};
+    int _pr130_n = s_callCount.fetch_add(1, std::memory_order_relaxed);
+    if (_pr130_n < 5) {
+        size_t _pr130_sz = data ? parcel_dataSize(data) : 0;
+        LOGE("[PR130] jbbinder_ontransact called: code=%u sz=%zu call#%d", code, _pr130_sz, _pr130_n);
+    }
+
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 
@@ -4814,7 +5306,8 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
     uint8_t* savedMData = nullptr;
     uint8_t* shadowBuf  = nullptr;
 
-    if ((latBits != 0 || lonBits != 0) && data) {
+    // PR130: Parse token unconditionally (outside latBits guard) for diagnostics
+    if (data) {
         size_t sz         = parcel_dataSize(data);
         const uint8_t* raw = parcel_data(data);
 
@@ -4822,13 +5315,43 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
             size_t parsedHdr = 0;
             std::string token;
             bool hasToken = parseBinderInterfaceToken(raw, sz, token, parsedHdr);
+            // PR142: Token-only matching — never scan unknown parcels.
             bool looksLocation = hasToken &&
                 (token.find("location") != std::string::npos ||
-                 token.find("fused") != std::string::npos);
+                 token.find("fused") != std::string::npos ||
+                 token.find("gnss") != std::string::npos);
 
+            // PR130: Log first 3 location-looking tokens
+            static std::atomic<int> s_locTokenCount{0};
             if (looksLocation) {
-                // Shadow copy: el Parcel entrante es PROT_READ desde binder_mmap.
-                // Copiamos, mutamos, redirigimos mData ANTES del handler original.
+                int _lt = s_locTokenCount.fetch_add(1, std::memory_order_relaxed);
+                if (_lt < 3) {
+                    LOGE("[PR130] location token detected: '%s' code=%u sz=%zu hdr=%zu",
+                         token.c_str(), code, sz, parsedHdr);
+                }
+            }
+
+            // PR130: Log first 10 tokens to see what interfaces pass through
+            static std::atomic<int> s_tokenLog{0};
+            if (hasToken && !token.empty()) {
+                int _tl = s_tokenLog.fetch_add(1, std::memory_order_relaxed);
+                if (_tl < 10) {
+                    LOGE("[PR130] binder token: '%s' code=%u sz=%zu", token.c_str(), code, sz);
+                }
+            }
+
+            // PR148: Restrict provider-sig scan to code=1 (onLocationChanged) only.
+            // onStatusChanged (code=2) and other callbacks embed a provider string but
+            // NO lat/lon doubles — probeProviderValidatedLocation gives false positives there.
+            bool hasProviderSig = !looksLocation && code == TRANSACTION_onLocationChanged
+                                  && sz > 128 && hasProviderSignature(raw, sz);
+
+            // PR145: Parcel visualizer for diagnostics
+            if (hasProviderSig) {
+                visualizeLocationParcel(raw, sz, "jbbinder", code);
+            }
+
+            if ((latBits != 0 || lonBits != 0) && (looksLocation || hasProviderSig)) {
                 shadowBuf = new uint8_t[sz];
                 memcpy(shadowBuf, raw, sz);
 
@@ -4836,27 +5359,60 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 memcpy(&lat, &latBits, 8);
                 memcpy(&lon, &lonBits, 8);
 
-                // PR119: offsets preferidos conocidos (AOSP/GMS + header dinámico).
-                mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
-                          mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
-                          (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+                if (looksLocation) {
+                    // PR119: For known location interfaces, try known offsets first.
+                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
 
-                // PR119: fallback "Radar Doppler" — ignorar code/layout fijo.
-                size_t dopplerOffset = 0;
-                if (!mutated) {
-                    mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    size_t dopplerOffset = 0;
+                    if (!mutated) {
+                        mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    }
+
+                    if (mutated) {
+                        LOGD("[PR145] jbbinder token-mutated: code=%u token='%s' hdr=%zu lat=%.6f lon=%.6f",
+                             code, token.c_str(), parsedHdr, lat, lon);
+                    }
+                }
+
+                // PR144: Provider-validated fallback for obfuscated GMS interfaces.
+                if (!mutated && hasProviderSig) {
+                    size_t probeOffset = 0;
+                    mutated = probeProviderValidatedLocation(shadowBuf, sz, lat, lon, probeOffset);
+                    if (mutated) {
+                        LOGE("[PR145] jbbinder provider-scan mutated: code=%u token='%s' probe=%zu sz=%zu lat=%.6f lon=%.6f",
+                             code, token.c_str(), probeOffset, sz, lat, lon);
+                    }
                 }
 
                 if (mutated) {
                     uint8_t** mDataField = reinterpret_cast<uint8_t**>(
-                        const_cast<void*>(data));
+                        const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
                     savedMData   = *mDataField;
                     *mDataField  = shadowBuf;
-                    LOGD("[PR119] mutated BEFORE orig: code=%u token='%s' hdr=%zu doppler=%zu lat=%.6f lon=%.6f",
-                         code, token.c_str(), parsedHdr, dopplerOffset, lat, lon);
+
+                    // PR153: Also arm readDouble for belt-and-suspenders coverage.
+                    for (size_t off = 0; off + 16 <= sz; off += 4) {
+                        double v1, v2;
+                        memcpy(&v1, savedMData + off, 8);
+                        memcpy(&v2, savedMData + off + 8, 8);
+                        if (v1 >= -90.0 && v1 <= 90.0 && fabs(v1) >= 1e-4 &&
+                            v2 >= -180.0 && v2 <= 180.0 && fabs(v2) >= 1e-4) {
+                            tl_spoof_parcel = data;
+                            tl_real_lat = v1;
+                            tl_real_lon = v2;
+                            tl_lat_done = false;
+                            LOGE("[PR153] jbbinder readDouble armed: code=%u parcel=%p realLat=%.9f realLon=%.9f",
+                                 code, data, v1, v2);
+                            break;
+                        }
+                    }
                 } else {
-                    LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
-                         token.c_str());
+                    if (looksLocation) {
+                        LOGD("[PR119] token='%s' detected but mutate FAILED (layout drift)",
+                             token.c_str());
+                    }
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
                 }
@@ -4867,20 +5423,167 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
     int32_t status = orig_jbbinder_ontransact(self, code, data, reply, flags);
 
     if (mutated && savedMData) {
+        // PR137: mData at Parcel+0x08
         uint8_t** mDataField = reinterpret_cast<uint8_t**>(
-            const_cast<void*>(data));
+            const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
         *mDataField = savedMData;
+        // PR153: Clear stale readDouble arming
+        tl_spoof_parcel = nullptr;
+        tl_lat_done = false;
     }
-    if (shadowBuf) { delete[] shadowBuf; shadowBuf = nullptr; }
+    delete[] shadowBuf;
 
     return status;
 }
 
-// ── Conservar my_bbinder_transact como stub vacío para que el linker no rompa.
-// applyBBinderHook() ya no lo usará.
+// PR137: BBinder::transact now intercepts incoming location callbacks.
+// PR115 (JavaBBinder vtable hook) fails on this ROM (_ZTV7android7BBinder=0x0),
+// so we catch incoming Binder calls here instead.  BBinder::transact dispatches
+// to JavaBBinder::onTransact internally, so hooking here catches everything.
+// Incoming location callbacks (e.g. ILocationCallback.onLocationResult from GMS)
+// carry the Location in the DATA parcel.  We shadow-copy + mutate before dispatch.
 static int32_t my_bbinder_transact(void* self, uint32_t code,
                                    const void* data, void* reply, uint32_t flags) {
-    return orig_bbinder_transact(self, code, data, reply, flags);
+    if (!orig_bbinder_transact) return 0;
+
+    // PR148: Verify DobbyHook is active (first 10 calls) + log every onLocationChanged (code=1)
+    static std::atomic<int> s_bbCallCount{0};
+    int _bbN = s_bbCallCount.fetch_add(1, std::memory_order_relaxed);
+    {
+        size_t _bbSz = data ? parcel_dataSize(data) : 0;
+        if (_bbN < 10) {
+            LOGE("[PR148] bbinder_transact called: code=%u sz=%zu call#%d", code, _bbSz, _bbN);
+        } else if (code == TRANSACTION_onLocationChanged) {
+            LOGE("[PR148] bbinder_transact onLocationChanged: code=1 sz=%zu", _bbSz);
+        }
+    }
+
+    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
+    int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
+
+    bool mutated = false;
+    uint8_t* savedMData = nullptr;
+    uint8_t* shadowBuf = nullptr;
+
+    if (data && (latBits != 0 || lonBits != 0)) {
+        size_t sz = parcel_dataSize(data);
+        const uint8_t* raw = parcel_data(data);
+
+        if (sz >= 16 && raw) {
+            std::string token;
+            size_t parsedHdr = 0;
+            bool hasToken = parseBinderInterfaceToken(raw, sz, token, parsedHdr);
+            // PR142: Token-only matching — never scan unknown parcels.
+            bool looksLocation = hasToken &&
+                (token.find("location") != std::string::npos ||
+                 token.find("fused") != std::string::npos ||
+                 token.find("gnss") != std::string::npos);
+
+            // PR148: Restrict provider-sig scan to code=1 (onLocationChanged) only.
+            // onStatusChanged (code=2) and other callbacks embed a provider string but
+            // NO lat/lon doubles — probeProviderValidatedLocation gives false positives there.
+            bool hasProviderSig = !looksLocation && code == TRANSACTION_onLocationChanged
+                                  && sz > 128 && hasProviderSignature(raw, sz);
+
+            // PR149: Diagnostic — log token + match result for code=1 parcels
+            if (code == TRANSACTION_onLocationChanged && sz >= 200) {
+                static std::atomic<int> s_diag149{0};
+                int _d = s_diag149.fetch_add(1, std::memory_order_relaxed);
+                if (_d < 5) {
+                    LOGE("[PR149] bbinder code=1 token='%s' looksLoc=%d provSig=%d sz=%zu hasToken=%d",
+                         token.c_str(), (int)looksLocation, (int)hasProviderSig, sz, (int)hasToken);
+                }
+            }
+
+            // PR145: Parcel visualizer for diagnostics
+            if (hasProviderSig) {
+                visualizeLocationParcel(raw, sz, "bbinder", code);
+            }
+
+            if (looksLocation || hasProviderSig) {
+                shadowBuf = new uint8_t[sz];
+                memcpy(shadowBuf, raw, sz);
+
+                double lat, lon;
+                memcpy(&lat, &latBits, 8);
+                memcpy(&lon, &lonBits, 8);
+
+                if (looksLocation) {
+                    mutated = mutateLocationInBuffer(shadowBuf, sz, ILOCLISTENER_HDR, lat, lon) ||
+                              mutateLocationInBuffer(shadowBuf, sz, GMS_ILOCLISTENER_HDR, lat, lon) ||
+                              (parsedHdr > 0 && mutateLocationInBuffer(shadowBuf, sz, parsedHdr, lat, lon));
+
+                    size_t dopplerOffset = 0;
+                    if (!mutated) {
+                        mutated = mutateLocationByDopplerScan(shadowBuf, sz, lat, lon, dopplerOffset);
+                    }
+
+                    if (mutated) {
+                        LOGD("[PR145] bbinder token-mutated: code=%u token='%s' lat=%.6f lon=%.6f",
+                             code, token.c_str(), lat, lon);
+                    }
+                }
+
+                // PR144: Provider-validated fallback for obfuscated GMS interfaces.
+                if (!mutated && hasProviderSig) {
+                    size_t probeOffset = 0;
+                    mutated = probeProviderValidatedLocation(shadowBuf, sz, lat, lon, probeOffset);
+                    if (mutated) {
+                        LOGE("[PR145] bbinder provider-scan mutated: code=%u token='%s' probe=%zu sz=%zu lat=%.6f lon=%.6f",
+                             code, token.c_str(), probeOffset, sz, lat, lon);
+                    }
+                }
+
+                if (mutated) {
+                    uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+                        const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+                    savedMData = *mDataField;
+                    *mDataField = shadowBuf;
+
+                    // PR153: Also arm readDouble for belt-and-suspenders coverage.
+                    // Find real coords in original buffer and arm readDouble hook.
+                    for (size_t off = 0; off + 16 <= sz; off += 4) {
+                        double v1, v2;
+                        memcpy(&v1, savedMData + off, 8);
+                        memcpy(&v2, savedMData + off + 8, 8);
+                        if (v1 >= -90.0 && v1 <= 90.0 && fabs(v1) >= 1e-4 &&
+                            v2 >= -180.0 && v2 <= 180.0 && fabs(v2) >= 1e-4) {
+                            tl_spoof_parcel = data;
+                            tl_real_lat = v1;
+                            tl_real_lon = v2;
+                            tl_lat_done = false;
+                            LOGE("[PR153] bbinder readDouble armed: code=%u parcel=%p realLat=%.9f realLon=%.9f",
+                                 code, data, v1, v2);
+                            break;
+                        }
+                    }
+                } else {
+                    // PR146: Log when provider signature found but no mutation
+                    if (hasProviderSig) {
+                        LOGE("[PR146] bbinder provider-scan FAILED: code=%u token='%s' sz=%zu",
+                             code, token.c_str(), sz);
+                    }
+                    delete[] shadowBuf;
+                    shadowBuf = nullptr;
+                }
+            }
+        }
+    }
+
+    int32_t status = orig_bbinder_transact(self, code, data, reply, flags);
+
+    // Restore original mData pointer
+    if (mutated && savedMData) {
+        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+            const_cast<uint8_t*>(static_cast<const uint8_t*>(data)) + 0x08);
+        *mDataField = savedMData;
+        // PR153: Clear stale readDouble arming after transact completes
+        tl_spoof_parcel = nullptr;
+        tl_lat_done = false;
+    }
+    delete[] shadowBuf;
+
+    return status;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4898,21 +5601,14 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
 static void* resolveLibbinderSymbol(const char* mangled) {
     void* sym = nullptr;
 
-    // Intento 1: DobbySymbolResolver
-    sym = DobbySymbolResolver("libbinder.so", mangled);
-    if (sym) {
-        LOGD("[PR108] via DobbySymbolResolver: %s @ %p", mangled, sym);
-        return sym;
-    }
-
-    // Intento 2: dlsym(RTLD_DEFAULT) — busca en todos los símbolos del proceso
+    // Intento 1: dlsym(RTLD_DEFAULT) — fast hash lookup across all loaded libs
     sym = dlsym(RTLD_DEFAULT, mangled);
     if (sym) {
         LOGD("[PR108] via dlsym(RTLD_DEFAULT): %s @ %p", mangled, sym);
         return sym;
     }
 
-    // Intento 3: dlopen explícito
+    // Intento 2: dlopen + dlsym — explicit library handle
     // RTLD_NOLOAD: no carga si no está mapeada (evita double-load)
     void* lib = dlopen("libbinder.so", RTLD_NOW | RTLD_NOLOAD);
     if (!lib) {
@@ -4925,6 +5621,13 @@ static void* resolveLibbinderSymbol(const char* mangled) {
             LOGD("[PR108] via dlopen+dlsym: %s @ %p", mangled, sym);
             return sym;
         }
+    }
+
+    // Intento 3: DobbySymbolResolver — linear ELF scan, slow but finds hidden symbols
+    sym = DobbySymbolResolver("libbinder.so", mangled);
+    if (sym) {
+        LOGD("[PR108] via DobbySymbolResolver: %s @ %p", mangled, sym);
+        return sym;
     }
 
     LOGE("[PR108] UNRESOLVED: %s", mangled);
@@ -4940,12 +5643,7 @@ static void* resolveLibbinderSymbol(const char* mangled) {
 static void* resolveRuntimeSymbol(const char* mangled) {
     void* sym = nullptr;
 
-    sym = DobbySymbolResolver("libandroid_runtime.so", mangled);
-    if (sym) {
-        LOGD("[PR113] via DobbySymbolResolver: %s @ %p", mangled, sym);
-        return sym;
-    }
-
+    // Fast path: dlsym hash lookup first
     sym = dlsym(RTLD_DEFAULT, mangled);
     if (sym) {
         LOGD("[PR113] via dlsym(RTLD_DEFAULT): %s @ %p", mangled, sym);
@@ -4964,6 +5662,13 @@ static void* resolveRuntimeSymbol(const char* mangled) {
         }
     }
 
+    // Slow fallback: linear ELF scan for hidden-visibility symbols
+    sym = DobbySymbolResolver("libandroid_runtime.so", mangled);
+    if (sym) {
+        LOGD("[PR113] via DobbySymbolResolver: %s @ %p", mangled, sym);
+        return sym;
+    }
+
     LOGE("[PR113] UNRESOLVED: %s", mangled);
     return nullptr;
 }
@@ -4974,10 +5679,8 @@ static void* resolveRuntimeSymbol(const char* mangled) {
 static void* resolveLibcSymbol(const char* name) {
     if (!name || !*name) return nullptr;
 
-    void* sym = DobbySymbolResolver("libc.so", name);
-    if (sym) return sym;
-
-    sym = dlsym(RTLD_DEFAULT, name);
+    // Fast path: dlsym hash lookup
+    void* sym = dlsym(RTLD_DEFAULT, name);
     if (sym) return sym;
 
     void* lib = dlopen("libc.so", RTLD_NOW | RTLD_NOLOAD);
@@ -4988,6 +5691,10 @@ static void* resolveLibcSymbol(const char* name) {
         sym = dlsym(lib, name);
         if (sym) return sym;
     }
+
+    // Slow fallback: linear ELF scan
+    sym = DobbySymbolResolver("libc.so", name);
+    if (sym) return sym;
 
     return nullptr;
 }
@@ -5031,8 +5738,8 @@ static void applyBBinderHook() {
     void* sym106 = resolveLibbinderSymbol(
         "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
     if (sym106) {
-        DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
-        LOGE("[PR106] BBinder::transact hooked @ %p (fallback)", sym106);
+        int rc106 = DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
+        LOGE("[PR106] BBinder::transact hook rc=%d @ %p (orig=%p)", rc106, sym106, (void*)orig_bbinder_transact);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -5088,51 +5795,117 @@ static void applyBBinderHook() {
              base_vtable, base_ontransact, java_vtable);
     }
 
-    // ── Estrategia B: Fallback estático al índice 19 ─────────────────────────
+    // ── Estrategia B: Fallback estático DESHABILITADO (PR133) ────────────────
     if (!target_fn && java_vtable) {
-        // Índice 19 confirmado por análisis offline del binario de este dispositivo.
-        // vtable[19] @ +0x98 desde _ZTV11JavaBBinder:
-        // - 488 bytes de tamaño (función más grande de JavaBBinder)
-        // - 8 instrucciones BL (más llamadas externas = llama a la JVM)
-        constexpr int STATIC_ONTRANSACT_IDX = 19;
-        void** j_vt = reinterpret_cast<void**>(java_vtable);
-        void* candidate = j_vt[STATIC_ONTRANSACT_IDX];
-        if (candidate) {
-            LOGD("[PR115] Static fallback: vtable[%d] = %p", STATIC_ONTRANSACT_IDX, candidate);
-            target_fn = candidate;
-        } else {
-            LOGE("[PR115] Static fallback: vtable[%d] is null", STATIC_ONTRANSACT_IDX);
-        }
+        // PR133: Static fallback at index 19 is ROM-specific and caused a Maps
+        // crash loop on MIUI (vtable[19] was the wrong function; my_jbbinder_ontransact
+        // received wrong arguments → crash → respawn loop, hooks never fired).
+        // Dynamic scan requires _ZTV7android7BBinder which is 0x0 on this ROM.
+        // Disabling static fallback; PR105 IPCThreadState::transact is sufficient.
+        LOGE("[PR115] Static fallback DISABLED — dynamic scan failed (base_vt=0x0). Skipping PR115.");
     }
 
     // ── Hook final ────────────────────────────────────────────────────────────
     if (target_fn) {
-        DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
+        int rc115 = DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
                   (void**)&orig_jbbinder_ontransact);
-        LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p", target_fn);
+        if (rc115 == 0) {
+            LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p (orig=%p)", target_fn, (void*)orig_jbbinder_ontransact);
+        } else {
+            LOGE("[PR115] JavaBBinder::onTransact DobbyHook FAILED rc=%d @ %p", rc115, target_fn);
+        }
+        // PR131: Verify patch
+        {
+            uint32_t insn = 0;
+            memcpy(&insn, target_fn, 4);
+            LOGE("[PR131] JavaBBinder verify: first_insn=0x%08x orig_ptr=%p", insn, (void*)orig_jbbinder_ontransact);
+        }
     } else {
         LOGE("[PR115] JavaBBinder::onTransact HOOK FAILED — all strategies exhausted");
     }
 
-    // PR118: El punto de entrada de todos los objetos Location vía Binder
-    void* readFromParcel = resolveRuntimeSymbol("_ZN7android16Location_readFromParcelEP7_JNIEnvP8_jobjectS3_");
-    if (readFromParcel) {
-        DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
-        LOGE("[PR118] Location::readFromParcel hooked OK");
-    } else {
-        LOGE("[PR118] Location::readFromParcel UNRESOLVED");
+    // PR118: Hook Location::readFromParcel — the JNI entry point for Location
+    // object reconstruction from Binder parcels.
+    //
+    // On Android 11, Location.readFromParcel() is a PURE JAVA method in most ROMs.
+    // The native symbol only exists when the ROM registers a native fast-path via
+    // RegisterNatives. Try multiple symbol patterns for ROM compatibility:
+    //   1. android::Location_readFromParcel (MIUI variant)
+    //   2. android_location_Location_readFromParcel (AOSP JNI naming)
+    //   3. JNI method table scan as ultimate fallback
+    {
+        static const char* LOC_READ_SYMBOLS[] = {
+            "_ZN7android16Location_readFromParcelEP7_JNIEnvP8_jobjectS3_",
+            // AOSP-style: android_location_Location_readFromParcel
+            "_ZN7android36android_location_Location_readFromParcelEP7_JNIEnvP8_jobjectS3_",
+            // Variant with different namespace
+            "_ZN7android8location8Location15readFromParcelEP7_JNIEnvP8_jobjectS3_",
+            nullptr
+        };
+        void* readFromParcel = nullptr;
+        for (int i = 0; LOC_READ_SYMBOLS[i] && !readFromParcel; ++i) {
+            readFromParcel = resolveRuntimeSymbol(LOC_READ_SYMBOLS[i]);
+        }
+        // Fallback: search for any symbol containing "Location" and "readFromParcel"
+        // via dlopen + iteration (future enhancement)
+        if (readFromParcel) {
+            int rc118 = DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
+            LOGE("[PR118] Location::readFromParcel hook rc=%d @ %p (orig=%p)", rc118, readFromParcel, (void*)orig_Location_readFromParcel);
+        } else {
+            // Not an error on most ROMs — readFromParcel is pure Java on Android 11.
+            // Location interception relies on Binder hooks (PR105/119) instead.
+            LOGD("[PR118] Location::readFromParcel: no native symbol (pure Java — expected on most ROMs)");
+        }
     }
 }
 
 static void applyBinderHooks() {
+    // PR135: Skip ALL Binder hooks in GMS — Dobby can't safely relocate
+    // IPCThreadState::transact's prologue on this ROM (SIGSEGV in trampoline
+    // at <anonymous> region). GMS is a location provider, not consumer;
+    // PR105 REPLY mutation only benefits Maps.
+    if (g_currentProcessName.find("com.google.android.gms") != std::string::npos) {
+        // PR139: Only skip IPCThreadState::transact in GMS (PR135 crash was specific to
+        // that symbol's Dobby trampoline). BBinder/JavaBBinder hooks are safe and needed
+        // for intercepting incoming location callbacks in GMS sub-processes.
+        LOGE("[PR139] GMS process '%s' — skipping IPCThreadState::transact (PR135 crash), "
+             "but applying BBinder/JavaBBinder hooks for location callback coverage",
+             g_currentProcessName.c_str());
+        applyBBinderHook();
+        return;
+    }
+
     void* sym = resolveLibbinderSymbol(
         "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
     if (sym) {
-        DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
-        LOGE("[PR105] IPCThreadState::transact hooked OK @ %p", sym);
+        int rc105 = DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
+        if (rc105 == 0) {
+            LOGE("[PR105] IPCThreadState::transact hooked OK @ %p (orig=%p)", sym, (void*)orig_ipc_transact);
+        } else {
+            LOGE("[PR105] IPCThreadState::transact DobbyHook FAILED rc=%d @ %p", rc105, sym);
+        }
+        // PR131: Verify patch — read first 4 bytes at hooked address
+        {
+            uint32_t insn = 0;
+            memcpy(&insn, sym, 4);
+            LOGE("[PR131] IPCThreadState verify: first_insn=0x%08x orig_ptr=%p", insn, (void*)orig_ipc_transact);
+        }
     } else {
         LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
     }
+
+    // PR149: Hook Parcel::readDouble for reply-side location spoofing.
+    // Binder mmap is PROT_READ with ~VM_MAYWRITE, so we can't write to reply buffers.
+    // Instead, we intercept readDouble and return spoofed values when armed.
+    void* symRD = resolveLibbinderSymbol("_ZNK7android6Parcel10readDoubleEv");
+    if (symRD) {
+        int rcRD = DobbyHook(symRD, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
+        LOGE("[PR149] Parcel::readDouble hook %s @ %p (orig=%p)",
+             rcRD == 0 ? "OK" : "FAILED", symRD, (void*)orig_Parcel_readDouble);
+    } else {
+        LOGE("[PR149] Parcel::readDouble symbol not found in libbinder.so");
+    }
+
     applyBBinderHook();
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5140,7 +5913,14 @@ static void applyBinderHooks() {
 class OmniModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
-        if (!api || !env) return;
+        // PR122: Always log onLoad, even when api/env is null, to diagnose
+        // Zygisk injection failures (e.g., Maps main process not getting hooks).
+        if (!api || !env) {
+            __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+                "[scope] onLoad: ABORT — api=%p env=%p (Zygisk injection failure?)",
+                (void*)api, (void*)env);
+            return;
+        }
         g_api = api;
         env->GetJavaVM(&g_jvm);
         this->api = api;
@@ -5157,10 +5937,18 @@ public:
         JNIEnv *env = nullptr;
         if (g_jvm) g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
         g_isTargetApp = false;
+        if (!env || !args->nice_name) {
+            LOGE("[scope] preAppSpecialize: SKIP — env=%p nice_name=%p (JNI failure?)",
+                 (void*)env, args ? (void*)args->nice_name : nullptr);
+        }
         if (env && args->nice_name) {
             const char *p = env->GetStringUTFChars(args->nice_name, nullptr);
+            if (!p) {
+                LOGE("[scope] preAppSpecialize: GetStringUTFChars returned NULL");
+            }
             if (p) {
                 std::string proc(p);
+                g_currentProcessName = proc;
                 LOGD("[scope] process='%s' config_keys=%zu", proc.c_str(), g_config.size());
                 if (g_config.count("scoped_apps")) {
                     std::string scopedRaw = g_config["scoped_apps"];
@@ -5176,6 +5964,9 @@ public:
                             break;
                         }
                     }
+                    // PR125: Flag is written by companion_handler (root, SELinux-safe).
+                    // Writing from the app process fails silently (SELinux blocks open()
+                    // from forked Zygote child to /data/adb/). See companion_handler.
                 } else {
                     LOGD("[scope] NO scoped_apps key in config");
                 }
@@ -5185,9 +5976,12 @@ public:
                 // lleguen a GMS/Maps, incluso si el usuario olvidó agregarlos.
                 if (!g_isTargetApp) {
                     static const char* kLocationProducers[] = {
+                        "com.mediatek.location.lppe.main",
                         "com.mediatek.location.ppe.main",
                         "com.xiaomi.location.fused",
                         "com.android.location.fused",
+                        "com.google.android.gms",          // PR129: matches main, .unstable, .persistent
+                        "com.google.android.apps.maps",    // PR129: always hook Maps for location
                         nullptr
                     };
                     for (int i = 0; kLocationProducers[i]; ++i) {
@@ -5300,6 +6094,16 @@ public:
 
         // PR38+39: Inicializar caché de GPS y cargar sensor globals del perfil activo
         initLocationCache();
+        // PR130: Diagnostic — verify coordinates are loaded into atomic cache
+        {
+            int64_t lb = g_cachedLatBits.load(std::memory_order_acquire);
+            int64_t lob = g_cachedLonBits.load(std::memory_order_acquire);
+            double lat, lon;
+            memcpy(&lat, &lb, 8);
+            memcpy(&lon, &lob, 8);
+            LOGE("[PR130] Location cache: lat=%.6f lon=%.6f cached=%d profile='%s' seed=%ld",
+                 lat, lon, (int)g_locationCached, g_currentProfileName.c_str(), g_masterSeed);
+        }
         const DeviceFingerprint* sp_ptr = findProfile(g_currentProfileName);
         if (sp_ptr) {
             const auto& sp = *sp_ptr;
@@ -5377,24 +6181,59 @@ public:
             LOGE("PR120: mmap64 symbol unresolved (resolver chain exhausted)");
         }
 
-        void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
-        if (sysprop_func) DobbyHook(sysprop_func, (void*)my_system_property_get, (void**)&orig_system_property_get);
-
-        void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
-        if (sysprop_cb_func) DobbyHook(sysprop_cb_func, (void*)my_system_property_read_callback, (void**)&orig_system_property_read_callback);
+        // PR138: NEVER Dobby-hook __system_property_get or __system_property_read_callback.
+        // PIF also Dobby-hooks these functions. Module ordering is unpredictable:
+        // if OmniShield hooks first and PIF hooks second, PIF's trampoline overwrites
+        // OmniShield's, and OmniShield's orig trampoline jumps to corrupted data → SIGILL.
+        // patchPropertyPages() + PLT hooks provide sufficient coverage without Dobby.
+        {
+            void* sysprop_func = DobbySymbolResolver("libc.so", "__system_property_get");
+            LOGE("PR138: __system_property_get @ %p — skipping Dobby hook (PIF conflict avoidance)",
+                 sysprop_func);
+            if (!orig_system_property_get) {
+                orig_system_property_get =
+                    reinterpret_cast<decltype(orig_system_property_get)>(
+                        dlsym(RTLD_DEFAULT, "__system_property_get"));
+            }
+        }
+        {
+            void* sysprop_cb_func = DobbySymbolResolver("libc.so", "__system_property_read_callback");
+            LOGE("PR138: __system_property_read_callback @ %p — skipping Dobby hook (PIF conflict avoidance)",
+                 sysprop_cb_func);
+            if (!orig_system_property_read_callback) {
+                orig_system_property_read_callback =
+                    reinterpret_cast<decltype(orig_system_property_read_callback)>(
+                        dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
+            }
+        }
 
         // PR86: Re-attempt Dobby inline hook on __system_property_find.
         // PR85 removed this because DobbySymbolResolver("libc.so") may have returned
         // a PLT thunk or wrong address, causing SIGABRT. Now using dlsym(RTLD_DEFAULT)
         // for reliable resolution of the actual bionic function address.
-        // __system_property_find is NOT a thin syscall wrapper — it traverses the property
-        // trie in shared memory (~15-25 ARM64 instructions, 60-100 bytes), well above
-        // Dobby's 12-byte trampoline requirement.
         // This inline hook intercepts ALL callers including late-loaded .so files
         // (VDInfo's native lib, Snapchat's native lib) that aren't covered by PLT hooks.
+        //
+        // SAFETY: If __system_property_read_callback is too close (< 64 bytes),
+        // another module (PIF) may have already Dobby-hooked it, overwriting
+        // instructions in __system_property_find's body.  The Dobby orig-trampoline
+        // for _find would then execute corrupted code → SIGILL.
+        // In that case we fall back to PLT-only hooks.
         {
             void* find_func = dlsym(RTLD_DEFAULT, "__system_property_find");
-            if (find_func) {
+            void* cb_func   = dlsym(RTLD_DEFAULT, "__system_property_read_callback");
+            bool tooClose = false;
+            if (find_func && cb_func) {
+                ptrdiff_t gap = (uint8_t*)cb_func - (uint8_t*)find_func;
+                if (gap > 0 && gap < 64) {
+                    tooClose = true;
+                    LOGE("PR86: __system_property_find (%p) too close to "
+                         "__system_property_read_callback (%p) (gap=%td bytes) — "
+                         "skipping Dobby hook to avoid SIGILL conflict with PIF",
+                         find_func, cb_func, gap);
+                }
+            }
+            if (find_func && !tooClose) {
                 int ret = DobbyHook(find_func, (void*)my_system_property_find,
                                     (void**)&orig_system_property_find);
                 if (ret == 0) {
@@ -5403,7 +6242,7 @@ public:
                 } else {
                     LOGE("PR86: Dobby inline hook on __system_property_find FAILED (ret=%d) at %p, falling back to PLT only", ret, find_func);
                 }
-            } else {
+            } else if (!find_func) {
                 LOGE("PR86: dlsym(RTLD_DEFAULT, __system_property_find) returned NULL");
             }
         }
@@ -5976,16 +6815,9 @@ public:
         void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
         if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
 
-        // Sensores (Mangled names en libandroid.so o libsensors.so)
-        // _ZNK7android6Sensor7getNameEv -> android::Sensor::getName() const
-        // _ZNK7android6Sensor9getVendorEv -> android::Sensor::getVendor() const
-        void* sensor_name_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor7getNameEv");
-        if (!sensor_name_func) sensor_name_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor7getNameEv");
-        if (sensor_name_func) DobbyHook(sensor_name_func, (void*)my_Sensor_getName, (void**)&orig_Sensor_getName);
-
-        void* sensor_vendor_func = DobbySymbolResolver("libandroid.so", "_ZNK7android6Sensor9getVendorEv");
-        if (!sensor_vendor_func) sensor_vendor_func = DobbySymbolResolver("libsensors.so", "_ZNK7android6Sensor9getVendorEv");
-        if (sensor_vendor_func) DobbyHook(sensor_vendor_func, (void*)my_Sensor_getVendor, (void**)&orig_Sensor_getVendor);
+        // Sensor::getName()/getVendor() Dobby hooks REMOVED — ABI mismatch
+        // (returns const String8&, not const char*) caused SIGBUS in GMS.
+        // Sensor metadata spoofing is handled by JNI hooks on android/hardware/Sensor.
 
         // Force-load libandroid_runtime — on some ROMs (MIUI, etc.) the Settings JNI
         // bridge symbols are only available after explicit dlopen, similar to Fix11
@@ -6005,8 +6837,13 @@ public:
         };
         void* settings_func = nullptr;
         int settings_variant = -1;
+        // Settings JNI symbols have default visibility (called from Java/JNI).
+        // Use dlsym only — DobbySymbolResolver does a linear ELF scan (~600ms/miss)
+        // and can't find these symbols either if dlsym fails.
+        void* rt_lib = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
         for (int si = 0; SETTINGS_SYMBOLS[si] && !settings_func; ++si) {
-            settings_func = DobbySymbolResolver("libandroid_runtime.so", SETTINGS_SYMBOLS[si]);
+            settings_func = dlsym(RTLD_DEFAULT, SETTINGS_SYMBOLS[si]);
+            if (!settings_func && rt_lib) settings_func = dlsym(rt_lib, SETTINGS_SYMBOLS[si]);
             if (settings_func) settings_variant = si;
         }
         if (settings_func) {
@@ -6032,7 +6869,8 @@ public:
         void* settings_user_func = nullptr;
         int settings_user_variant = -1;
         for (int si = 0; SECURE_USER_SYMBOLS[si] && !settings_user_func; ++si) {
-            settings_user_func = DobbySymbolResolver("libandroid_runtime.so", SECURE_USER_SYMBOLS[si]);
+            settings_user_func = dlsym(RTLD_DEFAULT, SECURE_USER_SYMBOLS[si]);
+            if (!settings_user_func && rt_lib) settings_user_func = dlsym(rt_lib, SECURE_USER_SYMBOLS[si]);
             if (settings_user_func) settings_user_variant = si;
         }
         if (settings_user_func) {
@@ -6055,7 +6893,8 @@ public:
         void* global_func = nullptr;
         int global_variant = -1;
         for (int gi = 0; GLOBAL_SYMBOLS[gi] && !global_func; ++gi) {
-            global_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_SYMBOLS[gi]);
+            global_func = dlsym(RTLD_DEFAULT, GLOBAL_SYMBOLS[gi]);
+            if (!global_func && rt_lib) global_func = dlsym(rt_lib, GLOBAL_SYMBOLS[gi]);
             if (global_func) global_variant = gi;
         }
         if (global_func) {
@@ -6078,7 +6917,8 @@ public:
         void* global_user_func = nullptr;
         int global_user_variant = -1;
         for (int gi = 0; GLOBAL_USER_SYMBOLS[gi] && !global_user_func; ++gi) {
-            global_user_func = DobbySymbolResolver("libandroid_runtime.so", GLOBAL_USER_SYMBOLS[gi]);
+            global_user_func = dlsym(RTLD_DEFAULT, GLOBAL_USER_SYMBOLS[gi]);
+            if (!global_user_func && rt_lib) global_user_func = dlsym(rt_lib, GLOBAL_USER_SYMBOLS[gi]);
             if (global_user_func) global_user_variant = gi;
         }
         if (global_user_func) {
@@ -6462,6 +7302,14 @@ public:
         // All hooks are installed above — now make the .so invisible in maps.
         remapModuleMemory();
 
+        // PR136: Invalidate Zygisk Api pointer — KernelSU's Zygisk unmaps
+        // its vtable after postAppSpecialize returns. Without this, dlopen
+        // hooks calling g_api->pltHookRegister() crash via dangling vtable.
+        // Both installPltHooks() and reapplyPltHooksForNewLibraries() already
+        // guard with `if (!g_api) return;`.  pltHookCommit() returns false
+        // on this KernelSU version anyway, so the reapply is a no-op.
+        g_api = nullptr;
+
     }
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
         // PR58: DLCLOSE removido — causa pc=0x0 en forkSystemServer.
@@ -6824,6 +7672,25 @@ static void companion_handler(int client) {
         write(client, content.c_str(), len);
     }
 
+    // PR125: Write ready flag from companion (runs as root — no SELinux restriction).
+    // The app process open() fails silently due to SELinux context after fork().
+    // The companion is invoked once per process that loads the module, so the first
+    // invocation with a non-empty config signals that Zygisk + config are both ready.
+    if (!content.empty()) {
+        static bool s_readyFlagWritten = false;
+        if (!s_readyFlagWritten) {
+            s_readyFlagWritten = true;
+            int fd = open("/data/adb/.omni_data/.zygisk_ready",
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                close(fd);
+                LOGE("[PR125] companion: zygisk_ready flag written (root, SELinux-safe)");
+            } else {
+                LOGE("[PR125] companion: zygisk_ready write FAILED errno=%d", errno);
+            }
+        }
+    }
+
     // One-time per profile: set_uname backup + generate .profile_props + apply resetprop
     // PR74: Local config parse — avoids mutating globals used by hook threads
     if (!content.empty()) {
@@ -6849,6 +7716,12 @@ static void companion_handler(int client) {
         }
 
         if (!profileName.empty()) {
+            std::string runtimeSig = buildRuntimeIdentitySignature(localConfig);
+            if (runtimeSig != g_lastRuntimeIdentitySig) {
+                g_lastRuntimeIdentitySig = runtimeSig;
+                restartLocationRuntime();
+            }
+
             static std::string s_lastWrittenProfile;
             if (profileName != s_lastWrittenProfile) {
                 s_lastWrittenProfile = profileName;

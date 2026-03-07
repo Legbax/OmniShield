@@ -1,8 +1,8 @@
-# Julia.md — OMNI-Shield v13.0 Technical Reference
+# Julia.md — OMNI-Shield v25.0 Technical Reference
 
-**Version:** v13.0 (The Void)
+**Version:** v25.0
 **Author:** Legba
-**Last updated:** 2026-03-04 (PR104: fix resolve_host() greedy sed regex extracts byte-count (84) instead of IP from ping output; PR103: fix verify_proxy() — pre-resolve hostname via resolve_host() before nc (toybox nc can't resolve DNS); check curl -V for SOCKS5 support; use HTTP code for auth validation; PR102: fix verify_proxy() — replace curl socks5h:// with nc -z TCP test + curl --socks5-hostname fallback (Android curl has no SOCKS5 support); PR101: proxy pre-flight verify_proxy() before iptables + udp:tcp for DNS compatibility; PR100: LocationManager.getLastKnownLocation hooked to synthesize Location when GPS is off; PR99: Expand JA3 hash space 32→256: independent ECDHE/RSA-CBC cipher dropping, secp521r1 curves, delegated_credentials ext, OkHttp SCT optional; PR98: Patch tun0 VPN leakage via /proc/net/route + if_inet6 tun filter + /proc/self/net/* aliases; PR97: Wipe Google Traces always targets com.android.webview; PR96: location_lat/lon now propagated to native GPS cache)
+**Last updated:** 2026-03-07 (PR152: magnitude threshold for coordinate validation; PR150: value-based readDouble matching; PR149: Parcel::readDouble stateful hook; PR148: false positive fix for onStatusChanged; PR145: BBinder/IPCThreadState/JavaBBinder hooks + provider-validated location scan)
 
 ---
 
@@ -21,14 +21,15 @@ OMNI-Shield is a Zygisk module (C++17, ARM64) that spoofs device identity at the
 | 5. JNI Fields | `Build.*`, `Build.VERSION.*` static fields via `SetStaticObjectField` | 25+ fields overwritten in `postAppSpecialize` |
 | 6. JNI Methods | `hookJniNativeMethods` on Telephony, Location, Sensor, Network, Camera, MediaCodec | ~40 Java methods hooked |
 | 7. HAL/Driver | `eglQueryString`, `glGetString`, `vkGetPhysicalDeviceProperties`, `clGetDeviceInfo` | GPU identity, OpenGL ES version |
-| 8. Stealth | `dl_iterate_phdr` filter, `/proc/self/maps` filter, `remapModuleMemory()` | Module invisible in memory maps |
-| 9. Kernel | SUSFS `set_uname` + `set_cmdline_or_bootconfig` | Kernel version + /proc/cmdline spoofing |
+| 8. Binder IPC | `BBinder::transact`, `IPCThreadState::transact`, `JavaBBinder::onTransact`, `Parcel::readDouble` | Shadow buffer swap (DATA) + readDouble value interception (REPLY) for GPS coordinate spoofing |
+| 9. Stealth | `dl_iterate_phdr` filter, `/proc/self/maps` filter, `remapModuleMemory()` | Module invisible in memory maps |
+| 10. Kernel | SUSFS `set_uname` + `set_cmdline_or_bootconfig` | Kernel version + /proc/cmdline spoofing |
 
 ### Key Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `jni/main.cpp` | ~5985 | Core module: all hooks, profile loading, companion, patchPropertyPages, writePifProps |
+| `jni/main.cpp` | ~7724 | Core module: all hooks, profile loading, companion, patchPropertyPages, writePifProps, Binder IPC location spoofing |
 | `jni/omni_engine.hpp` | ~410 | Identity generators: IMEI (Luhn), ICCID, IMSI, MAC, Serial, GPS, UUID, Timezone, Carrier |
 | `jni/omni_profiles.h` | ~726 | `DeviceFingerprint` struct (58 fields) + 40 device profiles (8 brands) |
 | `jni/include/zygisk.hpp` | - | Zygisk API v3 header |
@@ -147,6 +148,16 @@ Zygote boot
 
 10. **`shouldHide(key)` operates on VALUES**, not keys. Filters: `mediatek`, `lancelot`, `huaqin`, `mt6769`, `moly.`. Exception for Xiaomi/MediaTek target profiles.
 
+### Binder IPC Hooks (PR145-PR152)
+
+14. **Shadow buffer swap on DATA parcels ONLY.** Reply parcels use `freeBuffer()` → `BC_FREE_BUFFER` with the mData pointer. Swapping mData on a reply sends a heap pointer to the kernel → binder mmap leak (~58 min to fill 1MB).
+
+15. **Never write to binder mmap reply buffers.** Neither `/proc/self/mem` pwrite (EIO on VM_MIXEDMAP pages) nor `mprotect` (~VM_MAYWRITE) work. Use `Parcel::readDouble` hook instead.
+
+16. **Coordinate validation must use `fabs(x) >= 1e-4`**, not `x != 0.0`. Near-zero fields (elapsed-realtime-uncertainty, etc.) are NOT exactly IEEE 754 zero but display as `0.000000` at 6 decimal places.
+
+17. **`mDataPos` offset varies across AOSP/MIUI builds.** Never read Parcel struct fields by hardcoded offset. Use value-based matching (compare readDouble return value against known real coordinates).
+
 ### JNI Safety
 
 11. **Always `ExceptionCheck() / ExceptionClear()`** after `hookJniNativeMethods`.
@@ -197,7 +208,7 @@ Zygote boot
 
 ## 6. Hooked Functions Catalog
 
-### Dobby Inline Hooks (~55)
+### Dobby Inline Hooks (~59)
 
 **libc (Properties):** `__system_property_get`, `__system_property_read_callback`, `__system_property_find`, `__system_property_foreach`
 **libc (File I/O):** `openat`, `read`, `close`, `lseek`, `lseek64`, `pread`, `pread64`, `fopen`, `readlinkat`, `readlink`, `readdir`
@@ -213,6 +224,7 @@ Zygote boot
 **Sensor:** `Sensor.getName`, `Sensor.getVendor`
 **Camera:** `CameraMetadataNative.nativeReadValues`
 **Media:** `MediaCodec.native_setup`
+**Binder IPC (PR145-PR152):** `BBinder::transact` (libbinder), `IPCThreadState::transact` (libbinder), `JavaBBinder::onTransact` (libandroid_runtime), `Parcel::readDouble` (libbinder)
 
 ### Zygisk PLT Hooks (6, fallback for thin syscall wrappers)
 
@@ -362,6 +374,7 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 | BOOTCLASSPATH / DEX2OATBOOTCLASSPATH | Cannot fix | Env vars set by Zygote pre-fork, contain miuisdk/mediatek jars |
 | GPU hardware (Mali vs PowerVR) | Cannot fix | Physical hardware. `glGetString`/`eglQueryString` hooked but GL runtime reveals real GPU |
 | `getNetworkCountryIso` | Partial | Modem/RIL reads real MCC from cell tower. `resetprop` loop in service.sh helps but Binder path may bypass |
+| Binder IPC GPS spoofing | Working (PR152) | Requires ~40s GPS warm-up + Maps restart on first boot. Subsequent location changes are instant. BBinder shadow swap + readDouble hook cover DATA and REPLY paths. |
 | `getTypeAllocationCode` | Cannot fix | TAC from real IMEI, modem-level |
 | `gsm.version.baseband` dual | Partial | Runtime prop, modem daemon overwrites after resetprop |
 | WebView UA | Partial | Chromium caches UA during Zygote init before hooks |
@@ -377,7 +390,7 @@ Test suite: `tests/simulate_proxy.sh` -- 57 tests across 9 categories.
 2. CMake build: `arm64-v8a`, `android-30`, `c++_static`
 3. Download `hev-socks5-tunnel-linux-arm64` (ELF validation)
 4. Package ZIP: `zygisk/arm64-v8a.so`, `module.prop`, scripts, `bin/tun2socks`, `webroot/`
-5. Output: `omnishield-v13.0-release.zip`
+5. Output: `OMNI-Shield-v25.0-release.zip`
 
 ### Module Structure (installed)
 
@@ -636,3 +649,130 @@ tunnel). That rule was using `84` as the exempt IP instead of the real proxy add
 1. `PR120: mmap hook SUCCESS ...` + `PR120: mmap64 shares mmap symbol (...) — single-hook mode` is **expected on some ARM64 builds**.
 2. If no `[PR120] ashmem fd observed ...` appears after pulses, hooks are active but the scoped process may not be touching `/dev/ashmem` descriptors in the observed path.
 3. Location leakage can still occur via non-Binder/non-ashmem channels (vendor/system-server pipelines) despite successful app-process hooks.
+
+---
+
+## 25. PR145 — Binder IPC location spoofing: BBinder + IPCThreadState + JavaBBinder hooks (2026-03-05)
+
+**Root cause:** Existing JNI hooks on `Location.getLatitude()/getLongitude()` are passive —
+they only fire when Java code calls the getter. Google Maps and GMS use Binder IPC to
+transfer serialized `Location` objects between processes. The real GPS coordinates are
+embedded as raw `double` values in the Parcel buffer. Apps that deserialize Location
+directly from Parcel data bypass the JNI getter hooks entirely.
+
+**Solution — three Binder hooks via DobbyHook:**
+
+| Hook | Symbol | Purpose |
+|------|--------|---------|
+| `BBinder::transact` | `_ZN7android7BBinder8transactEjRKNS_6ParcelEPNS1_Ej` | Intercept incoming DATA parcels (server-side). Shadow buffer swap: writable copy of mData, mutate coordinates, swap pointer during `orig_bbinder_transact`, restore after return. |
+| `JavaBBinder::onTransact` | `_ZN7android14JavaBBinder10onTransactEjRKNS_6ParcelEPNS1_Ej` | Same as BBinder but for Java-side Binder objects. Identical shadow buffer swap logic. |
+| `IPCThreadState::transact` | `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPNS1_Ej` | Intercept outgoing IPC calls and scan REPLY parcels for location data. Reply buffers live in binder mmap (PROT_READ, VM_MIXEDMAP) — cannot be written via `/proc/self/mem` (EIO) or `mprotect` (~VM_MAYWRITE). |
+
+**Coordinate detection — `probeProviderValidatedLocation()`:**
+1. Scans buffer at 4-byte-aligned offsets for known provider strings ("gps"/"fused"/"network"/"passive") in UTF-16LE via `matchesKnownProvider()`
+2. From provider end, scans forward 16–128 bytes for consecutive doubles in lat/lon range
+3. Validates: `|lat| >= 1e-4`, `|lon| >= 1e-4` (rejects near-zero padding fields)
+4. Writes spoofed coordinates at the found offset
+
+**Shadow buffer swap (BBinder DATA path):**
+```
+1. shadowBuf = new uint8_t[sz]; memcpy(shadowBuf, raw, sz)
+2. Mutate shadowBuf (probeProviderValidatedLocation / mutateLocationInBuffer)
+3. Swap: Parcel.mData = shadowBuf (at struct offset +0x08)
+4. Call orig_bbinder_transact → Java reads from shadowBuf
+5. Restore: Parcel.mData = savedMData
+6. delete[] shadowBuf
+```
+
+**Files changed:** `jni/main.cpp` (~1200 new lines: hooks, symbol resolution, provider scanning, shadow buffer swap, diagnostic logging)
+
+---
+
+## 26. PR148 — Fix false positive on onStatusChanged (code=2) (2026-03-06)
+
+**Root cause:** `probeProviderValidatedLocation` was matching provider strings in
+`onStatusChanged` (code=2) parcels and interpreting Bundle data as lat/lon coordinates.
+These parcels contain provider strings but NO actual location doubles — the "coordinates"
+found were arbitrary Bundle data that happened to fall in the [-90,90] / [-180,180] range.
+
+**Fix:** Restrict `hasProviderSig` to `code == TRANSACTION_onLocationChanged` (code=1) only:
+```cpp
+bool hasProviderSig = !looksLocation && code == TRANSACTION_onLocationChanged
+                      && sz > 128 && hasProviderSignature(raw, sz);
+```
+
+**Files changed:** `jni/main.cpp` (condition guard in `my_bbinder_transact` and `my_jbbinder_ontransact`)
+
+---
+
+## 27. PR149 — Parcel::readDouble stateful hook for IPC REPLY path (2026-03-06)
+
+**Root cause:** IPC reply Parcel buffers live in binder kernel mmap with `PROT_READ` and
+`VM_MIXEDMAP`. Neither `/proc/self/mem` pwrite (errno=5 EIO — `get_user_pages` cannot
+obtain physical pages from `vm_insert_page` mappings) nor `mprotect` (~VM_MAYWRITE flag
+prevents adding write permission) can modify reply data in-place.
+
+**Solution:** Hook `Parcel::readDouble` (`_ZNK7android6Parcel10readDoubleEv`) via DobbyHook.
+When the IPC reply path finds a location in the reply, it "arms" thread-local state.
+When Java later calls `readDouble` on the same Parcel, the hook intercepts and returns
+spoofed values instead of real coordinates — no writes to read-only memory needed.
+
+**Thread-local state:**
+```cpp
+static thread_local const void* tl_spoof_parcel = nullptr;  // armed Parcel pointer
+static thread_local double tl_real_lat = 0.0;               // real value to intercept
+static thread_local double tl_real_lon = 0.0;               // real value to intercept
+static thread_local bool tl_lat_done = false;                // lat→lon state machine
+```
+
+**Files changed:** `jni/main.cpp` (new `my_Parcel_readDouble` hook, thread-local state, arming logic in `my_ipc_transact` and `mutateLocationReply`)
+
+---
+
+## 28. PR150 — Value-based readDouble matching (2026-03-06)
+
+**Root cause:** PR149 read `mDataPos` from Parcel+0x20 (AOSP arm64 layout) to match
+against stored offsets. On MIUI's Parcel build, `mDataPos` is NOT at +0x20 — the field
+at that offset is something else. Lat was never intercepted (pos≠68), while lon matched
+coincidentally (pos==76). Result: Maps showed Pacific Ocean (real lat + spoofed lon).
+
+**Fix:** Replace position-based matching with exact value matching:
+1. When arming, store the **real coordinate values** (from the unmodified reply buffer)
+   in `tl_real_lat` / `tl_real_lon`
+2. In `my_Parcel_readDouble`, call `orig_readDouble(self)` first, then compare the
+   returned value against stored real values
+3. No `mDataPos` offset read needed — works regardless of Parcel struct layout
+
+**Files changed:** `jni/main.cpp` (rewrite `my_Parcel_readDouble`, update arming in `mutateLocationReply` and `my_ipc_transact`)
+
+---
+
+## 29. PR152 — Magnitude threshold for coordinate validation (2026-03-07)
+
+**Root cause:** PR151 changed `== 0.0` checks to `|| 0.0` to reject single-zero false
+positives. But the offending field at offset 656 (likely `mElapsedRealtimeUncertaintyNanos`)
+is NOT exactly IEEE 754 zero — it's a tiny near-zero double (< 5e-7) that displays as
+`0.000000` at 6 decimal places. Exact `== 0.0` comparison misses it.
+
+**Fix:** Replace all coordinate zero-guards with magnitude threshold `fabs(x) >= 1e-4`
+(≈ 11 meters from equator/meridian). GPS hardware never returns coordinates this close
+to zero in practice; tiny near-zero values are always auxiliary fields.
+
+Applied to all 4 coordinate validation sites:
+- `probeProviderValidatedLocation()` — critical, controls arming offset
+- `mutateLocationInBuffer()` — Android 11 + 12+ paths
+- `visualizeLocationParcel()` — diagnostic consistency
+
+**Safety net added:** Arming code in `my_ipc_transact` and `mutateLocationReply` now
+validates `origLat/origLon` magnitude before accepting. If the probe still finds a false
+positive, the bad values are rejected and logged at `%.9f` precision.
+
+**Confirmed working:** Logcat shows correct interception chain:
+```
+[PR152] probe match: off=76 curLat=-33.478263333 curLon=-70.619441667
+[PR152] ipc reply spoof armed: realLat=-33.478263333 realLon=-70.619441667
+[PR150] readDouble spoofed lat: -33.478263 -> 32.225315
+[PR150] readDouble spoofed lon: -70.619442 -> -110.973809
+```
+
+**Files changed:** `jni/main.cpp` (threshold change in 4 functions, safety-net validation in 2 arming sites, diagnostic log with %.9f)

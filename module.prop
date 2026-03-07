@@ -1,6 +1,6 @@
 id=omnishield
 name=OMNI-Shield
-version=v16.0
-versionCode=16000
+version=v25.0
+versionCode=25000
 author=Legba
-description=PR118 — Location Parcel Unmarshaler (Deep Intercept)
+description=Hardcore location spoofer — intercepts Binder IPC to mask real GPS coordinates from apps

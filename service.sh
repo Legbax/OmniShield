@@ -1,5 +1,16 @@
 #!/system/bin/sh
 # Omni-Shield Service
+
+# ============================================================
+# Shared config path (used by multiple sections below)
+# ============================================================
+OMNI_CONFIG="/data/adb/.omni_data/.identity.cfg"
+LOC_BLOCKED_FLAG="/data/adb/.omni_data/.location_blocked"
+
+# PR127: Debug trace — writes to file to diagnose execution issues
+OMNI_DBG="/data/adb/.omni_data/.service_trace.log"
+echo "$(date) [START] service.sh pid=$$ uid=$(id -u)" > "$OMNI_DBG" 2>/dev/null
+
 # Ensures prop file permissions
 chmod 644 /data/adb/.omni_data/.identity.cfg 2>/dev/null
 # Ensure tun2socks binary is executable (ZIP may strip permissions)
@@ -8,6 +19,160 @@ chmod 755 /data/adb/modules/omnishield/proxy_manager.sh 2>/dev/null
 # PR70c: Set SELinux context so zygote can read the config (fallback path)
 chcon u:object_r:system_data_file:s0 /data/adb/.omni_data 2>/dev/null
 chcon u:object_r:system_data_file:s0 /data/adb/.omni_data/.identity.cfg 2>/dev/null
+
+# ============================================================
+# PR126 safety net: restore location if disabled from previous boot crash
+# ============================================================
+if [ -f "$LOC_BLOCKED_FLAG" ]; then
+    settings put secure location_mode 3 2>/dev/null
+    rm -f "$LOC_BLOCKED_FLAG"
+    echo "$(date) [SAFETY] restored location_mode from previous crash" >> "$OMNI_DBG" 2>/dev/null
+fi
+
+echo "$(date) [INIT] launching background tasks" >> "$OMNI_DBG" 2>/dev/null
+
+# ============================================================
+# PR86: Modem property stabilizer
+# ============================================================
+# The modem daemon (RIL) periodically overwrites gsm.operator.*
+# properties with real SIM/network values (e.g. country code from
+# the physical SIM: "cl" for Chile). Zygisk hooks only run inside
+# scoped app processes, but TelephonyManager.getNetworkCountryIso()
+# reads from system_server (which is NOT hooked). resetprop -n
+# writes directly to the shared property area, affecting all readers
+# including system_server's Binder responses.
+# The modem re-writes these props periodically, so we loop every 5s.
+if [ -f "$OMNI_CONFIG" ]; then
+    (
+        until [ "$(getprop sys.boot_completed)" = "1" ]; do
+            sleep 2
+        done
+        echo "$(date) [PR86] modem stabilizer started" >> "$OMNI_DBG" 2>/dev/null
+        while true; do
+            resetprop -n gsm.operator.iso-country us
+            resetprop -n gsm.sim.operator.iso-country us
+            sleep 5
+        done
+    ) &
+fi
+# ============================================================
+# FIN PR86
+# ============================================================
+
+# ============================================================
+# PR126: Block location globally until Zygisk is ready
+# ============================================================
+# On Xiaomi/KernelSU, Zygisk loads ~40s after boot. Maps/GMS start
+# much earlier and receive real GPS during that window.
+# We disable location_mode at boot_completed (before Maps can get a fix),
+# then PR125 restores it after Zygisk is confirmed ready.
+#
+# location_mode: 0=off, 3=high_accuracy
+# Unlike appops, this is a global toggle (not per-app persistent),
+# and the user can recover manually from Quick Settings if needed.
+(
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        sleep 1
+    done
+    touch "$LOC_BLOCKED_FLAG"
+    settings put secure location_mode 0 2>/dev/null
+    echo "$(date) [PR126] location_mode=0 (blocked)" >> "$OMNI_DBG" 2>/dev/null
+    log -t OmniShield "[PR126] Location disabled globally — waiting for Zygisk"
+) &
+# ============================================================
+# FIN PR126
+# ============================================================
+
+# ============================================================
+# PR125: Signal-based Maps/GMS restart after Zygisk is confirmed ready
+# ============================================================
+# PR123's fixed 5s delay was insufficient — logcat showed a 31-second
+# gap between Maps start and the first Zygisk onLoad on Xiaomi/KernelSU.
+# Maps restarted before Zygisk was in Zygote, so it ran without hooks.
+#
+# New approach: the native module writes .zygisk_ready on its first
+# preAppSpecialize (proving Zygisk is active + config OK). We poll for
+# that file, THEN kill Maps/GMS so Android restarts them with the module.
+(
+    READY_FLAG="/data/adb/.omni_data/.zygisk_ready"
+    # Clean stale flag from previous boot
+    rm -f "$READY_FLAG"
+
+    # Wait for boot_completed first (prerequisite)
+    until [ "$(getprop sys.boot_completed)" = "1" ]; do
+        sleep 2
+    done
+
+    echo "$(date) [PR125] polling for zygisk_ready flag..." >> "$OMNI_DBG" 2>/dev/null
+
+    # Poll for Zygisk readiness (max 60s after boot_completed)
+    _waited=0
+    while [ ! -f "$READY_FLAG" ] && [ "$_waited" -lt 60 ]; do
+        sleep 2
+        _waited=$((_waited + 2))
+    done
+
+    if [ -f "$READY_FLAG" ]; then
+        echo "$(date) [PR125] flag found after ${_waited}s — waiting for location block" >> "$OMNI_DBG" 2>/dev/null
+        # PR128: Wait for PR126 to set location_mode=0 before killing (max 10s).
+        # PR126 creates LOC_BLOCKED_FLAG after settings put secure location_mode 0,
+        # guaranteeing GPS is blocked before Maps/GMS are killed.
+        _loc_wait=0
+        while [ ! -f "$LOC_BLOCKED_FLAG" ] && [ "$_loc_wait" -lt 10 ]; do
+            sleep 1
+            _loc_wait=$((_loc_wait + 1))
+        done
+        echo "$(date) [PR125] location blocked after ${_loc_wait}s — killing Maps/GMS" >> "$OMNI_DBG" 2>/dev/null
+        log -t OmniShield "[PR125] Zygisk ready (waited ${_waited}s). Killing location stack..."
+        # Kill all location-related processes so they restart with Zygisk hooks
+        am force-stop com.google.android.apps.maps 2>/dev/null
+        killall com.google.android.gms 2>/dev/null
+        killall com.google.android.gms.unstable 2>/dev/null
+        killall com.google.android.gms.persistent 2>/dev/null
+        killall com.android.location.fused 2>/dev/null
+        killall com.xiaomi.location.fused 2>/dev/null
+        killall com.mediatek.location.lppe.main 2>/dev/null
+        killall com.mediatek.location.ppe.main 2>/dev/null
+        # Small delay to let processes die before re-enabling location
+        sleep 1
+        # PR126: Restore location — processes will restart with hooks active
+        settings put secure location_mode 3 2>/dev/null
+        rm -f "$LOC_BLOCKED_FLAG"
+        echo "$(date) [PR125] location_mode=3 (restored) + processes killed" >> "$OMNI_DBG" 2>/dev/null
+        log -t OmniShield "[PR125] Location restored + Maps/GMS killed → restart with hooks"
+    else
+        echo "$(date) [PR125] TIMEOUT after 60s — restoring location anyway" >> "$OMNI_DBG" 2>/dev/null
+        log -t OmniShield "[PR125] TIMEOUT: Zygisk not ready after 60s"
+        # Restore location anyway to not leave the device broken
+        settings put secure location_mode 3 2>/dev/null
+        rm -f "$LOC_BLOCKED_FLAG"
+        log -t OmniShield "[PR125] Location restored (timeout fallback)"
+    fi
+) &
+# ============================================================
+# FIN PR125
+# ============================================================
+
+# ============================================================
+# PR72: Auto-start Transparent Proxy if enabled
+# ============================================================
+PROXY_SCRIPT="/data/adb/modules/omnishield/proxy_manager.sh"
+if [ -f "$PROXY_SCRIPT" ] && grep -q "^proxy_enabled=true" "$OMNI_CONFIG" 2>/dev/null; then
+    # Wait for network availability (max 30s)
+    _net_ok=0
+    for _i in $(seq 1 30); do
+        ping -c1 -W1 8.8.8.8 >/dev/null 2>&1 && { _net_ok=1; break; }
+        sleep 1
+    done
+    if [ "$_net_ok" -eq 1 ]; then
+        sh "$PROXY_SCRIPT" start &
+    fi
+fi
+# ============================================================
+# FIN PR72
+# ============================================================
+
+echo "$(date) [BG_DONE] all background tasks launched, starting SSAID" >> "$OMNI_DBG" 2>/dev/null
 
 # ============================================================
 # PR37: SSAID Injection — OmniShield
@@ -23,7 +188,6 @@ chcon u:object_r:system_data_file:s0 /data/adb/.omni_data/.identity.cfg 2>/dev/n
 # ============================================================
 
 SSAID_FILE="/data/system/users/0/settings_ssaid.xml"
-OMNI_CONFIG="/data/adb/.omni_data/.identity.cfg"
 
 # Leer master_seed del config
 MASTER_SEED=""
@@ -31,8 +195,8 @@ if [ -f "$OMNI_CONFIG" ]; then
     MASTER_SEED=$(grep "^master_seed=" "$OMNI_CONFIG" | cut -d'=' -f2 | tr -d ' \r\n')
 fi
 
-# Si no hay seed definido no modificar
-[ -z "$MASTER_SEED" ] && exit 0
+# Si no hay seed o no hay SSAID file, saltar SSAID
+if [ -n "$MASTER_SEED" ] && [ -f "$SSAID_FILE" ]; then
 
 # Implementación Python (precisión 64-bit completa)
 derive_ssaid_python() {
@@ -79,10 +243,6 @@ if [ -n "$SCOPED_APPS" ]; then
     IFS="$OLDIFS"
 else
     set --
-fi
-
-if [ ! -f "$SSAID_FILE" ]; then
-    exit 0
 fi
 
 # Hacer backup del archivo original si no existe ya
@@ -137,50 +297,9 @@ if [ "$MODIFIED" -eq 1 ]; then
     am force-stop com.android.providers.settings 2>/dev/null
 fi
 
+fi  # end of: if [ -n "$MASTER_SEED" ] && [ -f "$SSAID_FILE" ]
 # ============================================================
 # FIN PR37/PR40 SSAID Injection
 # ============================================================
 
-# ============================================================
-# PR72: Auto-start Transparent Proxy if enabled
-# ============================================================
-PROXY_SCRIPT="/data/adb/modules/omnishield/proxy_manager.sh"
-if [ -f "$PROXY_SCRIPT" ] && grep -q "^proxy_enabled=true" "$OMNI_CONFIG" 2>/dev/null; then
-    # Wait for network availability (max 30s)
-    _net_ok=0
-    for _i in $(seq 1 30); do
-        ping -c1 -W1 8.8.8.8 >/dev/null 2>&1 && { _net_ok=1; break; }
-        sleep 1
-    done
-    if [ "$_net_ok" -eq 1 ]; then
-        sh "$PROXY_SCRIPT" start &
-    fi
-fi
-# ============================================================
-# FIN PR72
-# ============================================================
-
-# ============================================================
-# PR86: Modem property stabilizer
-# ============================================================
-# The modem daemon (RIL) periodically overwrites gsm.operator.*
-# properties with real SIM/network values (e.g. country code from
-# the physical SIM: "cl" for Chile). Zygisk hooks only run inside
-# scoped app processes, but TelephonyManager.getNetworkCountryIso()
-# reads from system_server (which is NOT hooked). resetprop -n
-# writes directly to the shared property area, affecting all readers
-# including system_server's Binder responses.
-# The modem re-writes these props periodically, so we loop every 5s.
-if [ -f "$OMNI_CONFIG" ]; then
-    until [ "$(getprop sys.boot_completed)" = "1" ]; do
-        sleep 2
-    done
-    while true; do
-        resetprop -n gsm.operator.iso-country us
-        resetprop -n gsm.sim.operator.iso-country us
-        sleep 5
-    done &
-fi
-# ============================================================
-# FIN PR86
-# ============================================================
+echo "$(date) [END] service.sh completed" >> "$OMNI_DBG" 2>/dev/null

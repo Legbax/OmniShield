@@ -899,16 +899,31 @@ window.togglePassVisibility = function() {
 window.applyProxy = async function() {
   state.proxyEnabled = document.getElementById('proxy-enabled')?.checked || false;
   state.proxyType = document.getElementById('proxy-type')?.value || 'socks5';
-  state.proxyHost = document.getElementById('proxy-host')?.value || '';
-  state.proxyPort = document.getElementById('proxy-port')?.value || '';
-  state.proxyUser = document.getElementById('proxy-user')?.value || '';
-  state.proxyPass = document.getElementById('proxy-pass')?.value || '';
-  state.proxyDns  = document.getElementById('proxy-dns')?.value || '';
+  state.proxyHost = (document.getElementById('proxy-host')?.value || '').replace(/\s/g, '');
+  state.proxyPort = (document.getElementById('proxy-port')?.value || '').replace(/\s/g, '');
+  state.proxyUser = (document.getElementById('proxy-user')?.value || '').trim();
+  state.proxyPass = (document.getElementById('proxy-pass')?.value || '').trim();
+  state.proxyDns  = (document.getElementById('proxy-dns')?.value || '').replace(/\s/g, '');
   if (state.proxyEnabled && !state.proxyHost) { toast('Enter a proxy host', 'warn'); return; }
   if (state.proxyEnabled && !state.proxyPort) { toast('Enter a proxy port', 'warn'); return; }
   if (state.proxyEnabled && state.proxyType !== 'socks5') { toast('Only SOCKS5 proxies are supported', 'warn'); return; }
 
+  // Debug: verify values read from UI before saving
+  console.log('[PROXY] host=' + JSON.stringify(state.proxyHost) +
+    ' port=' + JSON.stringify(state.proxyPort) +
+    ' user=' + JSON.stringify(state.proxyUser) +
+    ' pass_len=' + (state.proxyPass || '').length);
+
   if (!await saveConfig()) { toast('Save failed', 'err'); return; }
+
+  // Verify config was written correctly by re-reading it
+  const verifyConfig = await readConfig();
+  if (state.proxyEnabled && verifyConfig.proxy_host !== state.proxyHost) {
+    toast('Config mismatch: host=' + verifyConfig.proxy_host + ' expected=' + state.proxyHost, 'warn');
+  }
+  if (state.proxyEnabled && verifyConfig.proxy_user !== state.proxyUser) {
+    toast('Config mismatch: user=' + verifyConfig.proxy_user + ' expected=' + state.proxyUser, 'warn');
+  }
 
   const btn = document.querySelector('#adv-tab-proxy .btn-primary');
   const badge = document.getElementById('proxy-status-badge');
