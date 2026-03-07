@@ -62,7 +62,7 @@ static long g_masterSeed = 0;
 static bool g_enableJitter = true;
 static uint64_t g_configGeneration = 0;
 static bool g_spoofMobileNetwork = false;  // network_type=lte en .identity.cfg
-static bool g_debugMode = true;  // PR53: activar con debug_mode=true en .identity.cfg
+static bool g_debugMode = false;  // PR53: activar con debug_mode=true en .identity.cfg
 
 // PR38+39: GPS cache — coordenadas generadas una vez por sesión desde g_masterSeed
 static double g_cachedLat       = 0.0;
@@ -164,7 +164,8 @@ enum FileType {
     PROC_SELF_CGROUP,     // /proc/self/cgroup — puede revelar namespace KernelSU
     BATTERY_CHARGE_FULL,  // PR42: /sys/class/power_supply/battery/charge_full[_design]
     PROC_NET_IF_INET6,    // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
-    PROC_NET_IPV6_ROUTE   // PR43: /proc/net/ipv6_route
+    PROC_NET_IPV6_ROUTE,  // PR43: /proc/net/ipv6_route
+    PROC_SMAPS            // PR140: /proc/self/smaps — separate from maps for Private_Dirty filtering
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -268,9 +269,8 @@ static std::mutex g_fakePropMutex;
 static thread_local bool g_inPropertyFind = false;      // recursion guard
 static bool g_realDeviceIsMiui = false;                  // PR91-fix: true if real device runs MIUI (preserve framework props)
 static bool g_pagesPatched = false;                      // PR91: true after patchPropertyPages succeeds — skip FakePropInfo
-static bool g_propFindInlineHooked = false;              // PR86: true if Dobby inline hook on __system_property_find succeeded
-static bool g_propForeachInlineHooked = false;           // PR88: true if Dobby inline hook on __system_property_foreach succeeded
-static bool g_spawnInlineHooked = false;                 // PR90: true if Dobby inline hooks on posix_spawn/posix_spawnp succeeded
+// PR141: g_propFindInlineHooked, g_propForeachInlineHooked, g_spawnInlineHooked
+// removed — all migrated to PLT-only hooks (no more Dobby inline).
 
 // PR86: dlsym hook — intercept dynamic symbol resolution for property functions.
 // When detection apps call dlsym(RTLD_DEFAULT, "__system_property_find") to get a raw
@@ -586,6 +586,53 @@ static inline bool isProcPidPath(const char* path, const char* suffix) {
     while (*p >= '0' && *p <= '9') p++;
     if (*p != '/') return false;
     return strcmp(p + 1, suffix) == 0;
+}
+
+// PR140: Obfuscate Dobby inline hook trampolines to evade pattern detection.
+// Dobby writes LDR Xn,[PC+8]; BR Xn; <addr> (16 bytes). DuckDetector matches
+// this signature. We rewrite it to MOVZ+MOVK+MOVK+BR (same 16 bytes, different
+// encoding) which builds the address in-register without a literal pool.
+static void obfuscateTrampoline(void* func_addr) {
+    uint32_t* code = reinterpret_cast<uint32_t*>(func_addr);
+    uint32_t insn0 = code[0];
+    uint32_t insn1 = code[1];
+
+    // Validate: LDR Xt, #imm19  →  0101 1000 xxxx xxxx xxxx xxxx xxxt tttt
+    //           BR  Xn           →  1101 0110 0001 1111 0000 00nn nnn0 0000
+    if ((insn0 & 0xFF000000) != 0x58000000) return;
+    if ((insn1 & 0xFFFFFC1F) != 0xD61F0000) return;
+
+    uint32_t reg = insn0 & 0x1F;
+    // Verify BR uses same register
+    if (((insn1 >> 5) & 0x1F) != reg) return;
+
+    // Extract 64-bit target address from literal pool (bytes 8-15)
+    uint64_t target;
+    memcpy(&target, &code[2], sizeof(target));
+
+    // Build MOVZ + MOVK + MOVK + BR sequence (16 bytes)
+    // Android user space uses 48-bit virtual addresses (bits [63:48] = 0)
+    uint32_t new_code[4];
+    new_code[0] = 0xD2800000 | (((uint32_t)((target >>  0) & 0xFFFF)) << 5) | reg;  // MOVZ Xreg, #imm0
+    new_code[1] = 0xF2A00000 | (((uint32_t)((target >> 16) & 0xFFFF)) << 5) | reg;  // MOVK Xreg, #imm1, LSL#16
+    new_code[2] = 0xF2C00000 | (((uint32_t)((target >> 32) & 0xFFFF)) << 5) | reg;  // MOVK Xreg, #imm2, LSL#32
+    new_code[3] = 0xD61F0000 | (reg << 5);                                           // BR   Xreg
+
+    uintptr_t page = (uintptr_t)func_addr & ~0xFFFUL;
+    // Handle page boundary: trampoline may span two pages
+    size_t prot_size = (((uintptr_t)func_addr + 16 - 1) & ~0xFFFUL) == page ? 4096 : 8192;
+    mprotect((void*)page, prot_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+    memcpy(func_addr, new_code, 16);
+    __builtin___clear_cache(reinterpret_cast<char*>(func_addr),
+                            reinterpret_cast<char*>(func_addr) + 16);
+    mprotect((void*)page, prot_size, PROT_READ | PROT_EXEC);
+}
+
+// Wrapper: install Dobby hook + obfuscate the trampoline in one call.
+static int DobbyHookObf(void* func, void* hook, void** orig) {
+    int ret = DobbyHook(func, hook, orig);
+    if (ret == 0) obfuscateTrampoline(func);
+    return ret;
 }
 
 // PR70: Remap module .so memory from file-backed to anonymous.
@@ -1882,8 +1929,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
             type = PROC_ETH0_MAC;
         }
         // PR70: Also match /proc/<pid>/maps — detection apps bypass /proc/self/ filtering
-        else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps") ||
-                 isProcPidPath(pathname, "maps") || isProcPidPath(pathname, "smaps")) type = PROC_MAPS;
+        else if (strstr(pathname, "/proc/self/maps") || isProcPidPath(pathname, "maps")) type = PROC_MAPS;
+        // PR140: Separate smaps handler for Private_Dirty sanitization
+        else if (strstr(pathname, "/proc/self/smaps") || isProcPidPath(pathname, "smaps")) type = PROC_SMAPS;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo") ||
@@ -2134,7 +2182,57 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::istringstream iss(rawFile);
                     std::string line;
                     while (std::getline(iss, line)) {
-                        if (!isHiddenPath(line.c_str())) content += line + "\n";
+                        if (isHiddenPath(line.c_str())) continue;
+                        // PR140: Hide small anonymous executable regions (Dobby code buffers)
+                        if (!line.empty() && isxdigit(line[0])) {
+                            uintptr_t s, e; char pm[5];
+                            if (sscanf(line.c_str(), "%lx-%lx %4s", &s, &e, pm) == 3) {
+                                size_t sz = e - s;
+                                bool isAnon = (line.find('/') == std::string::npos &&
+                                               line.find('[') == std::string::npos);
+                                if (isAnon && pm[2] == 'x' && sz <= 8192) continue;
+                            }
+                        }
+                        content += line + "\n";
+                    }
+                } else if (type == PROC_SMAPS) {
+                    // PR140: Filter smaps output — sanitize Private_Dirty on executable
+                    // segments and hide Dobby code buffer regions.
+                    char tmpBuf[8192];
+                    ssize_t r;
+                    std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0) {
+                        rawFile.append(tmpBuf, r);
+                    }
+                    std::istringstream iss(rawFile);
+                    std::string line;
+                    bool inExecSegment = false;
+                    bool isHidden = false;
+                    while (std::getline(iss, line)) {
+                        // Header line starts with hex address
+                        if (!line.empty() && isxdigit(line[0])) {
+                            isHidden = isHiddenPath(line.c_str());
+                            inExecSegment = (line.find("r-xp") != std::string::npos);
+                            // Hide small anonymous executable regions (Dobby trampolines)
+                            if (!isHidden) {
+                                uintptr_t s, e; char pm[5];
+                                if (sscanf(line.c_str(), "%lx-%lx %4s", &s, &e, pm) == 3) {
+                                    size_t sz = e - s;
+                                    bool isAnon = (line.find('/') == std::string::npos &&
+                                                   line.find('[') == std::string::npos);
+                                    if (isAnon && pm[2] == 'x' && sz <= 8192)
+                                        isHidden = true;
+                                }
+                            }
+                        }
+                        if (isHidden) continue;
+                        // Zero out Private_Dirty on executable segments (Dobby COW pages)
+                        if (inExecSegment &&
+                            line.find("Private_Dirty:") != std::string::npos) {
+                            content += "Private_Dirty:         0 kB\n";
+                            continue;
+                        }
+                        content += line + "\n";
                     }
                 } else if (type == PROC_MEMINFO) {
                     char tmpBuf[8192];
@@ -4085,12 +4183,6 @@ const prop_info* my_system_property_find(const char* name);  // PR84
 static int my_system_property_foreach(                       // PR88
     void (*propfn)(const prop_info* pi, void* cookie), void* cookie);
 static int my_execve(const char *pathname, char *const argv[], char *const envp[]);
-static int my_posix_spawn(pid_t *pid, const char *path,
-                          const void *file_actions, const void *attrp,
-                          char *const argv[], char *const envp[]);
-static int my_posix_spawnp(pid_t *pid, const char *file,
-                           const void *file_actions, const void *attrp,
-                           char *const argv[], char *const envp[]);
 
 // PR84b: Shadow property pages — per-process property memory patching.
 // After fork (postAppSpecialize), replaces shared property mmap pages with private
@@ -4304,6 +4396,18 @@ static void patchPropertyPages() {
     g_pagesPatched = true;
 }
 
+// PR141: Forward declarations for Binder/dlopen hook functions and their orig_* vars.
+// These are defined after installPltHooks() but referenced inside it.
+typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t, const void*, void*, uint32_t);
+static ipc_transact_fn orig_ipc_transact = nullptr;
+using fn_Parcel_readDouble = double(*)(const void*);
+static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
+static double my_Parcel_readDouble(const void* self);
+static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
+                                const void* data, void* reply, uint32_t flags);
+static void* my_android_dlopen_ext(const char* filename, int flags, const void* extinfo);
+static void* my_dlopen_hook(const char* filename, int flags);
+
 // Fix9: Instalar PLT hooks para funciones donde Dobby inline hooks fallan.
 // En aarch64 Bionic, execve/posix_spawn/posix_spawnp/__system_property_read son
 // thin syscall wrappers demasiado pequeños para el trampoline de Dobby (~4-8 instr).
@@ -4322,81 +4426,150 @@ static bool installPltHooks() {
         return false;
     }
 
-    // Fix9: Pre-resolve originals via dlsym — guaranteed correct function pointers.
-    // PLT hooks across 100+ ELFs can corrupt orig_* with lazy-binding stubs.
-    // dlsym(RTLD_DEFAULT) always returns the real libc address.
-    if (!orig_execve)
-        orig_execve = reinterpret_cast<decltype(orig_execve)>(dlsym(RTLD_DEFAULT, "execve"));
-    if (!orig_posix_spawn)
-        orig_posix_spawn = reinterpret_cast<decltype(orig_posix_spawn)>(dlsym(RTLD_DEFAULT, "posix_spawn"));
-    if (!orig_posix_spawnp)
-        orig_posix_spawnp = reinterpret_cast<decltype(orig_posix_spawnp)>(dlsym(RTLD_DEFAULT, "posix_spawnp"));
-    if (!orig_system_property_read)
-        orig_system_property_read = reinterpret_cast<decltype(orig_system_property_read)>(dlsym(RTLD_DEFAULT, "__system_property_read"));
-    // PR84: Pre-resolve __system_property_find for PLT hook fallback
-    if (!orig_system_property_find)
-        orig_system_property_find = reinterpret_cast<decltype(orig_system_property_find)>(dlsym(RTLD_DEFAULT, "__system_property_find"));
-    // PR88: Pre-resolve __system_property_foreach
-    if (!orig_system_property_foreach)
-        orig_system_property_foreach = reinterpret_cast<decltype(orig_system_property_foreach)>(dlsym(RTLD_DEFAULT, "__system_property_foreach"));
+    // PR141: Pre-resolve ALL orig_* via dlsym — guaranteed correct function pointers.
+    // With PLT-only hooks, orig_* must point to the real function (not a Dobby trampoline).
+    // dlsym(RTLD_DEFAULT) returns the real address from the first loaded library.
+    #define RESOLVE_ORIG(name, sym) \
+        if (!orig_##name) orig_##name = reinterpret_cast<decltype(orig_##name)>(dlsym(RTLD_DEFAULT, sym))
 
-    LOGE("Fix9: Pre-resolved: execve=%p spawn=%p spawnp=%p prop_read=%p prop_find=%p prop_foreach=%p",
-         orig_execve, orig_posix_spawn, orig_posix_spawnp, orig_system_property_read,
-         orig_system_property_find, orig_system_property_foreach);
+    // Process spawning
+    RESOLVE_ORIG(execve, "execve");
+    RESOLVE_ORIG(posix_spawn, "posix_spawn");
+    RESOLVE_ORIG(posix_spawnp, "posix_spawnp");
+    // System properties
+    RESOLVE_ORIG(system_property_read, "__system_property_read");
+    RESOLVE_ORIG(system_property_find, "__system_property_find");
+    RESOLVE_ORIG(system_property_foreach, "__system_property_foreach");
+    RESOLVE_ORIG(system_property_get, "__system_property_get");
+    RESOLVE_ORIG(system_property_read_callback, "__system_property_read_callback");
+    // File I/O
+    RESOLVE_ORIG(openat, "openat");
+    RESOLVE_ORIG(read, "read");
+    RESOLVE_ORIG(close, "close");
+    RESOLVE_ORIG(lseek, "lseek");
+    RESOLVE_ORIG(lseek64, "lseek64");
+    RESOLVE_ORIG(pread, "pread");
+    RESOLVE_ORIG(pread64, "pread64");
+    RESOLVE_ORIG(mmap, "mmap");
+    RESOLVE_ORIG(mmap64, "mmap64");
+    RESOLVE_ORIG(fopen, "fopen");
+    // Syscall evasion
+    RESOLVE_ORIG(uname, "uname");
+    RESOLVE_ORIG(clock_gettime, "clock_gettime");
+    RESOLVE_ORIG(access, "access");
+    RESOLVE_ORIG(getifaddrs, "getifaddrs");
+    RESOLVE_ORIG(stat, "stat");
+    RESOLVE_ORIG(lstat, "lstat");
+    RESOLVE_ORIG(fstatat, "fstatat");
+    RESOLVE_ORIG(readlinkat, "readlinkat");
+    RESOLVE_ORIG(readlink, "readlink");
+    RESOLVE_ORIG(sysinfo, "sysinfo");
+    RESOLVE_ORIG(statfs, "statfs");
+    RESOLVE_ORIG(statvfs, "statvfs");
+    RESOLVE_ORIG(readdir, "readdir");
+    RESOLVE_ORIG(getauxval, "getauxval");
+    RESOLVE_ORIG(dl_iterate_phdr, "dl_iterate_phdr");
+    RESOLVE_ORIG(dup, "dup");
+    RESOLVE_ORIG(dup2, "dup2");
+    RESOLVE_ORIG(dup3, "dup3");
+    RESOLVE_ORIG(fcntl, "fcntl");
+    RESOLVE_ORIG(ioctl, "ioctl");
+    // Dynamic loading
+    RESOLVE_ORIG(dlsym, "dlsym");
+    RESOLVE_ORIG(dlopen_hook, "dlopen");
+    RESOLVE_ORIG(android_dlopen_ext, "android_dlopen_ext");
+    // GPU/Graphics
+    RESOLVE_ORIG(eglQueryString, "eglQueryString");
+    RESOLVE_ORIG(glGetString, "glGetString");
+    RESOLVE_ORIG(vkGetPhysicalDeviceProperties, "vkGetPhysicalDeviceProperties");
+    RESOLVE_ORIG(clGetDeviceInfo, "clGetDeviceInfo");
+    // TLS/SSL
+    RESOLVE_ORIG(SSL_CTX_set_ciphersuites, "SSL_CTX_set_ciphersuites");
+    RESOLVE_ORIG(SSL_set1_tls13_ciphersuites, "SSL_set1_tls13_ciphersuites");
+    RESOLVE_ORIG(SSL_set_ciphersuites, "SSL_set_ciphersuites");
+    RESOLVE_ORIG(SSL_set_cipher_list, "SSL_set_cipher_list");
+    // Binder (PLT-hookable C++ symbols via mangled names)
+    RESOLVE_ORIG(ipc_transact, "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
+    RESOLVE_ORIG(Parcel_readDouble, "_ZNK7android6Parcel10readDoubleEv");
+    #undef RESOLVE_ORIG
+
+    LOGE("PR141: Pre-resolved %d orig_* pointers via dlsym", 48);
 
     // Dummy vars for pltHookRegister oldFunc — we don't use these values.
-    // The real originals were already set above via dlsym.
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr, *d4 = nullptr, *d5 = nullptr, *d6 = nullptr,
-         *d7 = nullptr, *d8 = nullptr;
+    void *d = nullptr;
 
-    // NOTE: glGetString is NOT PLT-hooked here. installPltHooks() runs before
-    // the GPU Dobby hooks that set orig_glGetString. Registering a PLT hook
-    // for glGetString would cause my_glGetString to run with orig_glGetString=NULL
-    // → returns nullptr → crash in any app that calls glGetString during startup
-    // (e.g. VdInfo during GL detection, WebView during WebGL init).
-    // The Dobby hook (installed later after dlopen ensures the lib is loaded)
-    // is the correct approach for glGetString.
-
-    LOGE("Fix11: Registering PLT hooks across %zu ELFs (spawnInline=%d)", elfs.size(), g_spawnInlineHooked);
+    LOGE("PR141: Registering PLT hooks across %zu ELFs", elfs.size());
     for (const auto& elf : elfs) {
-        g_api->pltHookRegister(elf.dev, elf.inode, "execve",
-                               (void*)my_execve, &d1);
-        // PR90: Only PLT-hook posix_spawn/posix_spawnp if Dobby inline hooks failed.
-        // When both are active, PLT calls my_posix_spawn → orig (= libc start addr,
-        // patched by Dobby) → my_posix_spawn → infinite recursion → crash.
-        if (!g_spawnInlineHooked) {
-            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
-                                   (void*)my_posix_spawn, &d2);
-            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
-                                   (void*)my_posix_spawnp, &d3);
-        }
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
-                               (void*)my_system_property_read, &d4);
-        // PR84/PR86: PLT hook for __system_property_find — only if Dobby inline hook
-        // was not installed. Having both Dobby inline + PLT hook on the same function
-        // causes double-hook recursion (same as Fix10 crash: PLT calls my_* → my_*
-        // calls orig_* → orig_* was Dobby-patched → back to my_* → infinite loop).
-        if (!g_propFindInlineHooked) {
-            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
-                                   (void*)my_system_property_find, &d5);
-        }
-        // PR88: PLT hook for __system_property_foreach — only if Dobby inline hook
-        // was not installed (same double-hook recursion guard as __system_property_find).
-        if (!g_propForeachInlineHooked) {
-            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
-                                   (void*)my_system_property_foreach, &d6);
-        }
-        // PR138: PLT hooks for __system_property_get and __system_property_read_callback.
-        // These are NOT Dobby-hooked (PIF conflict), so PLT hooks are always safe here.
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get",
-                               (void*)my_system_property_get, &d7);
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback",
-                               (void*)my_system_property_read_callback, &d8);
+        // === Process spawning ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "execve", (void*)my_execve, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn", (void*)my_posix_spawn, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp", (void*)my_posix_spawnp, &d);
+
+        // === System properties ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read", (void*)my_system_property_read, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find", (void*)my_system_property_find, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach", (void*)my_system_property_foreach, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get", (void*)my_system_property_get, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback", (void*)my_system_property_read_callback, &d);
+
+        // === PR141: File I/O (migrated from Dobby inline to PLT) ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "openat", (void*)my_openat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "read", (void*)my_read, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "close", (void*)my_close, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "lseek", (void*)my_lseek, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "lseek64", (void*)my_lseek64, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "pread", (void*)my_pread, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "pread64", (void*)my_pread64, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "mmap", (void*)my_mmap, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "mmap64", (void*)my_mmap64, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "fopen", (void*)my_fopen, &d);
+
+        // === PR141: Syscall evasion (migrated from Dobby inline to PLT) ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "uname", (void*)my_uname, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "clock_gettime", (void*)my_clock_gettime, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "access", (void*)my_access, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "getifaddrs", (void*)my_getifaddrs, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "stat", (void*)my_stat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "lstat", (void*)my_lstat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "fstatat", (void*)my_fstatat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "readlinkat", (void*)my_readlinkat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "readlink", (void*)my_readlink, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "sysinfo", (void*)my_sysinfo, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "statfs", (void*)my_statfs, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "statvfs", (void*)my_statvfs, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "readdir", (void*)my_readdir, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "getauxval", (void*)my_getauxval, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dl_iterate_phdr", (void*)my_dl_iterate_phdr, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dup", (void*)my_dup, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dup2", (void*)my_dup2, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dup3", (void*)my_dup3, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "fcntl", (void*)my_fcntl, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "ioctl", (void*)my_ioctl, &d);
+
+        // === PR141: Dynamic loading (migrated from Dobby inline to PLT) ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "dlsym", (void*)my_dlsym, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dlopen", (void*)my_dlopen_hook, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "android_dlopen_ext", (void*)my_android_dlopen_ext, &d);
+
+        // === PR141: GPU/Graphics (migrated from Dobby inline to PLT) ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "eglQueryString", (void*)my_eglQueryString, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "glGetString", (void*)my_glGetString, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "vkGetPhysicalDeviceProperties", (void*)my_vkGetPhysicalDeviceProperties, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "clGetDeviceInfo", (void*)my_clGetDeviceInfo, &d);
+
+        // === PR141: TLS/SSL (migrated from Dobby inline to PLT) ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_CTX_set_ciphersuites", (void*)my_SSL_CTX_set_ciphersuites, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_set1_tls13_ciphersuites", (void*)my_SSL_set1_tls13_ciphersuites, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_set_ciphersuites", (void*)my_SSL_set_ciphersuites, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_set_cipher_list", (void*)my_SSL_set_cipher_list, &d);
+
+        // === PR141: Binder IPC (migrated from Dobby inline to PLT) ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j", (void*)my_ipc_transact, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "_ZNK7android6Parcel10readDoubleEv", (void*)my_Parcel_readDouble, &d);
     }
 
     bool ok = g_api->pltHookCommit();
-    LOGE("Fix9: pltHookCommit()=%s across %zu ELFs, orig_execve=%p orig_spawn=%p",
-         ok ? "true" : "false", elfs.size(), orig_execve, orig_posix_spawn);
+    LOGE("PR141: pltHookCommit()=%s across %zu ELFs", ok ? "true" : "false", elfs.size());
     return ok;
 }
 
@@ -4415,40 +4588,79 @@ static void reapplyPltHooksForNewLibraries() {
     auto elfs = enumerateLoadedElfs();
     if (elfs.empty()) return;
 
-    void *d1 = nullptr, *d2 = nullptr, *d3 = nullptr,
-         *d4 = nullptr, *d5 = nullptr, *d6 = nullptr,
-         *d7 = nullptr, *d8 = nullptr;
+    void *d = nullptr;
 
     for (const auto& elf : elfs) {
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read",
-                               (void*)my_system_property_read, &d1);
-        if (!g_propFindInlineHooked) {
-            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find",
-                                   (void*)my_system_property_find, &d2);
-        }
-        if (!g_propForeachInlineHooked) {
-            g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach",
-                                   (void*)my_system_property_foreach, &d3);
-        }
-        // PR89: Re-hook subprocess spawn functions for late-loaded libraries.
-        // PR90: posix_spawn/posix_spawnp only via PLT if Dobby inline failed.
-        g_api->pltHookRegister(elf.dev, elf.inode, "execve",
-                               (void*)my_execve, &d4);
-        if (!g_spawnInlineHooked) {
-            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn",
-                                   (void*)my_posix_spawn, &d5);
-            g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp",
-                                   (void*)my_posix_spawnp, &d6);
-        }
-        // PR138: PLT hooks for __system_property_get and __system_property_read_callback.
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get",
-                               (void*)my_system_property_get, &d7);
-        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback",
-                               (void*)my_system_property_read_callback, &d8);
+        // === Process spawning ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "execve", (void*)my_execve, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawn", (void*)my_posix_spawn, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "posix_spawnp", (void*)my_posix_spawnp, &d);
+
+        // === System properties ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read", (void*)my_system_property_read, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_find", (void*)my_system_property_find, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_foreach", (void*)my_system_property_foreach, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_get", (void*)my_system_property_get, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "__system_property_read_callback", (void*)my_system_property_read_callback, &d);
+
+        // === PR141: File I/O ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "openat", (void*)my_openat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "read", (void*)my_read, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "close", (void*)my_close, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "lseek", (void*)my_lseek, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "lseek64", (void*)my_lseek64, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "pread", (void*)my_pread, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "pread64", (void*)my_pread64, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "mmap", (void*)my_mmap, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "mmap64", (void*)my_mmap64, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "fopen", (void*)my_fopen, &d);
+
+        // === PR141: Syscall evasion ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "uname", (void*)my_uname, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "clock_gettime", (void*)my_clock_gettime, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "access", (void*)my_access, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "getifaddrs", (void*)my_getifaddrs, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "stat", (void*)my_stat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "lstat", (void*)my_lstat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "fstatat", (void*)my_fstatat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "readlinkat", (void*)my_readlinkat, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "readlink", (void*)my_readlink, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "sysinfo", (void*)my_sysinfo, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "statfs", (void*)my_statfs, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "statvfs", (void*)my_statvfs, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "readdir", (void*)my_readdir, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "getauxval", (void*)my_getauxval, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dl_iterate_phdr", (void*)my_dl_iterate_phdr, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dup", (void*)my_dup, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dup2", (void*)my_dup2, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dup3", (void*)my_dup3, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "fcntl", (void*)my_fcntl, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "ioctl", (void*)my_ioctl, &d);
+
+        // === PR141: Dynamic loading ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "dlsym", (void*)my_dlsym, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "dlopen", (void*)my_dlopen_hook, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "android_dlopen_ext", (void*)my_android_dlopen_ext, &d);
+
+        // === PR141: GPU/Graphics ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "eglQueryString", (void*)my_eglQueryString, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "glGetString", (void*)my_glGetString, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "vkGetPhysicalDeviceProperties", (void*)my_vkGetPhysicalDeviceProperties, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "clGetDeviceInfo", (void*)my_clGetDeviceInfo, &d);
+
+        // === PR141: TLS/SSL ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_CTX_set_ciphersuites", (void*)my_SSL_CTX_set_ciphersuites, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_set1_tls13_ciphersuites", (void*)my_SSL_set1_tls13_ciphersuites, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_set_ciphersuites", (void*)my_SSL_set_ciphersuites, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "SSL_set_cipher_list", (void*)my_SSL_set_cipher_list, &d);
+
+        // === PR141: Binder IPC ===
+        g_api->pltHookRegister(elf.dev, elf.inode, "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j", (void*)my_ipc_transact, &d);
+        g_api->pltHookRegister(elf.dev, elf.inode, "_ZNK7android6Parcel10readDoubleEv", (void*)my_Parcel_readDouble, &d);
     }
 
     bool ok = g_api->pltHookCommit();
-    LOGE("PR89: reapplyPltHooks (spawn+props) across %zu ELFs, commit=%s",
+    LOGE("PR141: reapplyPltHooks across %zu ELFs, commit=%s",
          elfs.size(), ok ? "true" : "false");
 }
 
@@ -4568,10 +4780,6 @@ static constexpr uint8_t  LOC_TOKEN_PREFIX[8] = {
 static constexpr size_t LOC_TOKEN_OFFSET   = 12; // inicio del texto UTF-16
 static constexpr size_t LOC_TOKEN_MIN_SIZE = 80; // 4+4+4+(33*2+2) = 80 bytes exactos
 
-typedef int32_t (*ipc_transact_fn)(void*, int32_t, uint32_t,
-                                   const void*, void*, uint32_t);
-static ipc_transact_fn orig_ipc_transact = nullptr;
-
 static bool isLocationRequest(const void* data_parcel, uint32_t code) {
     if (!data_parcel) return false;
 
@@ -4611,9 +4819,6 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
            token.find("google.android.gms.location") != std::string::npos;
 }
 
-// PR117/PR149: Hook para la lectura de doubles en el Parcel
-using fn_Parcel_readDouble = double(*)(const void*);
-static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
 
 // PR149/PR150: Thread-local state for readDouble spoofing.
 // Set by my_ipc_transact/mutateLocationReply when reply contains a location.
@@ -5733,13 +5938,46 @@ static void my_Location_readFromParcel(JNIEnv* env, jobject thiz, jobject parcel
 
 static void applyBBinderHook() {
     // ─────────────────────────────────────────────────────────────────────────
-    // PR106: BBinder::transact fallback (inlined en MIUI, conservado por compatibilidad)
+    // PR141: BBinder::transact — vtable hook (modifies .data.rel.ro, NOT code pages).
+    // This avoids Private_Dirty on libbinder.so executable segments.
+    // The vtable is shared by all BBinder subclasses that don't override transact.
     // ─────────────────────────────────────────────────────────────────────────
-    void* sym106 = resolveLibbinderSymbol(
-        "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
-    if (sym106) {
-        int rc106 = DobbyHook(sym106, (void*)my_bbinder_transact, (void**)&orig_bbinder_transact);
-        LOGE("[PR106] BBinder::transact hook rc=%d @ %p (orig=%p)", rc106, sym106, (void*)orig_bbinder_transact);
+    {
+        void* base_vtable_raw = resolveLibbinderSymbol("_ZTV7android7BBinder");
+        void* base_transact = resolveLibbinderSymbol(
+            "_ZN7android7BBinder8transactEjRKNS_6ParcelEPS1_j");
+
+        if (base_vtable_raw && base_transact) {
+            void** vt = reinterpret_cast<void**>(base_vtable_raw);
+            bool hooked = false;
+            for (int i = 0; i < 32; i++) {
+                if (vt[i] == base_transact) {
+                    orig_bbinder_transact = reinterpret_cast<decltype(orig_bbinder_transact)>(vt[i]);
+                    // vtable is in .data.rel.ro — needs mprotect to write
+                    uintptr_t page = reinterpret_cast<uintptr_t>(&vt[i]) & ~0xFFFUL;
+                    if (mprotect(reinterpret_cast<void*>(page), 4096, PROT_READ | PROT_WRITE) == 0) {
+                        vt[i] = reinterpret_cast<void*>(my_bbinder_transact);
+                        mprotect(reinterpret_cast<void*>(page), 4096, PROT_READ);
+                        hooked = true;
+                        LOGE("[PR141] BBinder::transact vtable hook OK at vtable[%d] (orig=%p)", i, (void*)orig_bbinder_transact);
+                    } else {
+                        LOGE("[PR141] BBinder::transact vtable mprotect FAILED (errno=%d)", errno);
+                    }
+                    break;
+                }
+            }
+            if (!hooked && !orig_bbinder_transact) {
+                // Fallback: transact not found in vtable, use dlsym-resolved pointer
+                orig_bbinder_transact = reinterpret_cast<decltype(orig_bbinder_transact)>(base_transact);
+                LOGE("[PR141] BBinder::transact vtable scan failed — orig set via symbol, no hook");
+            }
+        } else {
+            // Symbols not found — pre-resolve orig for PLT fallback
+            if (!orig_bbinder_transact && base_transact) {
+                orig_bbinder_transact = reinterpret_cast<decltype(orig_bbinder_transact)>(base_transact);
+            }
+            LOGE("[PR141] BBinder vtable hook: missing symbols (vtable=%p transact=%p)", base_vtable_raw, base_transact);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -5807,7 +6045,7 @@ static void applyBBinderHook() {
 
     // ── Hook final ────────────────────────────────────────────────────────────
     if (target_fn) {
-        int rc115 = DobbyHook(target_fn, (void*)my_jbbinder_ontransact,
+        int rc115 = DobbyHookObf(target_fn, (void*)my_jbbinder_ontransact,
                   (void**)&orig_jbbinder_ontransact);
         if (rc115 == 0) {
             LOGE("[PR115] JavaBBinder::onTransact hooked OK @ %p (orig=%p)", target_fn, (void*)orig_jbbinder_ontransact);
@@ -5849,7 +6087,7 @@ static void applyBBinderHook() {
         // Fallback: search for any symbol containing "Location" and "readFromParcel"
         // via dlopen + iteration (future enhancement)
         if (readFromParcel) {
-            int rc118 = DobbyHook(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
+            int rc118 = DobbyHookObf(readFromParcel, (void*)my_Location_readFromParcel, (void**)&orig_Location_readFromParcel);
             LOGE("[PR118] Location::readFromParcel hook rc=%d @ %p (orig=%p)", rc118, readFromParcel, (void*)orig_Location_readFromParcel);
         } else {
             // Not an error on most ROMs — readFromParcel is pure Java on Android 11.
@@ -5860,52 +6098,12 @@ static void applyBBinderHook() {
 }
 
 static void applyBinderHooks() {
-    // PR135: Skip ALL Binder hooks in GMS — Dobby can't safely relocate
-    // IPCThreadState::transact's prologue on this ROM (SIGSEGV in trampoline
-    // at <anonymous> region). GMS is a location provider, not consumer;
-    // PR105 REPLY mutation only benefits Maps.
-    if (g_currentProcessName.find("com.google.android.gms") != std::string::npos) {
-        // PR139: Only skip IPCThreadState::transact in GMS (PR135 crash was specific to
-        // that symbol's Dobby trampoline). BBinder/JavaBBinder hooks are safe and needed
-        // for intercepting incoming location callbacks in GMS sub-processes.
-        LOGE("[PR139] GMS process '%s' — skipping IPCThreadState::transact (PR135 crash), "
-             "but applying BBinder/JavaBBinder hooks for location callback coverage",
-             g_currentProcessName.c_str());
-        applyBBinderHook();
-        return;
-    }
+    // PR141: IPCThreadState::transact and Parcel::readDouble migrated to PLT-only hooks.
+    // orig_* pre-resolved via dlsym in installPltHooks() using mangled C++ symbol names.
+    // No more Dobby inline on libbinder.so → no Private_Dirty on libbinder code pages.
+    LOGE("[PR141] IPCThreadState::transact + Parcel::readDouble: PLT-only (no Dobby inline)");
 
-    void* sym = resolveLibbinderSymbol(
-        "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j");
-    if (sym) {
-        int rc105 = DobbyHook(sym, (void*)my_ipc_transact, (void**)&orig_ipc_transact);
-        if (rc105 == 0) {
-            LOGE("[PR105] IPCThreadState::transact hooked OK @ %p (orig=%p)", sym, (void*)orig_ipc_transact);
-        } else {
-            LOGE("[PR105] IPCThreadState::transact DobbyHook FAILED rc=%d @ %p", rc105, sym);
-        }
-        // PR131: Verify patch — read first 4 bytes at hooked address
-        {
-            uint32_t insn = 0;
-            memcpy(&insn, sym, 4);
-            LOGE("[PR131] IPCThreadState verify: first_insn=0x%08x orig_ptr=%p", insn, (void*)orig_ipc_transact);
-        }
-    } else {
-        LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
-    }
-
-    // PR149: Hook Parcel::readDouble for reply-side location spoofing.
-    // Binder mmap is PROT_READ with ~VM_MAYWRITE, so we can't write to reply buffers.
-    // Instead, we intercept readDouble and return spoofed values when armed.
-    void* symRD = resolveLibbinderSymbol("_ZNK7android6Parcel10readDoubleEv");
-    if (symRD) {
-        int rcRD = DobbyHook(symRD, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
-        LOGE("[PR149] Parcel::readDouble hook %s @ %p (orig=%p)",
-             rcRD == 0 ? "OK" : "FAILED", symRD, (void*)orig_Parcel_readDouble);
-    } else {
-        LOGE("[PR149] Parcel::readDouble symbol not found in libbinder.so");
-    }
-
+    // BBinder::transact uses vtable hook (data page modification, no code page dirty).
     applyBBinderHook();
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6025,7 +6223,7 @@ public:
                     std::string fake_cpuinfo = generateMulticoreCpuInfo(*fp_cpu);
                     LOGE("MemFD: profile found, hardware='%s', cpuinfo_size=%zu",
                          fp_cpu->hardware, fake_cpuinfo.size());
-                    int mfd = syscall(__NR_memfd_create, "fake_cpuinfo", 0);
+                    int mfd = syscall(__NR_memfd_create, "", 0x0001u /*MFD_CLOEXEC*/);
                     if (mfd >= 0) {
                         write(mfd, fake_cpuinfo.c_str(), fake_cpuinfo.size());
                         lseek(mfd, 0, SEEK_SET);
@@ -6038,8 +6236,10 @@ public:
                             LOGE("MemFD: bind mount FAILED (errno=%d: %s), falling back to hooks",
                                  errno, strerror(errno));
                         }
-                        // Exempt fd from zygote's automatic fd cleanup during specialization
-                        if (g_api) g_api->exemptFd(mfd);
+                        // PR141: ALWAYS close memfd — mount persists independently of fd,
+                        // and VFS hook (my_fopen) serves cpuinfo as fallback when mount fails.
+                        // Eliminates /memfd: entry from /proc/self/fd/ that DuckDetector flags.
+                        close(mfd);
                     } else {
                         LOGE("MemFD: memfd_create failed (errno=%d: %s)", errno, strerror(errno));
                     }
@@ -6129,245 +6329,33 @@ public:
             g_camFrontAperture    = sp.frontAperture;
         }
 
-        // Libc Hooks (Phase 1)
-        // PR51: open NO se hookea directamente. Bionic::open llama openat() internamente;
-        // hookear ambos crea recursión infinita (my_open→orig_open→openat→my_openat→my_open).
-        // Toda llamada a open() pasa por openat() de todas formas → un solo hook en openat basta.
+        // PR141: File I/O hooks (openat, read, close, lseek, pread, mmap, fopen)
+        // migrated from Dobby inline to PLT-only in installPltHooks().
+        // orig_* pre-resolved via dlsym in installPltHooks().
 
-        void* openat_func = resolveLibcSymbol("openat");
-        if (openat_func) DobbyHook(openat_func, (void*)my_openat, (void**)&orig_openat);
+        // PR141: System property hooks migrated from Dobby inline to PLT-only.
+        // orig_* pre-resolved via dlsym in installPltHooks().
+        // No more Dobby inline on __system_property_find/foreach/get/read_callback —
+        // eliminates Private_Dirty on libc.so code pages.
 
-        void* read_func = resolveLibcSymbol("read");
-        if (read_func) DobbyHook(read_func, (void*)my_read, (void**)&orig_read);
+        // PR141: posix_spawn/posix_spawnp migrated from Dobby inline to PLT-only.
+        // orig_* pre-resolved via dlsym in installPltHooks().
 
-        void* close_func = resolveLibcSymbol("close");
-        if (close_func) DobbyHook(close_func, (void*)my_close, (void**)&orig_close);
+        // PR141: Force-load GPU/SSL/runtime libraries BEFORE installPltHooks() so the
+        // initial PLT hook commit covers their GOT entries. Without this, these libs
+        // are lazy-loaded after the first pltHookCommit and miss coverage.
+        dlopen("libGLESv2.so", RTLD_NOW);
+        dlopen("libvulkan.so", RTLD_NOW);
+        dlopen("libOpenCL.so", RTLD_NOW);
+        dlopen("libssl.so", RTLD_NOW);
+        dlopen("libandroid_runtime.so", RTLD_NOW);
 
-        void* lseek_func = resolveLibcSymbol("lseek");
-        if (lseek_func) DobbyHook(lseek_func, (void*)my_lseek, (void**)&orig_lseek);
-
-        void* lseek64_func = resolveLibcSymbol("lseek64");
-        if (lseek64_func) DobbyHook(lseek64_func, (void*)my_lseek64, (void**)&orig_lseek64);
-
-        void* pread_func = resolveLibcSymbol("pread");
-        if (pread_func) DobbyHook(pread_func, (void*)my_pread, (void**)&orig_pread);
-
-        void* pread64_func = resolveLibcSymbol("pread64");
-        if (pread64_func) DobbyHook(pread64_func, (void*)my_pread64, (void**)&orig_pread64);
-
-        void* mmap_func = resolveLibcSymbol("mmap");
-        if (mmap_func) {
-            int ret = DobbyHook(mmap_func, (void*)my_mmap, (void**)&orig_mmap);
-            LOGE("PR120: mmap hook %s at %p (ret=%d)", ret == 0 ? "SUCCESS" : "FAILED", mmap_func, ret);
-        } else {
-            LOGE("PR120: mmap symbol unresolved (resolver chain exhausted)");
-        }
-
-        void* mmap64_func = resolveLibcSymbol("mmap64");
-        if (!mmap64_func) {
-            // Algunos builds exponen solo alias internos de bionic.
-            mmap64_func = resolveLibcSymbol("__mmap2");
-        }
-        if (mmap64_func) {
-            if (mmap_func && mmap64_func == mmap_func) {
-                // PR120g: en varios builds ARM64 mmap/mmap64 son el mismo símbolo.
-                // Evitar double-hook sobre la misma dirección (puede anular trampolines).
-                LOGE("PR120: mmap64 shares mmap symbol (%p) — single-hook mode", mmap64_func);
-            } else {
-                int ret = DobbyHook(mmap64_func, (void*)my_mmap64, (void**)&orig_mmap64);
-                LOGE("PR120: mmap64 hook %s at %p (ret=%d)", ret == 0 ? "SUCCESS" : "FAILED", mmap64_func, ret);
-            }
-        } else {
-            LOGE("PR120: mmap64 symbol unresolved (resolver chain exhausted)");
-        }
-
-        // PR138: NEVER Dobby-hook __system_property_get or __system_property_read_callback.
-        // PIF also Dobby-hooks these functions. Module ordering is unpredictable:
-        // if OmniShield hooks first and PIF hooks second, PIF's trampoline overwrites
-        // OmniShield's, and OmniShield's orig trampoline jumps to corrupted data → SIGILL.
-        // patchPropertyPages() + PLT hooks provide sufficient coverage without Dobby.
-        {
-            void* sysprop_func = resolveLibcSymbol("__system_property_get");
-            LOGE("PR138: __system_property_get @ %p — skipping Dobby hook (PIF conflict avoidance)",
-                 sysprop_func);
-            if (!orig_system_property_get) {
-                orig_system_property_get =
-                    reinterpret_cast<decltype(orig_system_property_get)>(
-                        dlsym(RTLD_DEFAULT, "__system_property_get"));
-            }
-        }
-        {
-            void* sysprop_cb_func = resolveLibcSymbol("__system_property_read_callback");
-            LOGE("PR138: __system_property_read_callback @ %p — skipping Dobby hook (PIF conflict avoidance)",
-                 sysprop_cb_func);
-            if (!orig_system_property_read_callback) {
-                orig_system_property_read_callback =
-                    reinterpret_cast<decltype(orig_system_property_read_callback)>(
-                        dlsym(RTLD_DEFAULT, "__system_property_read_callback"));
-            }
-        }
-
-        // PR86: Re-attempt Dobby inline hook on __system_property_find.
-        // PR85 removed this because DobbySymbolResolver("libc.so") may have returned
-        // a PLT thunk or wrong address, causing SIGABRT. Now using dlsym(RTLD_DEFAULT)
-        // for reliable resolution of the actual bionic function address.
-        // This inline hook intercepts ALL callers including late-loaded .so files
-        // (VDInfo's native lib, Snapchat's native lib) that aren't covered by PLT hooks.
-        //
-        // SAFETY: If __system_property_read_callback is too close (< 64 bytes),
-        // another module (PIF) may have already Dobby-hooked it, overwriting
-        // instructions in __system_property_find's body.  The Dobby orig-trampoline
-        // for _find would then execute corrupted code → SIGILL.
-        // In that case we fall back to PLT-only hooks.
-        {
-            void* find_func = dlsym(RTLD_DEFAULT, "__system_property_find");
-            void* cb_func   = dlsym(RTLD_DEFAULT, "__system_property_read_callback");
-            bool tooClose = false;
-            if (find_func && cb_func) {
-                ptrdiff_t gap = (uint8_t*)cb_func - (uint8_t*)find_func;
-                if (gap > 0 && gap < 64) {
-                    tooClose = true;
-                    LOGE("PR86: __system_property_find (%p) too close to "
-                         "__system_property_read_callback (%p) (gap=%td bytes) — "
-                         "skipping Dobby hook to avoid SIGILL conflict with PIF",
-                         find_func, cb_func, gap);
-                }
-            }
-            if (find_func && !tooClose) {
-                int ret = DobbyHook(find_func, (void*)my_system_property_find,
-                                    (void**)&orig_system_property_find);
-                if (ret == 0) {
-                    LOGE("PR86: Dobby inline hook on __system_property_find SUCCESS at %p", find_func);
-                    g_propFindInlineHooked = true;
-                } else {
-                    LOGE("PR86: Dobby inline hook on __system_property_find FAILED (ret=%d) at %p, falling back to PLT only", ret, find_func);
-                }
-            } else if (!find_func) {
-                LOGE("PR86: dlsym(RTLD_DEFAULT, __system_property_find) returned NULL");
-            }
-        }
-
-        // PR88: Hook __system_property_foreach — intercept property enumeration.
-        // Detection apps iterate ALL properties via foreach, receiving raw prop_info*
-        // pointers from the property trie. Our wrapper callback substitutes FakePropInfo
-        // (with spoofed values) for spoofed properties. __system_property_foreach in
-        // libc.so traverses the property trie (~50+ ARM64 instructions) — well above
-        // Dobby's 12-byte minimum. Also installed as PLT hook fallback in installPltHooks.
-        // MUST be installed BEFORE installPltHooks() so g_propForeachInlineHooked guard
-        // prevents double-hook recursion (same pattern as __system_property_find above).
-        {
-            void* foreach_addr = resolveLibcSymbol("__system_property_foreach");
-            if (!foreach_addr) foreach_addr = dlsym(RTLD_DEFAULT, "__system_property_foreach");
-            if (foreach_addr) {
-                int ret = DobbyHook(foreach_addr, (void*)my_system_property_foreach,
-                                    (void**)&orig_system_property_foreach);
-                if (ret == 0) {
-                    g_propForeachInlineHooked = true;
-                }
-                LOGE("PR88: __system_property_foreach hook %s at %p (ret=%d)",
-                     ret == 0 ? "SUCCESS" : "FAILED", foreach_addr, ret);
-            } else {
-                LOGE("PR88: Could not resolve __system_property_foreach");
-            }
-        }
-
-        // PR90: Dobby inline hook posix_spawn/posix_spawnp in libc.
-        // These are NOT thin syscall wrappers — they are substantial userspace functions
-        // (fork + exec logic, 100+ ARM64 instructions) well above Dobby's 12-byte minimum.
-        // The Fix10 comment incorrectly claimed they were too small for Dobby.
-        // Inline hooks intercept ALL callers from ANY library (including late-loaded .so
-        // files from VDInfo), unlike PLT hooks which only cover ELFs present at hook time
-        // and depend on pltHookCommit() succeeding for each ELF.
-        // MUST be installed BEFORE installPltHooks() so g_spawnInlineHooked prevents
-        // double-hook registration (PLT + inline → infinite recursion, as documented in Fix10).
-        {
-            void* spawn_addr = dlsym(RTLD_DEFAULT, "posix_spawn");
-            void* spawnp_addr = dlsym(RTLD_DEFAULT, "posix_spawnp");
-            bool spawn_ok = false, spawnp_ok = false;
-            if (spawn_addr) {
-                int ret = DobbyHook(spawn_addr, (void*)my_posix_spawn,
-                                    (void**)&orig_posix_spawn);
-                spawn_ok = (ret == 0);
-                LOGE("PR90: posix_spawn Dobby hook %s at %p (ret=%d)",
-                     spawn_ok ? "SUCCESS" : "FAILED", spawn_addr, ret);
-            }
-            if (spawnp_addr) {
-                int ret = DobbyHook(spawnp_addr, (void*)my_posix_spawnp,
-                                    (void**)&orig_posix_spawnp);
-                spawnp_ok = (ret == 0);
-                LOGE("PR90: posix_spawnp Dobby hook %s at %p (ret=%d)",
-                     spawnp_ok ? "SUCCESS" : "FAILED", spawnp_addr, ret);
-            }
-            if (spawn_ok && spawnp_ok) {
-                g_spawnInlineHooked = true;
-                LOGE("PR90: Both spawn Dobby hooks active — PLT spawn hooks will be SKIPPED");
-            } else {
-                LOGE("PR90: Dobby spawn hooks incomplete — falling back to PLT hooks");
-            }
-        }
-
-        // Fix10: PLT hooks for functions where Dobby inline hooks fail or as fallback.
-        // execve is a thin syscall wrapper (~3 instructions, 12 bytes) — borderline for
-        // Dobby. __system_property_read may also be small on some ROMs. These remain
-        // PLT-only. posix_spawn/posix_spawnp are now Dobby inline hooked (PR90).
-        // pltHookCommit() returning false is normal — some /apex/ ELFs lack PLT entries
-        // for our target functions. The relevant ELFs (libandroid_runtime, libjavacore,
-        // app libs) DO get hooked.
+        // PR141: Install all PLT hooks (file I/O, syscalls, properties, spawn, GPU, TLS,
+        // Binder IPC, dynamic loading). All orig_* are pre-resolved via dlsym inside.
         installPltHooks();
 
-        // PR86: Hook dlsym for defense-in-depth against dynamic symbol resolution bypass.
-        // Detection apps can call dlsym(RTLD_DEFAULT, "__system_property_find") to get
-        // a raw function pointer, bypassing PLT hooks entirely. By hooking dlsym itself,
-        // we return our spoofed function pointers for all property-related symbols.
-        // dlsym in libdl.so is large enough (~30+ instructions) for Dobby's trampoline.
-        // CRITICAL: MUST be installed AFTER installPltHooks() because that function calls
-        // dlsym(RTLD_DEFAULT, "__system_property_read") to pre-resolve orig_* pointers.
-        // If our hook is active during that resolution, it returns my_system_property_read
-        // instead of the real address, corrupting orig_system_property_read → self-reference
-        // → infinite recursion.
-        {
-            void* dlsym_addr = DobbySymbolResolver("libdl.so", "dlsym");
-            if (!dlsym_addr) dlsym_addr = dlsym(RTLD_DEFAULT, "dlsym");
-            if (dlsym_addr) {
-                int ret = DobbyHook(dlsym_addr, (void*)my_dlsym, (void**)&orig_dlsym);
-                LOGE("PR86: dlsym hook %s at %p (ret=%d)",
-                     ret == 0 ? "SUCCESS" : "FAILED", dlsym_addr, ret);
-            } else {
-                LOGE("PR86: Could not resolve dlsym address for hooking");
-            }
-        }
-
-        // PR87: Hook android_dlopen_ext and dlopen to re-apply PLT hooks to late-loaded libraries.
-        // When apps call System.loadLibrary() (Java→JNI→android_dlopen_ext) or native dlopen(),
-        // the dynamic linker loads the .so and resolves its GOT with real libc addresses using
-        // internal routines (NOT the public dlsym). Our PLT hooks from installPltHooks() only
-        // covered libraries already loaded at that point. By hooking the load event, we detect
-        // new libraries and re-apply PLT hooks before the app can read unhooked property values.
-        // On Android 8+, android_dlopen_ext in libdl.so is a wrapper (~6 ARM64 instructions,
-        // ~24 bytes) around __loader_android_dlopen_ext — sufficient for Dobby's 12-byte trampoline.
-        {
-            void* dlopen_ext_addr = DobbySymbolResolver("libdl.so", "android_dlopen_ext");
-            if (!dlopen_ext_addr) dlopen_ext_addr = dlsym(RTLD_DEFAULT, "android_dlopen_ext");
-            if (dlopen_ext_addr) {
-                int ret = DobbyHook(dlopen_ext_addr, (void*)my_android_dlopen_ext,
-                                    (void**)&orig_android_dlopen_ext);
-                LOGE("PR87: android_dlopen_ext hook %s at %p (ret=%d)",
-                     ret == 0 ? "SUCCESS" : "FAILED", dlopen_ext_addr, ret);
-            } else {
-                LOGE("PR87: Could not resolve android_dlopen_ext");
-            }
-
-            void* dlopen_addr = DobbySymbolResolver("libdl.so", "dlopen");
-            if (!dlopen_addr) dlopen_addr = dlsym(RTLD_DEFAULT, "dlopen");
-            if (dlopen_addr) {
-                int ret = DobbyHook(dlopen_addr, (void*)my_dlopen_hook,
-                                    (void**)&orig_dlopen_hook);
-                LOGE("PR87: dlopen hook %s at %p (ret=%d)",
-                     ret == 0 ? "SUCCESS" : "FAILED", dlopen_addr, ret);
-            } else {
-                LOGE("PR87: Could not resolve dlopen");
-            }
-        }
+        // PR141: dlsym/dlopen/android_dlopen_ext hooks migrated from Dobby inline to PLT-only.
+        // orig_* pre-resolved via dlsym in installPltHooks().
 
         // PR91: Re-enable patchPropertyPages() — shadow-patch property memory.
         // PR85 disabled this assuming FakePropInfo (from __system_property_find hook)
@@ -6380,77 +6368,9 @@ public:
         // copies containing spoofed values. This is what patchPropertyPages() does.
         patchPropertyPages();
 
-        // Syscalls (Evasión Root, Uptime, Kernel, Network)
-        // PR49: resolveLibcSymbol usa dlsym hash-lookup (O(1)) como fast-path,
-        // con DobbySymbolResolver como fallback para símbolos privados (__ioctl).
-        // Evita hooking de PLT stubs propios y VDSO (clock_gettime → SIGSEGV).
-        void* uname_sym = resolveLibcSymbol("uname");
-        if (uname_sym) DobbyHook(uname_sym, (void*)my_uname, (void**)&orig_uname);
-
-        void* clock_gettime_sym = resolveLibcSymbol("clock_gettime");
-        if (clock_gettime_sym) DobbyHook(clock_gettime_sym, (void*)my_clock_gettime, (void**)&orig_clock_gettime);
-
-        void* access_sym = resolveLibcSymbol("access");
-        if (access_sym) DobbyHook(access_sym, (void*)my_access, (void**)&orig_access);
-
-        void* getifaddrs_sym = resolveLibcSymbol("getifaddrs");
-        if (getifaddrs_sym) DobbyHook(getifaddrs_sym, (void*)my_getifaddrs, (void**)&orig_getifaddrs);
-
-        void* stat_sym = resolveLibcSymbol("stat");
-        if (stat_sym) DobbyHook(stat_sym, (void*)my_stat, (void**)&orig_stat);
-
-        void* lstat_sym = resolveLibcSymbol("lstat");
-        if (lstat_sym) DobbyHook(lstat_sym, (void*)my_lstat, (void**)&orig_lstat);
-
-        void* fstatat_func = resolveLibcSymbol("fstatat");
-        if (fstatat_func) DobbyHook(fstatat_func, (void*)my_fstatat, (void**)&orig_fstatat);
-
-        void* fopen_sym = resolveLibcSymbol("fopen");
-        if (fopen_sym) DobbyHook(fopen_sym, (void*)my_fopen, (void**)&orig_fopen);
-
-        void* readlinkat_sym = resolveLibcSymbol("readlinkat");
-        if (readlinkat_sym) DobbyHook(readlinkat_sym, (void*)my_readlinkat, (void**)&orig_readlinkat);
-
-        void* readlink_sym = resolveLibcSymbol("readlink");
-        if (readlink_sym) DobbyHook(readlink_sym, (void*)my_readlink, (void**)&orig_readlink);
-
-        void* sysinfo_func = resolveLibcSymbol("sysinfo");
-        if (sysinfo_func) DobbyHook(sysinfo_func, (void*)my_sysinfo, (void**)&orig_sysinfo);
-
-        void* statfs_func = resolveLibcSymbol("statfs");
-        if (statfs_func) DobbyHook(statfs_func, (void*)my_statfs, (void**)&orig_statfs);
-
-        void* statvfs_func = resolveLibcSymbol("statvfs");
-        if (statvfs_func) DobbyHook(statvfs_func, (void*)my_statvfs, (void**)&orig_statvfs);
-
-        void* readdir_func = resolveLibcSymbol("readdir");
-        if (readdir_func) DobbyHook(readdir_func, (void*)my_readdir, (void**)&orig_readdir);
-
-        void* getauxval_func = resolveLibcSymbol("getauxval");
-        if (getauxval_func) DobbyHook(getauxval_func, (void*)my_getauxval, (void**)&orig_getauxval);
-
-        // PR70: dl_iterate_phdr — hide module .so from ELF enumeration
-        void* dl_iter_func = resolveLibcSymbol("dl_iterate_phdr");
-        if (!dl_iter_func) dl_iter_func = dlsym(RTLD_DEFAULT, "dl_iterate_phdr");
-        if (dl_iter_func) DobbyHook(dl_iter_func, (void*)my_dl_iterate_phdr, (void**)&orig_dl_iterate_phdr);
-
-        // PR41: dup family hooks — prevenir bypass de caché VFS
-        void* dup_sym = resolveLibcSymbol("dup");
-        if (dup_sym) DobbyHook(dup_sym, (void*)my_dup, (void**)&orig_dup);
-        void* dup2_func = resolveLibcSymbol("dup2");
-        if (dup2_func) DobbyHook(dup2_func, (void*)my_dup2, (void**)&orig_dup2);
-        void* dup3_func = resolveLibcSymbol("dup3");
-        if (dup3_func) DobbyHook(dup3_func, (void*)my_dup3, (void**)&orig_dup3);
-
-        // PR43: fcntl hook (F_DUPFD)
-        void* fcntl_func = resolveLibcSymbol("fcntl");
-        if (fcntl_func) DobbyHook(fcntl_func, (void*)my_fcntl, (void**)&orig_fcntl);
-
-        // PR42: ioctl hook — MAC real bypass via syscall directo
-        // Intentar primero __ioctl (firma fija en Bionic), fallback a ioctl
-        void* ioctl_sym = resolveLibcSymbol("__ioctl");
-        if (!ioctl_sym) ioctl_sym = resolveLibcSymbol("ioctl");
-        if (ioctl_sym) DobbyHook(ioctl_sym, (void*)my_ioctl, (void**)&orig_ioctl);
+        // PR141: Syscall hooks (uname, clock_gettime, access, stat, readlink, etc.)
+        // and fd hooks (dup, dup2, dup3, fcntl, ioctl) migrated from Dobby inline to PLT-only.
+        // orig_* pre-resolved via dlsym in installPltHooks().
 
         // -----------------------------------------------------------------------------
         // JNI Sync: Sellar gap de android.os.Build inicializado por Zygote
@@ -6781,49 +6701,8 @@ public:
         // PR47: Limpiar cualquier excepción JNI pendiente del Build sync
         if (env->ExceptionCheck()) env->ExceptionClear();
 
-        // Native APIs
-        void* egl_func = DobbySymbolResolver("libEGL.so", "eglQueryString");
-        if (egl_func) DobbyHook(egl_func, (void*)my_eglQueryString, (void**)&orig_eglQueryString);
-
-        // TLS 1.3
-        void* tls13_ctx = DobbySymbolResolver("libssl.so", "SSL_CTX_set_ciphersuites");
-        if (tls13_ctx) DobbyHook(tls13_ctx, (void*)my_SSL_CTX_set_ciphersuites, (void**)&orig_SSL_CTX_set_ciphersuites);
-        void* tls13_ssl = DobbySymbolResolver("libssl.so", "SSL_set1_tls13_ciphersuites");
-        if (tls13_ssl) DobbyHook(tls13_ssl, (void*)my_SSL_set1_tls13_ciphersuites, (void**)&orig_SSL_set1_tls13_ciphersuites);
-        void* tls13_set = DobbySymbolResolver("libssl.so", "SSL_set_ciphersuites");
-        if (tls13_set) DobbyHook(tls13_set, (void*)my_SSL_set_ciphersuites, (void**)&orig_SSL_set_ciphersuites);
-
-        // Network Hooks (TLS 1.2)
-        void* ssl12_func = DobbySymbolResolver("libssl.so", "SSL_set_cipher_list");
-        if (ssl12_func) DobbyHook(ssl12_func, (void*)my_SSL_set_cipher_list, (void**)&orig_SSL_set_cipher_list);
-
-        // GPU Hooks
-        // Fix11: Force-load GPU libraries — on some ROMs (MIUI, etc.) they are
-        // lazy-loaded after postAppSpecialize, causing DobbySymbolResolver to
-        // return NULL and leaving GL_RENDERER/GL_VENDOR unspoofed.
-        dlopen("libGLESv2.so", RTLD_NOW);
-        void* gl_func = DobbySymbolResolver("libGLESv2.so", "glGetString");
-        if (gl_func) DobbyHook(gl_func, (void*)my_glGetString, (void**)&orig_glGetString);
-        else LOGE("Fix11: glGetString not resolved after dlopen");
-
-        // Vulkan
-        dlopen("libvulkan.so", RTLD_NOW);
-        void* vulkan_func = DobbySymbolResolver("libvulkan.so", "vkGetPhysicalDeviceProperties");
-        if (vulkan_func) DobbyHook(vulkan_func, (void*)my_vkGetPhysicalDeviceProperties, (void**)&orig_vkGetPhysicalDeviceProperties);
-
-        // OpenCL
-        dlopen("libOpenCL.so", RTLD_NOW);
-        void* cl_func = DobbySymbolResolver("libOpenCL.so", "clGetDeviceInfo");
-        if (cl_func) DobbyHook(cl_func, (void*)my_clGetDeviceInfo, (void**)&orig_clGetDeviceInfo);
-
-        // Sensor::getName()/getVendor() Dobby hooks REMOVED — ABI mismatch
-        // (returns const String8&, not const char*) caused SIGBUS in GMS.
-        // Sensor metadata spoofing is handled by JNI hooks on android/hardware/Sensor.
-
-        // Force-load libandroid_runtime — on some ROMs (MIUI, etc.) the Settings JNI
-        // bridge symbols are only available after explicit dlopen, similar to Fix11
-        // for GPU libraries.
-        dlopen("libandroid_runtime.so", RTLD_NOW);
+        // PR141: EGL/GPU/TLS/SSL hooks migrated from Dobby inline to PLT-only.
+        // Libraries already force-loaded before installPltHooks() above.
 
         // Settings.Secure (Android ID)
         // Symbol index 0 = 2-param (JNIEnv*, jstring)
@@ -6849,10 +6728,10 @@ public:
         }
         if (settings_func) {
             if (settings_variant == 0) {
-                DobbyHook(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
+                DobbyHookObf(settings_func, (void*)my_SettingsSecure_getString, (void**)&orig_SettingsSecure_getString);
             } else {
                 LOGE("Settings.Secure: using 3-param variant (index %d)", settings_variant);
-                DobbyHook(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
+                DobbyHookObf(settings_func, (void*)my_SettingsSecure_getString3, (void**)&orig_SettingsSecure_getString3);
             }
         } else {
             LOGE("Settings.Secure.getString: NO symbol found — hook NOT installed");
@@ -6876,10 +6755,10 @@ public:
         }
         if (settings_user_func) {
             if (settings_user_variant == 0) {
-                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
+                DobbyHookObf(settings_user_func, (void*)my_SettingsSecure_getStringForUser, (void**)&orig_SettingsSecure_getStringForUser);
             } else {
                 LOGE("Settings.Secure.getStringForUser: using 4-param variant (index %d)", settings_user_variant);
-                DobbyHook(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
+                DobbyHookObf(settings_user_func, (void*)my_SettingsSecure_getStringForUser4, (void**)&orig_SettingsSecure_getStringForUser4);
             }
         } else {
             LOGE("Settings.Secure.getStringForUser: NO symbol found — hook NOT installed");
@@ -6900,10 +6779,10 @@ public:
         }
         if (global_func) {
             if (global_variant == 0) {
-                DobbyHook(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
+                DobbyHookObf(global_func, (void*)my_SettingsGlobal_getString, (void**)&orig_SettingsGlobal_getString);
             } else {
                 LOGE("Settings.Global: using 3-param variant (index %d)", global_variant);
-                DobbyHook(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
+                DobbyHookObf(global_func, (void*)my_SettingsGlobal_getString3, (void**)&orig_SettingsGlobal_getString3);
             }
         } else {
             LOGE("Settings.Global.getString: NO symbol found — hook NOT installed");
@@ -6924,10 +6803,10 @@ public:
         }
         if (global_user_func) {
             if (global_user_variant == 0) {
-                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
+                DobbyHookObf(global_user_func, (void*)my_SettingsGlobal_getStringForUser, (void**)&orig_SettingsGlobal_getStringForUser);
             } else {
                 LOGE("Settings.Global.getStringForUser: using 4-param variant (index %d)", global_user_variant);
-                DobbyHook(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
+                DobbyHookObf(global_user_func, (void*)my_SettingsGlobal_getStringForUser4, (void**)&orig_SettingsGlobal_getStringForUser4);
             }
         } else {
             LOGE("Settings.Global.getStringForUser: NO symbol found — hook NOT installed");

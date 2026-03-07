@@ -23,9 +23,3 @@ target_link_libraries(omnishield
     log
     vulkan
 )
-
-# ── MINIMAL (PR61 diagnóstico — comentado) ───────────────────────────────────
-# add_library(omnishield SHARED
-#     jni/main_minimal.cpp
-# )
-# target_link_libraries(omnishield log)

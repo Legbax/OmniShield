@@ -908,12 +908,6 @@ window.applyProxy = async function() {
   if (state.proxyEnabled && !state.proxyPort) { toast('Enter a proxy port', 'warn'); return; }
   if (state.proxyEnabled && state.proxyType !== 'socks5') { toast('Only SOCKS5 proxies are supported', 'warn'); return; }
 
-  // Debug: verify values read from UI before saving
-  console.log('[PROXY] host=' + JSON.stringify(state.proxyHost) +
-    ' port=' + JSON.stringify(state.proxyPort) +
-    ' user=' + JSON.stringify(state.proxyUser) +
-    ' pass_len=' + (state.proxyPass || '').length);
-
   if (!await saveConfig()) { toast('Save failed', 'err'); return; }
 
   // Verify config was written correctly by re-reading it
@@ -1238,7 +1232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     await loadState();
   } catch(e) {
-    console.error('[OmniShield] init error:', e);
+    // init error handled silently — state defaults used
     // State defaults are already set at declaration time, so computeAll()
     // below will still produce valid generated values.
   } finally {

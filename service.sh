@@ -7,10 +7,6 @@
 OMNI_CONFIG="/data/adb/.omni_data/.identity.cfg"
 LOC_BLOCKED_FLAG="/data/adb/.omni_data/.location_blocked"
 
-# PR127: Debug trace — writes to file to diagnose execution issues
-OMNI_DBG="/data/adb/.omni_data/.service_trace.log"
-echo "$(date) [START] service.sh pid=$$ uid=$(id -u)" > "$OMNI_DBG" 2>/dev/null
-
 # Ensures prop file permissions
 chmod 644 /data/adb/.omni_data/.identity.cfg 2>/dev/null
 # Ensure tun2socks binary is executable (ZIP may strip permissions)
@@ -26,10 +22,7 @@ chcon u:object_r:system_data_file:s0 /data/adb/.omni_data/.identity.cfg 2>/dev/n
 if [ -f "$LOC_BLOCKED_FLAG" ]; then
     settings put secure location_mode 3 2>/dev/null
     rm -f "$LOC_BLOCKED_FLAG"
-    echo "$(date) [SAFETY] restored location_mode from previous crash" >> "$OMNI_DBG" 2>/dev/null
 fi
-
-echo "$(date) [INIT] launching background tasks" >> "$OMNI_DBG" 2>/dev/null
 
 # ============================================================
 # PR86: Modem property stabilizer
@@ -47,7 +40,6 @@ if [ -f "$OMNI_CONFIG" ]; then
         until [ "$(getprop sys.boot_completed)" = "1" ]; do
             sleep 2
         done
-        echo "$(date) [PR86] modem stabilizer started" >> "$OMNI_DBG" 2>/dev/null
         while true; do
             resetprop -n gsm.operator.iso-country us
             resetprop -n gsm.sim.operator.iso-country us
@@ -76,7 +68,6 @@ fi
     done
     touch "$LOC_BLOCKED_FLAG"
     settings put secure location_mode 0 2>/dev/null
-    echo "$(date) [PR126] location_mode=0 (blocked)" >> "$OMNI_DBG" 2>/dev/null
     log -t OmniShield "[PR126] Location disabled globally — waiting for Zygisk"
 ) &
 # ============================================================
@@ -103,8 +94,6 @@ fi
         sleep 2
     done
 
-    echo "$(date) [PR125] polling for zygisk_ready flag..." >> "$OMNI_DBG" 2>/dev/null
-
     # Poll for Zygisk readiness (max 60s after boot_completed)
     _waited=0
     while [ ! -f "$READY_FLAG" ] && [ "$_waited" -lt 60 ]; do
@@ -113,7 +102,6 @@ fi
     done
 
     if [ -f "$READY_FLAG" ]; then
-        echo "$(date) [PR125] flag found after ${_waited}s — waiting for location block" >> "$OMNI_DBG" 2>/dev/null
         # PR128: Wait for PR126 to set location_mode=0 before killing (max 10s).
         # PR126 creates LOC_BLOCKED_FLAG after settings put secure location_mode 0,
         # guaranteeing GPS is blocked before Maps/GMS are killed.
@@ -122,7 +110,6 @@ fi
             sleep 1
             _loc_wait=$((_loc_wait + 1))
         done
-        echo "$(date) [PR125] location blocked after ${_loc_wait}s — killing Maps/GMS" >> "$OMNI_DBG" 2>/dev/null
         log -t OmniShield "[PR125] Zygisk ready (waited ${_waited}s). Killing location stack..."
         # Kill all location-related processes so they restart with Zygisk hooks
         am force-stop com.google.android.apps.maps 2>/dev/null
@@ -138,10 +125,8 @@ fi
         # PR126: Restore location — processes will restart with hooks active
         settings put secure location_mode 3 2>/dev/null
         rm -f "$LOC_BLOCKED_FLAG"
-        echo "$(date) [PR125] location_mode=3 (restored) + processes killed" >> "$OMNI_DBG" 2>/dev/null
         log -t OmniShield "[PR125] Location restored + Maps/GMS killed → restart with hooks"
     else
-        echo "$(date) [PR125] TIMEOUT after 60s — restoring location anyway" >> "$OMNI_DBG" 2>/dev/null
         log -t OmniShield "[PR125] TIMEOUT: Zygisk not ready after 60s"
         # Restore location anyway to not leave the device broken
         settings put secure location_mode 3 2>/dev/null
@@ -171,8 +156,6 @@ fi
 # ============================================================
 # FIN PR72
 # ============================================================
-
-echo "$(date) [BG_DONE] all background tasks launched, starting SSAID" >> "$OMNI_DBG" 2>/dev/null
 
 # ============================================================
 # PR37: SSAID Injection — OmniShield
@@ -302,4 +285,3 @@ fi  # end of: if [ -n "$MASTER_SEED" ] && [ -f "$SSAID_FILE" ]
 # FIN PR37/PR40 SSAID Injection
 # ============================================================
 
-echo "$(date) [END] service.sh completed" >> "$OMNI_DBG" 2>/dev/null
