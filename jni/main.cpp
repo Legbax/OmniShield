@@ -4930,6 +4930,8 @@ static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
 // 3. Adaptador para respuestas síncronas (IPCThreadState::transact)
 // PR137: Added Doppler scan fallback for GMS FusedLocation replies
 // (SafeParcelable-wrapped Location objects with different header layout).
+// PR146: Reply Parcel data is in Binder mmap (PROT_READ only).
+// Must use shadow buffer to mutate — writing directly causes SEGV_ACCERR.
 static void mutateLocationReply(void* reply) {
     if (!reply) return;
     size_t sz = parcel_dataSize(reply);
@@ -4943,32 +4945,51 @@ static void mutateLocationReply(void* reply) {
     memcpy(&lat, &latBits, 8);
     memcpy(&lon, &lonBits, 8);
 
-    // Get raw mData pointer for reading and Doppler scan
+    // Get raw mData pointer (read-only Binder mmap)
     uint8_t* raw = *reinterpret_cast<uint8_t**>(
         static_cast<uint8_t*>(reply) + 0x08);
     if (!raw) return;
 
-    // 1) PR145: Try AOSP ILocationManager fixed-offset format (base=12).
-    //    mutateLocationInBuffer now tries both Android 11 and 12 layouts
-    //    with lat/lon validation before writing.
-    if (mutateLocationInBuffer(raw, sz, 12, lat, lon)) {
-        LOGD("[PR145] Location reply mutated (AOSP@12): lat=%.6f lon=%.6f", lat, lon);
-        return;
+    // Allocate writable shadow copy
+    uint8_t* shadow = new uint8_t[sz];
+    memcpy(shadow, raw, sz);
+
+    bool mutated = false;
+
+    // 1) Try AOSP ILocationManager fixed-offset format (base=12)
+    if (mutateLocationInBuffer(shadow, sz, 12, lat, lon)) {
+        LOGD("[PR146] Location reply mutated (AOSP@12): lat=%.6f lon=%.6f", lat, lon);
+        mutated = true;
     }
 
-    // 2) Doppler scan fallback — tries mutateLocationInBuffer at all 4-byte offsets.
-    size_t dopplerOffset = 0;
-    if (mutateLocationByDopplerScan(raw, sz, lat, lon, dopplerOffset)) {
-        LOGD("[PR145] Location reply mutated (Doppler@%zu): lat=%.6f lon=%.6f",
-             dopplerOffset, lat, lon);
-        return;
+    // 2) Doppler scan fallback
+    if (!mutated) {
+        size_t dopplerOffset = 0;
+        if (mutateLocationByDopplerScan(shadow, sz, lat, lon, dopplerOffset)) {
+            LOGD("[PR146] Location reply mutated (Doppler@%zu): lat=%.6f lon=%.6f",
+                 dopplerOffset, lat, lon);
+            mutated = true;
+        }
     }
 
-    // 3) Provider-validated scan — finds provider string then scans for lat/lon.
-    size_t probeOffset = 0;
-    if (probeProviderValidatedLocation(raw, sz, lat, lon, probeOffset)) {
-        LOGE("[PR145] Location reply mutated (provider-scan@%zu): lat=%.6f lon=%.6f",
-             probeOffset, lat, lon);
+    // 3) Provider-validated scan
+    if (!mutated) {
+        size_t probeOffset = 0;
+        if (probeProviderValidatedLocation(shadow, sz, lat, lon, probeOffset)) {
+            LOGE("[PR146] Location reply mutated (provider-scan@%zu): lat=%.6f lon=%.6f",
+                 probeOffset, lat, lon);
+            mutated = true;
+        }
+    }
+
+    if (mutated) {
+        // Swap mData to shadow buffer
+        uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+            static_cast<uint8_t*>(reply) + 0x08);
+        *mDataField = shadow;
+        // Shadow leaks intentionally — caller reads from it after return.
+    } else {
+        delete[] shadow;
     }
 }
 
@@ -5101,23 +5122,39 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
         mutateLocationReply(reply);
     }
 
-    // PR145: Reply-side fallback for obfuscated GMS interfaces.
-    // When neither isAospLoc nor isGmsLoc matched the outgoing descriptor,
-    // scan the reply for provider-validated Location objects.
+    // PR146: Reply-side fallback for obfuscated GMS interfaces.
+    // Uses shadow buffer because reply Parcel data is in Binder mmap (PROT_READ only).
+    // Writing directly to it causes SEGV_ACCERR.
     if (!isAospLoc && !isGmsLoc && status == 0 && reply
         && (latBits != 0 || lonBits != 0)) {
         size_t replySz = parcel_dataSize(reply);
         if (replySz > 64) {
             uint8_t* replyRaw = *reinterpret_cast<uint8_t**>(
                 static_cast<uint8_t*>(reply) + 0x08);
-            if (replyRaw) {
+            if (replyRaw && hasProviderSignature(replyRaw, replySz)) {
+                // PR146: Visualize reply parcel for diagnostics
+                visualizeLocationParcel(replyRaw, replySz, "ipc-reply", code);
+
+                // Allocate writable shadow copy
+                uint8_t* replyShadow = new uint8_t[replySz];
+                memcpy(replyShadow, replyRaw, replySz);
+
                 double rLat, rLon;
                 memcpy(&rLat, &latBits, 8);
                 memcpy(&rLon, &lonBits, 8);
+
                 size_t probeOff = 0;
-                if (probeProviderValidatedLocation(replyRaw, replySz, rLat, rLon, probeOff)) {
-                    LOGE("[PR145] ipc reply provider-scan: handle=%d code=%u probe@%zu lat=%.6f lon=%.6f",
+                if (probeProviderValidatedLocation(replyShadow, replySz, rLat, rLon, probeOff)) {
+                    // Swap mData to shadow buffer
+                    uint8_t** mDataField = reinterpret_cast<uint8_t**>(
+                        static_cast<uint8_t*>(reply) + 0x08);
+                    *mDataField = replyShadow;
+                    LOGE("[PR146] ipc reply mutated: handle=%d code=%u probe@%zu lat=%.6f lon=%.6f",
                          handle, code, probeOff, rLat, rLon);
+                    // Note: replyShadow leaks intentionally — the caller reads from it
+                    // after we return. The Binder driver reclaims the original buffer.
+                } else {
+                    delete[] replyShadow;
                 }
             }
         }
@@ -5302,6 +5339,14 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                                    const void* data, void* reply, uint32_t flags) {
     if (!orig_bbinder_transact) return 0;
 
+    // PR146: Verify BBinder DobbyHook is active (first 10 calls)
+    static std::atomic<int> s_bbCallCount{0};
+    int _bbN = s_bbCallCount.fetch_add(1, std::memory_order_relaxed);
+    if (_bbN < 10) {
+        size_t _bbSz = data ? parcel_dataSize(data) : 0;
+        LOGE("[PR146] bbinder_transact called: code=%u sz=%zu call#%d", code, _bbSz, _bbN);
+    }
+
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
     int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
 
@@ -5371,6 +5416,11 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                     savedMData = *mDataField;
                     *mDataField = shadowBuf;
                 } else {
+                    // PR146: Log when provider signature found but no mutation
+                    if (hasProviderSig) {
+                        LOGE("[PR146] bbinder provider-scan FAILED: code=%u token='%s' sz=%zu",
+                             code, token.c_str(), sz);
+                    }
                     delete[] shadowBuf;
                     shadowBuf = nullptr;
                 }
