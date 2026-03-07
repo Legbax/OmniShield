@@ -4700,7 +4700,7 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
             memcpy(&cLat, buf + latOff, 8);
             memcpy(&cLon, buf + lonOff, 8);
             if (cLat >= -90.0 && cLat <= 90.0 && cLon >= -180.0 && cLon <= 180.0
-                && !(cLat == 0.0 && cLon == 0.0)) {
+                && cLat != 0.0 && cLon != 0.0) { // PR151: reject single-zero
                 memcpy(buf + latOff, &lat, 8);
                 memcpy(buf + lonOff, &lon, 8);
                 return true;
@@ -4722,7 +4722,7 @@ static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
                 memcpy(&cLat, buf + latOff, 8);
                 memcpy(&cLon, buf + lonOff, 8);
                 if (cLat >= -90.0 && cLat <= 90.0 && cLon >= -180.0 && cLon <= 180.0
-                    && !(cLat == 0.0 && cLon == 0.0)) {
+                    && cLat != 0.0 && cLon != 0.0) { // PR151: reject single-zero
                     memcpy(buf + latOff, &lat, 8);
                     memcpy(buf + lonOff, &lon, 8);
                     return true;
@@ -4830,7 +4830,7 @@ static bool probeProviderValidatedLocation(uint8_t* buf, size_t sz,
 
             if (curLat < -90.0 || curLat > 90.0) continue;
             if (curLon < -180.0 || curLon > 180.0) continue;
-            if (curLat == 0.0 && curLon == 0.0) continue;
+            if (curLat == 0.0 || curLon == 0.0) continue; // PR151: reject single-zero (padding false positive)
 
             // Provider string + lat/lon range match — mutate
             memcpy(buf + off, &lat, 8);
@@ -4888,7 +4888,7 @@ static void visualizeLocationParcel(const uint8_t* buf, size_t sz,
         memcpy(&v1, buf + i, 8);
         memcpy(&v2, buf + i + 8, 8);
         if (v1 >= -90.0 && v1 <= 90.0 && v2 >= -180.0 && v2 <= 180.0
-            && !(v1 == 0.0 && v2 == 0.0)
+            && v1 != 0.0 && v2 != 0.0 // PR151: reject single-zero
             && v1 != 1.0 && v2 != 1.0 && v1 != -1.0 && v2 != -1.0) {
             LOGE("[PV#%d] coord@%zu lat=%.6f lon=%.6f", n, i, v1, v2);
         }
