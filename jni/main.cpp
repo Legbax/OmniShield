@@ -164,7 +164,8 @@ enum FileType {
     PROC_SELF_CGROUP,     // /proc/self/cgroup — puede revelar namespace KernelSU
     BATTERY_CHARGE_FULL,  // PR42: /sys/class/power_supply/battery/charge_full[_design]
     PROC_NET_IF_INET6,    // PR42: /proc/net/if_inet6 — expone interfaces IPv6 activas
-    PROC_NET_IPV6_ROUTE   // PR43: /proc/net/ipv6_route
+    PROC_NET_IPV6_ROUTE,  // PR43: /proc/net/ipv6_route
+    PROC_SMAPS            // /proc/self/smaps — zero Private_Dirty + strip anon-exec/memfd blocks
 };
 static std::map<int, FileType> g_fdMap;
 static std::map<int, size_t> g_fdOffsetMap; // Thread-safe offset tracking
@@ -536,7 +537,10 @@ bool shouldHide(const char* key) {
 // Hooks: OpenCL
 // -----------------------------------------------------------------------------
 cl_int my_clGetDeviceInfo(cl_device_id device, cl_device_info param_name, size_t param_value_size, void *param_value, size_t *param_value_size_ret) {
-    if (!orig_clGetDeviceInfo) return -1;
+    if (!orig_clGetDeviceInfo) {
+        orig_clGetDeviceInfo = (cl_int(*)(cl_device_id,cl_device_info,size_t,void*,size_t*))dlsym(RTLD_DEFAULT, "clGetDeviceInfo");
+        if (!orig_clGetDeviceInfo) return -1;
+    }
     cl_int ret = orig_clGetDeviceInfo(device, param_name, param_value_size, param_value, param_value_size_ret);
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (ret == 0 && fp_ptr) {
@@ -586,6 +590,103 @@ static inline bool isProcPidPath(const char* path, const char* suffix) {
     while (*p >= '0' && *p <= '9') p++;
     if (*p != '/') return false;
     return strcmp(p + 1, suffix) == 0;
+}
+
+// -----------------------------------------------------------------------------
+// Maps/smaps forensic helpers
+// Detect Dobby trampoline pages (anonymous executable, device 00:00)
+// and memfd mappings — both are high-confidence hook fingerprints.
+// -----------------------------------------------------------------------------
+
+// Returns true if a maps/smaps header line is an anonymous executable mapping.
+// Dobby trampolines appear as: "addr-addr r-xp offset 00:00 0 " (no path, dev=00:00)
+static bool isAnonExecMapsLine(const std::string& line) {
+    // perms field starts after first space; index [2] of perms is 'x' if executable
+    size_t sp1 = line.find(' ');
+    if (sp1 == std::string::npos || sp1 + 4 >= line.size()) return false;
+    if (line[sp1 + 3] != 'x') return false;  // not executable
+    // dev field: find the 3rd space — "addr perms offset dev inode [path]"
+    size_t sp2 = line.find(' ', sp1 + 1);
+    size_t sp3 = line.find(' ', sp2 + 1);
+    if (sp3 == std::string::npos) return false;
+    size_t devEnd = line.find(' ', sp3 + 1);
+    if (devEnd == std::string::npos) return false;
+    std::string dev = line.substr(sp3 + 1, devEnd - sp3 - 1);
+    return dev == "00:00";
+}
+
+// Returns true if a maps/smaps header line references a memfd.
+static bool isMemfdMapsLine(const std::string& line) {
+    return line.find("/memfd:") != std::string::npos;
+}
+
+// Returns true if a maps/smaps header line has executable permissions.
+static bool isExecMapsLine(const std::string& line) {
+    size_t sp1 = line.find(' ');
+    if (sp1 == std::string::npos || sp1 + 4 >= line.size()) return false;
+    return line[sp1 + 3] == 'x';
+}
+
+// Returns true if a line looks like a smaps/maps block header (hex addr range).
+static bool isSmapsBlockHeader(const std::string& line) {
+    size_t dash = line.find('-');
+    if (dash == std::string::npos || dash == 0 || dash >= 17) return false;
+    for (size_t i = 0; i < dash; i++) {
+        char c = line[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return false;
+    }
+    return true;
+}
+
+// Filter /proc/self/smaps content:
+//   - Remove entire blocks for anonymous executable mappings (Dobby trampolines)
+//   - Remove entire blocks for memfd mappings
+//   - Zero "Private_Dirty:" in all remaining executable-segment blocks
+static std::string filterSmapsContent(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    std::istringstream iss(raw);
+    std::string line;
+
+    std::string hdr;
+    std::vector<std::string> blk;
+    bool skipBlk   = false;
+    bool execBlk   = false;
+
+    auto flush = [&]() {
+        if (hdr.empty()) return;
+        if (!skipBlk) {
+            out += hdr + '\n';
+            for (const auto& l : blk) {
+                if (execBlk && l.compare(0, 13, "Private_Dirty") == 0) {
+                    // Zero the value; keep the field name and padding intact
+                    size_t colon = l.find(':');
+                    if (colon != std::string::npos)
+                        out += l.substr(0, colon + 1) + "         0 kB\n";
+                    else
+                        out += l + '\n';
+                } else {
+                    out += l + '\n';
+                }
+            }
+        }
+        hdr.clear();
+        blk.clear();
+    };
+
+    while (std::getline(iss, line)) {
+        if (isSmapsBlockHeader(line)) {
+            flush();
+            hdr      = line;
+            skipBlk  = isAnonExecMapsLine(line) || isMemfdMapsLine(line);
+            execBlk  = isExecMapsLine(line);
+        } else {
+            blk.push_back(line);
+        }
+    }
+    flush();
+    return out;
 }
 
 // PR70: Remap module .so memory from file-backed to anonymous.
@@ -758,7 +859,11 @@ FILE* my_fopen(const char* pathname, const char* mode) {
 #define EGL_EXTENSIONS_ENUM 0x3055
 
 const char* my_eglQueryString(void* display, int name) {
-    if (!orig_eglQueryString) return nullptr;
+    if (!orig_eglQueryString) {
+        // Lazy resolve: DobbyHook may have raced with late dlopen of libEGL.so
+        orig_eglQueryString = (const char*(*)(void*,int))dlsym(RTLD_DEFAULT, "eglQueryString");
+        if (!orig_eglQueryString) return nullptr;
+    }
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
         const auto& fp = *fp_ptr;
@@ -798,8 +903,14 @@ const char* my_eglQueryString(void* display, int name) {
 int my_clock_gettime(clockid_t clockid, struct timespec *tp) {
     if (!orig_clock_gettime) return -1;
     int ret = orig_clock_gettime(clockid, tp);
-    // Solo modificamos relojes de uptime de sistema
-    if (ret == 0 && (clockid == CLOCK_BOOTTIME || clockid == CLOCK_MONOTONIC)) {
+    // Solo modificamos CLOCK_BOOTTIME (SystemClock.elapsedRealtime()).
+    // CLOCK_MONOTONIC se usa para vsync/Choreographer — SurfaceFlinger envía
+    // timestamps reales desde su proceso sin hookear, por lo que hookear
+    // CLOCK_MONOTONIC en el proceso de la app genera un desfase de días entre
+    // el timestamp del vsync (real) y System.nanoTime() (hookeado), lo que
+    // hace que Choreographer calcule latencia de 7+ días y nunca renderice
+    // el primer frame (hang silencioso con "Launch timeout expired").
+    if (ret == 0 && clockid == CLOCK_BOOTTIME) {
         // Offset determinista: Base de 3 días (259200s) + hasta 12 días extra según semilla
         long added_uptime_seconds = 259200 + (g_masterSeed % 1036800);
         tp->tv_sec += added_uptime_seconds;
@@ -1160,13 +1271,23 @@ std::string generateMulticoreCpuInfo(const DeviceFingerprint& fp) {
 ssize_t my_readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz) {
     if (!orig_readlinkat) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
-    return orig_readlinkat(dirfd, pathname, buf, bufsiz);
+    ssize_t ret = orig_readlinkat(dirfd, pathname, buf, bufsiz);
+    // Hide memfd file descriptors: /proc/self/fd/N -> /memfd: (deleted)
+    // Detection tools enumerate /proc/self/fd/ and readlink each entry.
+    if (ret > 0 && (size_t)ret < bufsiz && strncmp(buf, "/memfd:", 7) == 0) {
+        errno = ENOENT; return -1;
+    }
+    return ret;
 }
 
 ssize_t my_readlink(const char *pathname, char *buf, size_t bufsiz) {
     if (!orig_readlink) { errno = ENOSYS; return -1; }
     if (isHiddenPath(pathname)) { errno = ENOENT; return -1; }
-    return orig_readlink(pathname, buf, bufsiz);
+    ssize_t ret = orig_readlink(pathname, buf, bufsiz);
+    if (ret > 0 && (size_t)ret < bufsiz && strncmp(buf, "/memfd:", 7) == 0) {
+        errno = ENOENT; return -1;
+    }
+    return ret;
 }
 
 // -----------------------------------------------------------------------------
@@ -1882,8 +2003,9 @@ int my_open(const char *pathname, int flags, mode_t mode) {
             type = PROC_ETH0_MAC;
         }
         // PR70: Also match /proc/<pid>/maps — detection apps bypass /proc/self/ filtering
-        else if (strstr(pathname, "/proc/self/maps") || strstr(pathname, "/proc/self/smaps") ||
-                 isProcPidPath(pathname, "maps") || isProcPidPath(pathname, "smaps")) type = PROC_MAPS;
+        else if (strstr(pathname, "/proc/self/maps") || isProcPidPath(pathname, "maps")) type = PROC_MAPS;
+        // SMAPS: separate handler — zeros Private_Dirty in exec segments, strips anon-exec/memfd blocks
+        else if (strstr(pathname, "/proc/self/smaps") || isProcPidPath(pathname, "smaps")) type = PROC_SMAPS;
         else if (strstr(pathname, "/proc/meminfo")) type = PROC_MEMINFO;
         else if (strstr(pathname, "/proc/modules")) type = PROC_MODULES;
         else if (strstr(pathname, "/proc/self/mounts") || strstr(pathname, "/proc/self/mountinfo") ||
@@ -2134,8 +2256,19 @@ int my_open(const char *pathname, int flags, mode_t mode) {
                     std::istringstream iss(rawFile);
                     std::string line;
                     while (std::getline(iss, line)) {
-                        if (!isHiddenPath(line.c_str())) content += line + "\n";
+                        // Filter: hidden module paths, Dobby anon-exec trampolines, memfd mappings
+                        if (!isHiddenPath(line.c_str()) &&
+                            !isAnonExecMapsLine(line) &&
+                            !isMemfdMapsLine(line))
+                            content += line + "\n";
                     }
+                } else if (type == PROC_SMAPS) {
+                    char tmpBuf[8192];
+                    ssize_t r;
+                    std::string rawFile;
+                    while ((r = orig_read(fd, tmpBuf, sizeof(tmpBuf))) > 0)
+                        rawFile.append(tmpBuf, r);
+                    content = filterSmapsContent(rawFile);
                 } else if (type == PROC_MEMINFO) {
                     char tmpBuf[8192];
                     ssize_t r = orig_read(fd, tmpBuf, sizeof(tmpBuf)-1);
@@ -2786,7 +2919,10 @@ int my_SSL_set_ciphersuites(SSL *ssl, const char *str) {
 #define GL_EXTENSIONS 0x1F03
 
 const GLubyte* my_glGetString(GLenum name) {
-    if (!orig_glGetString) return nullptr;
+    if (!orig_glGetString) {
+        orig_glGetString = (const GLubyte*(*)(GLenum))dlsym(RTLD_DEFAULT, "glGetString");
+        if (!orig_glGetString) return nullptr;
+    }
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (fp_ptr) {
         const auto& fp = *fp_ptr;
@@ -2833,7 +2969,10 @@ const GLubyte* my_glGetString(GLenum name) {
 // Hooks: Vulkan API
 // -----------------------------------------------------------------------------
 void my_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
-    if (!orig_vkGetPhysicalDeviceProperties) return;
+    if (!orig_vkGetPhysicalDeviceProperties) {
+        orig_vkGetPhysicalDeviceProperties = (void(*)(VkPhysicalDevice,VkPhysicalDeviceProperties*))dlsym(RTLD_DEFAULT, "vkGetPhysicalDeviceProperties");
+        if (!orig_vkGetPhysicalDeviceProperties) return;
+    }
     orig_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
     const DeviceFingerprint* fp_ptr = findProfile(g_currentProfileName);
     if (pProperties && fp_ptr) {
