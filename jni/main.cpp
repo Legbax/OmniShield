@@ -4678,10 +4678,19 @@ static double my_Parcel_readDouble(const void* self) {
 // ─────────────────────────────────────────────────────────────────────────────
 static bool writeToReadOnly(void* dst, const void* src, size_t len) {
     int fd = open("/proc/self/mem", O_RDWR);
-    if (fd < 0) return false;
+    if (fd < 0) {
+        LOGE("[PR148] /proc/self/mem open failed: errno=%d", errno);
+        return false;
+    }
     ssize_t written = pwrite(fd, src, len, (off_t)(uintptr_t)dst);
+    int saved_errno = errno;
     close(fd);
-    return (written == (ssize_t)len);
+    if (written != (ssize_t)len) {
+        LOGE("[PR148] /proc/self/mem pwrite failed: dst=%p len=%zu written=%zd errno=%d",
+             dst, len, written, saved_errno);
+        return false;
+    }
+    return true;
 }
 
 static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
@@ -5326,8 +5335,11 @@ static int32_t my_jbbinder_ontransact(void* self, uint32_t code,
                 }
             }
 
-            // PR144: Also scan parcels with provider signature for obfuscated GMS interfaces.
-            bool hasProviderSig = !looksLocation && sz > 128 && hasProviderSignature(raw, sz);
+            // PR148: Restrict provider-sig scan to code=1 (onLocationChanged) only.
+            // onStatusChanged (code=2) and other callbacks embed a provider string but
+            // NO lat/lon doubles — probeProviderValidatedLocation gives false positives there.
+            bool hasProviderSig = !looksLocation && code == TRANSACTION_onLocationChanged
+                                  && sz > 128 && hasProviderSignature(raw, sz);
 
             // PR145: Parcel visualizer for diagnostics
             if (hasProviderSig) {
@@ -5409,12 +5421,16 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                                    const void* data, void* reply, uint32_t flags) {
     if (!orig_bbinder_transact) return 0;
 
-    // PR146: Verify BBinder DobbyHook is active (first 10 calls)
+    // PR148: Verify DobbyHook is active (first 10 calls) + log every onLocationChanged (code=1)
     static std::atomic<int> s_bbCallCount{0};
     int _bbN = s_bbCallCount.fetch_add(1, std::memory_order_relaxed);
-    if (_bbN < 10) {
+    {
         size_t _bbSz = data ? parcel_dataSize(data) : 0;
-        LOGE("[PR146] bbinder_transact called: code=%u sz=%zu call#%d", code, _bbSz, _bbN);
+        if (_bbN < 10) {
+            LOGE("[PR148] bbinder_transact called: code=%u sz=%zu call#%d", code, _bbSz, _bbN);
+        } else if (code == TRANSACTION_onLocationChanged) {
+            LOGE("[PR148] bbinder_transact onLocationChanged: code=1 sz=%zu", _bbSz);
+        }
     }
 
     int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
@@ -5438,8 +5454,11 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
                  token.find("fused") != std::string::npos ||
                  token.find("gnss") != std::string::npos);
 
-            // PR144: Also scan parcels with provider signature for obfuscated GMS interfaces.
-            bool hasProviderSig = !looksLocation && sz > 128 && hasProviderSignature(raw, sz);
+            // PR148: Restrict provider-sig scan to code=1 (onLocationChanged) only.
+            // onStatusChanged (code=2) and other callbacks embed a provider string but
+            // NO lat/lon doubles — probeProviderValidatedLocation gives false positives there.
+            bool hasProviderSig = !looksLocation && code == TRANSACTION_onLocationChanged
+                                  && sz > 128 && hasProviderSignature(raw, sz);
 
             // PR145: Parcel visualizer for diagnostics
             if (hasProviderSig) {
