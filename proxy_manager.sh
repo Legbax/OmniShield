@@ -201,7 +201,9 @@ verify_proxy() {
     # The subshell ( printf; sleep 2 ) keeps stdin open so toybox nc does not exit on
     # stdin-EOF before the server's reply arrives over the network (race condition fix).
     local probe_bytes
-    probe_bytes=$( ( printf '\x05\x01\x00'; sleep 2 ) | nc -w 5 "$proxy_ip" "$PROXY_PORT" 2>/dev/null | wc -c )
+    # Offer both NO_AUTH (0x00) and USERNAME/PASSWORD (0x02) so servers
+    # that require auth still respond instead of dropping the connection.
+    probe_bytes=$( ( printf '\x05\x02\x00\x02'; sleep 2 ) | nc -w 5 "$proxy_ip" "$PROXY_PORT" 2>/dev/null | wc -c )
     if [ "${probe_bytes:-0}" -eq 0 ]; then
         log "ERROR: SOCKS5 probe got no response from $proxy_ip:$PROXY_PORT"
         log "Check: host/port correct? Firewall blocking? Server running?"
