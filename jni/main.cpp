@@ -4611,30 +4611,45 @@ static bool isLocationRequest(const void* data_parcel, uint32_t code) {
            token.find("google.android.gms.location") != std::string::npos;
 }
 
-// PR117: Hook para la lectura de doubles en el Parcel
+// PR117/PR149: Hook para la lectura de doubles en el Parcel
 using fn_Parcel_readDouble = double(*)(const void*);
 static fn_Parcel_readDouble orig_Parcel_readDouble = nullptr;
 
+// PR149: Thread-local state for readDouble spoofing.
+// Set by my_ipc_transact/mutateLocationReply when reply contains a location.
+// Consumed by my_Parcel_readDouble to return spoofed values.
+// This avoids writing to PROT_READ binder mmap (/proc/self/mem → EIO).
+static thread_local const void* tl_spoof_parcel = nullptr;
+static thread_local size_t tl_spoof_lat_off = 0;
+static thread_local size_t tl_spoof_lon_off = 0;
+
 static double my_Parcel_readDouble(const void* self) {
-    double val = orig_Parcel_readDouble(self);
+    if (tl_spoof_parcel == self && orig_Parcel_readDouble) {
+        // Read mDataPos from Parcel+0x20 (AOSP arm64 layout:
+        //   +0x00 vtable, +0x08 mData, +0x10 mDataSize, +0x18 mDataCapacity, +0x20 mDataPos)
+        size_t pos = *reinterpret_cast<const size_t*>(
+            static_cast<const uint8_t*>(self) + 0x20);
 
-    // Solo falseamos si el valor parece una coordenada real y estamos en el scope
-    int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
-    if (latBits != 0 && val != 0.0) {
-        double fakeLat, fakeLon;
+        int64_t latBits = g_cachedLatBits.load(std::memory_order_acquire);
         int64_t lonBits = g_cachedLonBits.load(std::memory_order_acquire);
-        memcpy(&fakeLat, &latBits, 8);
-        memcpy(&fakeLon, &lonBits, 8);
 
-        // Si el valor leído coincide con un rango plausible de tu zona, lo cambiamos
-        // (Esto es un 'envenenamiento por proximidad')
-        if (std::abs(val - fakeLat) > 0.0001 || std::abs(val - fakeLon) > 0.0001) {
-             // Aquí podrías añadir lógica de filtrado extra, pero por ahora
-             // probemos el pulso del log.
-             LOGD("[PR117-PULSE] readDouble intercepted: %.6f", val);
+        if (pos == tl_spoof_lat_off && latBits != 0) {
+            double orig = orig_Parcel_readDouble(self); // advance mDataPos
+            double lat;
+            memcpy(&lat, &latBits, 8);
+            LOGE("[PR149] readDouble spoofed lat: %.6f -> %.6f @ pos=%zu", orig, lat, pos);
+            return lat;
+        }
+        if (pos == tl_spoof_lon_off && lonBits != 0) {
+            double orig = orig_Parcel_readDouble(self); // advance mDataPos
+            double lon;
+            memcpy(&lon, &lonBits, 8);
+            LOGE("[PR149] readDouble spoofed lon: %.6f -> %.6f @ pos=%zu", orig, lon, pos);
+            tl_spoof_parcel = nullptr; // done — clear state
+            return lon;
         }
     }
-    return val;
+    return orig_Parcel_readDouble(self);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4664,34 +4679,6 @@ static double my_Parcel_readDouble(const void* self) {
 //    latOffset = base + providerBytes + 20 + (bit8 ? 8 : 0)
 //
 // Valida lat/lon antes de escribir para evitar corromper parcels que no son Location.
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PR147: Write to PROT_READ memory via /proc/self/mem.
-//
-// Reply Parcel data lives in the Binder mmap region (PROT_READ only).
-// The kernel marks this VMA with ~VM_MAYWRITE, so mprotect(PROT_WRITE) fails.
-// Shadow buffer pointer swap breaks Parcel lifecycle: freeBuffer() sends
-// BC_FREE_BUFFER to kernel with the swapped heap pointer → SIGABRT or leak.
-//
-// /proc/self/mem uses access_process_vm() with FOLL_FORCE, which ignores
-// page protection. This lets us write in-place without pointer swaps.
-// ─────────────────────────────────────────────────────────────────────────────
-static bool writeToReadOnly(void* dst, const void* src, size_t len) {
-    int fd = open("/proc/self/mem", O_RDWR);
-    if (fd < 0) {
-        LOGE("[PR148] /proc/self/mem open failed: errno=%d", errno);
-        return false;
-    }
-    ssize_t written = pwrite(fd, src, len, (off_t)(uintptr_t)dst);
-    int saved_errno = errno;
-    close(fd);
-    if (written != (ssize_t)len) {
-        LOGE("[PR148] /proc/self/mem pwrite failed: dst=%p len=%zu written=%zd errno=%d",
-             dst, len, written, saved_errno);
-        return false;
-    }
-    return true;
-}
 
 static bool mutateLocationInBuffer(uint8_t* buf, size_t sz,
                                    size_t base_offset, double lat, double lon) {
@@ -4961,6 +4948,9 @@ static bool mutateLocationByDopplerScan(uint8_t* buf, size_t sz,
 // (SafeParcelable-wrapped Location objects with different header layout).
 // PR146: Reply Parcel data is in Binder mmap (PROT_READ only).
 // Must use shadow buffer to mutate — writing directly causes SEGV_ACCERR.
+// PR149: Arms the readDouble hook to spoof lat/lon for AOSP reply parcels.
+// Scans a writable copy to find offsets, then stores them in thread-local.
+// No writes to PROT_READ binder mmap. Spoofing happens at read-time.
 static void mutateLocationReply(void* reply) {
     if (!reply) return;
     size_t sz = parcel_dataSize(reply);
@@ -4974,91 +4964,51 @@ static void mutateLocationReply(void* reply) {
     memcpy(&lat, &latBits, 8);
     memcpy(&lon, &lonBits, 8);
 
-    // Get raw mData pointer (read-only Binder mmap)
     uint8_t* raw = *reinterpret_cast<uint8_t**>(
         static_cast<uint8_t*>(reply) + 0x08);
     if (!raw) return;
 
-    // PR147: Scan on a read-only copy to find lat/lon offsets,
-    // then write spoofed values via /proc/self/mem (bypasses PROT_READ).
-    // No pointer swap → no freeBuffer/BC_FREE_BUFFER conflict.
     uint8_t* scan = new uint8_t[sz];
     memcpy(scan, raw, sz);
 
-    // findLocationOffsets: scan the copy to find where lat/lon are,
-    // then write to original via /proc/self/mem.
-    bool mutated = false;
-
-    // 1) Try AOSP ILocationManager fixed-offset format (base=12)
-    if (mutateLocationInBuffer(scan, sz, 12, lat, lon)) {
-        // mutateLocationInBuffer found and wrote lat/lon in the copy at some offsets.
-        // We need to find those offsets. Since we know the function writes lat then lon
-        // at specific locations, scan for our spoofed values in the copy.
+    // Helper lambda: scan copy for spoofed values, arm readDouble thread-local
+    auto armIfFound = [&](const char* tag) -> bool {
         for (size_t off = 0; off + 16 <= sz; off += 4) {
             double v1, v2;
             memcpy(&v1, scan + off, 8);
             memcpy(&v2, scan + off + 8, 8);
             if (v1 == lat && v2 == lon) {
-                if (writeToReadOnly(raw + off, &lat, 8) &&
-                    writeToReadOnly(raw + off + 8, &lon, 8)) {
-                    LOGD("[PR147] Location reply mutated (AOSP@12→%zu): lat=%.6f lon=%.6f",
-                         off, lat, lon);
-                    mutated = true;
-                } else {
-                    LOGE("[PR147] /proc/self/mem write FAILED for reply (AOSP@12)");
-                }
-                break;
+                tl_spoof_parcel = reply;
+                tl_spoof_lat_off = off;
+                tl_spoof_lon_off = off + 8;
+                LOGE("[PR149] AOSP reply spoof armed (%s): parcel=%p lat@%zu lon@%zu",
+                     tag, reply, off, off + 8);
+                return true;
             }
         }
+        return false;
+    };
+
+    // 1) AOSP fixed-offset (base=12)
+    if (mutateLocationInBuffer(scan, sz, 12, lat, lon) && armIfFound("AOSP@12")) {
+        delete[] scan;
+        return;
     }
 
-    // 2) Doppler scan fallback
-    if (!mutated) {
-        // Reset scan copy
-        memcpy(scan, raw, sz);
-        size_t dopplerOffset = 0;
-        if (mutateLocationByDopplerScan(scan, sz, lat, lon, dopplerOffset)) {
-            for (size_t off = 0; off + 16 <= sz; off += 4) {
-                double v1, v2;
-                memcpy(&v1, scan + off, 8);
-                memcpy(&v2, scan + off + 8, 8);
-                if (v1 == lat && v2 == lon) {
-                    if (writeToReadOnly(raw + off, &lat, 8) &&
-                        writeToReadOnly(raw + off + 8, &lon, 8)) {
-                        LOGD("[PR147] Location reply mutated (Doppler@%zu→%zu): lat=%.6f lon=%.6f",
-                             dopplerOffset, off, lat, lon);
-                        mutated = true;
-                    } else {
-                        LOGE("[PR147] /proc/self/mem write FAILED for reply (Doppler)");
-                    }
-                    break;
-                }
-            }
-        }
+    // 2) Doppler scan
+    memcpy(scan, raw, sz);
+    size_t dopplerOff = 0;
+    if (mutateLocationByDopplerScan(scan, sz, lat, lon, dopplerOff) && armIfFound("Doppler")) {
+        delete[] scan;
+        return;
     }
 
     // 3) Provider-validated scan
-    if (!mutated) {
-        memcpy(scan, raw, sz);
-        size_t probeOffset = 0;
-        if (probeProviderValidatedLocation(scan, sz, lat, lon, probeOffset)) {
-            for (size_t off = 0; off + 16 <= sz; off += 4) {
-                double v1, v2;
-                memcpy(&v1, scan + off, 8);
-                memcpy(&v2, scan + off + 8, 8);
-                if (v1 == lat && v2 == lon) {
-                    if (writeToReadOnly(raw + off, &lat, 8) &&
-                        writeToReadOnly(raw + off + 8, &lon, 8)) {
-                        LOGE("[PR147] Location reply mutated (probe@%zu→%zu): lat=%.6f lon=%.6f",
-                             probeOffset, off, lat, lon);
-                        mutated = true;
-                    } else {
-                        LOGE("[PR147] /proc/self/mem write FAILED for reply (probe)");
-                    }
-                    break;
-                }
-            }
-        }
+    memcpy(scan, raw, sz);
+    size_t probeOff = 0;
+    if (probeProviderValidatedLocation(scan, sz, lat, lon, probeOff) && armIfFound("probe")) {
+        delete[] scan;
+        return;
     }
 
     delete[] scan;
@@ -5193,9 +5143,9 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
         mutateLocationReply(reply);
     }
 
-    // PR147: Reply-side fallback for obfuscated GMS interfaces.
-    // Uses /proc/self/mem to write in-place to PROT_READ Binder mmap.
-    // No pointer swap → no freeBuffer/BC_FREE_BUFFER conflict.
+    // PR149: Reply-side location interception via readDouble hook.
+    // Binder mmap is not writable (/proc/self/mem → EIO, mprotect → ~VM_MAYWRITE).
+    // Instead of writing, we arm the Parcel::readDouble hook to spoof values at read-time.
     if (!isAospLoc && !isGmsLoc && status == 0 && reply
         && (latBits != 0 || lonBits != 0)) {
         size_t replySz = parcel_dataSize(reply);
@@ -5203,8 +5153,6 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
             uint8_t* replyRaw = *reinterpret_cast<uint8_t**>(
                 static_cast<uint8_t*>(reply) + 0x08);
             if (replyRaw && hasProviderSignature(replyRaw, replySz)) {
-                visualizeLocationParcel(replyRaw, replySz, "ipc-reply", code);
-
                 // Scan on writable copy to find lat/lon offset
                 uint8_t* scan = new uint8_t[replySz];
                 memcpy(scan, replyRaw, replySz);
@@ -5215,21 +5163,16 @@ static int32_t my_ipc_transact(void* self, int32_t handle, uint32_t code,
 
                 size_t probeOff = 0;
                 if (probeProviderValidatedLocation(scan, replySz, rLat, rLon, probeOff)) {
-                    // Find where the spoofed values were written in the copy
-                    bool written = false;
                     for (size_t off = 0; off + 16 <= replySz; off += 4) {
                         double v1, v2;
                         memcpy(&v1, scan + off, 8);
                         memcpy(&v2, scan + off + 8, 8);
                         if (v1 == rLat && v2 == rLon) {
-                            if (writeToReadOnly(replyRaw + off, &rLat, 8) &&
-                                writeToReadOnly(replyRaw + off + 8, &rLon, 8)) {
-                                LOGE("[PR147] ipc reply mutated: handle=%d code=%u probe@%zu→%zu lat=%.6f lon=%.6f",
-                                     handle, code, probeOff, off, rLat, rLon);
-                                written = true;
-                            } else {
-                                LOGE("[PR147] /proc/self/mem write FAILED for ipc reply");
-                            }
+                            tl_spoof_parcel = reply;
+                            tl_spoof_lat_off = off;
+                            tl_spoof_lon_off = off + 8;
+                            LOGE("[PR149] ipc reply spoof armed: handle=%d code=%u parcel=%p lat@%zu lon@%zu",
+                                 handle, code, reply, off, off + 8);
                             break;
                         }
                     }
@@ -5459,6 +5402,16 @@ static int32_t my_bbinder_transact(void* self, uint32_t code,
             // NO lat/lon doubles — probeProviderValidatedLocation gives false positives there.
             bool hasProviderSig = !looksLocation && code == TRANSACTION_onLocationChanged
                                   && sz > 128 && hasProviderSignature(raw, sz);
+
+            // PR149: Diagnostic — log token + match result for code=1 parcels
+            if (code == TRANSACTION_onLocationChanged && sz >= 200) {
+                static std::atomic<int> s_diag149{0};
+                int _d = s_diag149.fetch_add(1, std::memory_order_relaxed);
+                if (_d < 5) {
+                    LOGE("[PR149] bbinder code=1 token='%s' looksLoc=%d provSig=%d sz=%zu hasToken=%d",
+                         token.c_str(), (int)looksLocation, (int)hasProviderSig, sz, (int)hasToken);
+                }
+            }
 
             // PR145: Parcel visualizer for diagnostics
             if (hasProviderSig) {
@@ -5837,6 +5790,19 @@ static void applyBinderHooks() {
     } else {
         LOGE("[PR105] IPCThreadState::transact UNRESOLVED");
     }
+
+    // PR149: Hook Parcel::readDouble for reply-side location spoofing.
+    // Binder mmap is PROT_READ with ~VM_MAYWRITE, so we can't write to reply buffers.
+    // Instead, we intercept readDouble and return spoofed values when armed.
+    void* symRD = resolveLibbinderSymbol("_ZNK7android6Parcel10readDoubleEv");
+    if (symRD) {
+        int rcRD = DobbyHook(symRD, (void*)my_Parcel_readDouble, (void**)&orig_Parcel_readDouble);
+        LOGE("[PR149] Parcel::readDouble hook %s @ %p (orig=%p)",
+             rcRD == 0 ? "OK" : "FAILED", symRD, (void*)orig_Parcel_readDouble);
+    } else {
+        LOGE("[PR149] Parcel::readDouble symbol not found in libbinder.so");
+    }
+
     applyBBinderHook();
 }
 // ─────────────────────────────────────────────────────────────────────────────
