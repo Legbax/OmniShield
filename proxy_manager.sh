@@ -82,6 +82,11 @@ read_config() {
     SCOPED_APPS=$(grep "^scoped_apps=" "$CONFIG" | cut -d'=' -f2- | tr -d '\r\n')
 
     [ -z "$PROXY_DNS" ] && PROXY_DNS="$DEFAULT_DNS"
+
+    # Debug: log parsed values (mask password)
+    local masked_pass="(empty)"
+    [ -n "$PROXY_PASS" ] && masked_pass="${PROXY_PASS%${PROXY_PASS#???}}***"
+    log "Config parsed: host='$PROXY_HOST' port='$PROXY_PORT' user='$PROXY_USER' pass='$masked_pass' dns='$PROXY_DNS'"
 }
 
 # ─── Resolve package name → Linux UID ─────────────────────────────────

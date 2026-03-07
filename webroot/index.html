@@ -655,22 +655,22 @@
             <div class="input-row">
               <div style="flex:3">
                 <div class="input-label">Host / IP</div>
-                <input id="proxy-host" class="input" type="text" placeholder="proxy.example.com">
+                <input id="proxy-host" class="input" type="text" placeholder="proxy.example.com" autocomplete="off" autocorrect="off" spellcheck="false" inputmode="url">
               </div>
               <div style="flex:1">
                 <div class="input-label">Port</div>
-                <input id="proxy-port" class="input" type="number" placeholder="1080">
+                <input id="proxy-port" class="input" type="number" placeholder="1080" autocomplete="off">
               </div>
             </div>
             <div class="input-row">
               <div style="flex:1">
                 <div class="input-label">Username (optional)</div>
-                <input id="proxy-user" class="input" type="text" placeholder="user">
+                <input id="proxy-user" class="input" type="text" placeholder="user" autocomplete="new-password" autocorrect="off" spellcheck="false">
               </div>
               <div style="flex:1">
                 <div class="input-label">Password (optional)</div>
                 <div style="position:relative">
-                  <input id="proxy-pass" class="input" type="password" placeholder="pass" style="padding-right:36px">
+                  <input id="proxy-pass" class="input" type="password" placeholder="pass" style="padding-right:36px" autocomplete="new-password">
                   <button type="button" class="btn-icon pass-toggle" onclick="togglePassVisibility()" title="Show/hide password" style="position:absolute;right:4px;top:50%;transform:translateY(-50%)">
                     <svg id="pass-eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                   </button>
@@ -679,7 +679,7 @@
             </div>
             <div class="input-group">
               <div class="input-label">DNS Server (optional)</div>
-              <input id="proxy-dns" class="input" type="text" placeholder="8.8.8.8 (default)">
+              <input id="proxy-dns" class="input" type="text" placeholder="8.8.8.8 (default)" autocomplete="off" autocorrect="off" spellcheck="false">
               <div class="text-sm" style="margin-top:4px;opacity:.6">Overrides ISP DNS to prevent location leaks</div>
             </div>
             <div class="btn-row">
